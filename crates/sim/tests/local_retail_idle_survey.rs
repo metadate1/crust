@@ -5399,6 +5399,28 @@ impl LostCityCompletionRouteController {
             }
             13 => {
                 self.return_tick = self.return_tick.saturating_add(1);
+                if self.zero_recovery_carry
+                    && self.return_tick > 20
+                    && let Some(player) = player
+                    && player.status_a & 1 != 0
+                    && player.translation[0] >= 14_700_000
+                {
+                    const THIRD_WALL_EXIT_Z: i32 = 199_936;
+                    const DEPTH_TOLERANCE: u32 = 1_024;
+                    if player.velocity[2] < 0 {
+                        return PAD_DOWN;
+                    }
+                    if player.velocity[2] > 0 {
+                        return PAD_UP;
+                    }
+                    if player.translation[2].abs_diff(THIRD_WALL_EXIT_Z) > DEPTH_TOLERANCE {
+                        return if player.translation[2] > THIRD_WALL_EXIT_Z {
+                            PAD_UP
+                        } else {
+                            PAD_DOWN
+                        };
+                    }
+                }
                 if self.return_tick > 12
                     && player.is_some_and(|player| {
                         player.status_a & 1 != 0 && player.translation[0] < 14_700_000
@@ -5681,7 +5703,7 @@ impl LostCityCompletionRouteController {
                 }
                 return PAD_LEFT
                     | PAD_CROSS
-                    | if (2..=3).contains(&self.return_tick) {
+                    | if !self.zero_recovery_carry && (2..=3).contains(&self.return_tick) {
                         PAD_SQUARE
                     } else {
                         0
@@ -5689,6 +5711,15 @@ impl LostCityCompletionRouteController {
             }
             36 => {
                 if self.zero_recovery_carry {
+                    if player.is_some_and(|player| {
+                        player.state == 14
+                            && player.status_a & 1 == 0
+                            && player.translation[0] <= 9_500_000
+                    }) {
+                        self.return_stage = 37;
+                        self.return_tick = 1;
+                        return PAD_LEFT | PAD_CROSS;
+                    }
                     if player_collider_entity == Some(140)
                         && player.is_some_and(|player| player.translation[0] <= 9_360_000)
                     {
@@ -6080,6 +6111,7 @@ impl LostCityCompletionRouteController {
                 self.return_tick = 0;
             }
             60 => {
+                self.return_tick = self.return_tick.wrapping_add(1);
                 let Some(player) = player else {
                     return 0;
                 };
@@ -6088,9 +6120,35 @@ impl LostCityCompletionRouteController {
                     self.return_tick = 1;
                     return PAD_LEFT | PAD_CROSS;
                 }
-                if player.translation[0] < 3_950_000 {
-                    return PAD_LEFT | if frame % 18 < 4 { PAD_SQUARE } else { 0 };
+                let jump_phase = self.return_tick.wrapping_add(15) % 24;
+                let spin_phase = self.return_tick.wrapping_add(9) % 18;
+                let platform_hold_x = match self.return_tick {
+                    20..=40 => Some(4_437_296),
+                    61..=70 => Some(4_027_696),
+                    _ => None,
+                };
+                if self.zero_recovery_carry
+                    && let Some(target_x) = platform_hold_x
+                {
+                    let predicted_x = player.translation[0]
+                        .saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                    let lateral = if predicted_x < target_x - 8_192 {
+                        PAD_RIGHT
+                    } else if predicted_x > target_x + 8_192 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                    return lateral
+                        | if jump_phase < 12 { PAD_CROSS } else { 0 }
+                        | if spin_phase < 4 { PAD_SQUARE } else { 0 };
                 }
+                if player.translation[0] < 3_950_000 {
+                    return PAD_LEFT | if spin_phase < 4 { PAD_SQUARE } else { 0 };
+                }
+                return PAD_LEFT
+                    | if jump_phase < 12 { PAD_CROSS } else { 0 }
+                    | if spin_phase < 4 { PAD_SQUARE } else { 0 };
             }
             61 => {
                 self.return_tick = self.return_tick.saturating_add(1);
@@ -6237,11 +6295,14 @@ struct LostCityExactCarryRouteController {
     first_wall_train_seen: bool,
     b3_checkpoint_seen: bool,
     b3_transfer_jump_started: bool,
+    adaptive_checkpoint_capture: bool,
     first_orbit_runup: u8,
     second_orbit_capture_armed: bool,
     second_orbit_landed: bool,
     second_wall_train_seen: bool,
     third_wall_train_seen: bool,
+    stage41_enemy_phase: u8,
+    stage45_launch_ready: bool,
     ascent_slab_rearmed: bool,
     return_route: LostCityCompletionRouteController,
 }
@@ -6385,7 +6446,22 @@ impl LostCityExactCarryRouteController {
         }
         if self.opening_stage == 8 {
             let direction = PAD_RIGHT | alcove_lane;
-            let spin = if self.tick % 18 < 4 { PAD_SQUARE } else { 0 };
+            let enemy_in_spin_range = self.adaptive_checkpoint_capture
+                && route_objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 85
+                                && descriptor.executable == 47
+                                && descriptor.subtype == 1
+                    ) && object.translation[0].abs_diff(player.translation[0]) <= 400_000
+                        && object.translation[2].abs_diff(player.translation[2]) <= 180_000
+                });
+            let spin = if self.tick % 18 < 4 || (enemy_in_spin_range && self.tick % 6 < 3) {
+                PAD_SQUARE
+            } else {
+                0
+            };
             if self.jump_hold != 0 {
                 self.jump_hold -= 1;
                 if self.jump_hold == 0 {
@@ -6504,6 +6580,47 @@ impl LostCityExactCarryRouteController {
             self.jump_hold = 24;
             self.jump_release = 0;
         }
+        let b3_checkpoint_bound = route_objects.iter().find_map(|object| {
+            if matches!(
+                object.origin,
+                ObjectOrigin::Entity(descriptor) if descriptor.id == 64
+            ) && object.state == 11
+            {
+                object.frame_bound
+            } else {
+                None
+            }
+        });
+        if self.opening_stage == 16
+            && self.adaptive_checkpoint_capture
+            && !self.b3_checkpoint_seen
+            && player.translation[0] >= 11_300_000
+            && let Some(bound) = b3_checkpoint_bound
+        {
+            // The checkpoint crate's phase depends on the uninterrupted
+            // campaign RNG.  Approach it from live bounds and make a fresh
+            // Square edge after landing instead of assuming the older
+            // airborne spin cadence will intersect it.
+            if player.status_a & 1 == 0 {
+                return 0;
+            }
+            let checkpoint_x = bound.min.x.saturating_add(bound.max.x) / 2;
+            let checkpoint_z = bound.min.z.saturating_add(bound.max.z) / 2;
+            let mut held = 0;
+            if player.translation[0] > checkpoint_x + 24_000 || player.velocity[0] > 70_000 {
+                held |= PAD_LEFT;
+            } else if player.translation[0] < checkpoint_x - 24_000 || player.velocity[0] < -70_000
+            {
+                held |= PAD_RIGHT;
+            }
+            if player.translation[2] > checkpoint_z + 12_000 || player.velocity[2] > 70_000 {
+                held |= PAD_UP;
+            } else if player.translation[2] < checkpoint_z - 12_000 || player.velocity[2] < -70_000
+            {
+                held |= PAD_DOWN;
+            }
+            return if held == 0 { PAD_SQUARE } else { held };
+        }
         if self.opening_stage == 16
             && self.b3_checkpoint_seen
             && !self.b3_transfer_jump_started
@@ -6516,7 +6633,11 @@ impl LostCityExactCarryRouteController {
                 return PAD_RIGHT;
             }
             self.b3_transfer_jump_started = true;
-            self.jump_hold = 11;
+            self.jump_hold = if self.adaptive_checkpoint_capture {
+                16
+            } else {
+                11
+            };
             return PAD_RIGHT | PAD_CROSS;
         }
         if self.opening_stage == 16 && player.translation[0] >= 13_000_000 {
@@ -6531,22 +6652,93 @@ impl LostCityExactCarryRouteController {
                 self.jump_release = 0;
                 return PAD_RIGHT;
             }
-            return PAD_RIGHT;
+            if !self.adaptive_checkpoint_capture {
+                return PAD_RIGHT;
+            }
+            let platform_center_x = route_objects
+                .iter()
+                .find_map(|object| {
+                    if matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 68
+                    ) {
+                        object.frame_bound.or(object.bound)
+                    } else {
+                        None
+                    }
+                })
+                .map_or(13_414_400, |bound| {
+                    bound.min.x.saturating_add(bound.max.x) / 2
+                });
+            let platform_direction = if player.translation[0] < platform_center_x - 80_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > platform_center_x + 80_000
+                || player.velocity[0] > 70_000
+            {
+                PAD_LEFT
+            } else if player.velocity[0] < -70_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if self.jump_hold != 0 {
+                self.jump_hold -= 1;
+                if self.jump_hold == 0 {
+                    self.jump_release = 4;
+                }
+                return platform_direction | PAD_CROSS;
+            }
+            if self.jump_release != 0 {
+                self.jump_release -= 1;
+                return platform_direction;
+            }
+            if player.status_a & 1 != 0 && player.translation[0] >= 13_050_000 {
+                self.jump_hold = 11;
+                return platform_direction | PAD_CROSS;
+            }
+            return platform_direction;
         }
+        let platform_68_launch_x = if self.adaptive_checkpoint_capture {
+            route_objects
+                .iter()
+                .find_map(|object| {
+                    if matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 68
+                    ) {
+                        object.frame_bound.or(object.bound)
+                    } else {
+                        None
+                    }
+                })
+                .map_or(13_492_000, |bound| bound.max.x.saturating_sub(24_000))
+        } else {
+            13_390_000
+        };
         if self.opening_stage == 18
             && player.status_a & 1 != 0
             && player_collider_entity == Some(68)
-            && player.translation[0] >= 13_390_000
+            && player.translation[0] >= platform_68_launch_x
         {
             self.opening_stage = 19;
-            self.jump_hold = 8;
+            self.jump_hold = if self.adaptive_checkpoint_capture {
+                16
+            } else {
+                8
+            };
             self.jump_release = 0;
             return PAD_RIGHT | PAD_CROSS;
         }
         if self.opening_stage == 18 {
-            let direction = if player.translation[0] < 13_390_000 {
+            let direction = if player.translation[0] < platform_68_launch_x {
                 PAD_RIGHT
-            } else if player.translation[0] > 13_440_000 {
+            } else if player.translation[0]
+                > if self.adaptive_checkpoint_capture {
+                    platform_68_launch_x + 24_000
+                } else {
+                    13_440_000
+                }
+            {
                 PAD_LEFT
             } else {
                 0
@@ -6570,7 +6762,34 @@ impl LostCityExactCarryRouteController {
                 self.jump_release = 0;
                 return PAD_RIGHT | PAD_CROSS;
             }
-            let direction = if player.translation[0] < 13_900_000 {
+            let platform_center_x = route_objects
+                .iter()
+                .find_map(|object| {
+                    if matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 69
+                    ) {
+                        object.frame_bound.or(object.bound)
+                    } else {
+                        None
+                    }
+                })
+                .map_or(13_926_400, |bound| {
+                    bound.min.x.saturating_add(bound.max.x) / 2
+                });
+            let direction = if self.adaptive_checkpoint_capture {
+                if player.translation[0] < platform_center_x - 80_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > platform_center_x + 80_000
+                    || player.velocity[0] > 70_000
+                {
+                    PAD_LEFT
+                } else if player.velocity[0] < -70_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                }
+            } else if player.translation[0] < 13_900_000 {
                 PAD_RIGHT
             } else if player.translation[0] > 13_950_000 {
                 PAD_LEFT
@@ -6875,6 +7094,11 @@ impl LostCityExactCarryRouteController {
                     && (-8_320_000..=-8_260_000).contains(&object.translation[1])
             });
             let takeoff_clear = route_objects.iter().all(|object| {
+                let trailing_cutoff = if self.adaptive_checkpoint_capture {
+                    player.translation[0].saturating_sub(80_000)
+                } else {
+                    16_400_000
+                };
                 !matches!(
                     object.origin,
                     ObjectOrigin::Runtime {
@@ -6882,12 +7106,87 @@ impl LostCityExactCarryRouteController {
                         subtype: 11
                     }
                 ) || object.frame_bound.is_none_or(|bound| {
-                    bound.max.x < 16_400_000
+                    bound.max.x < trailing_cutoff
                         || bound.min.x > 16_650_000
                         || bound.max.z < player.translation[2] - 80_000
                         || bound.min.z > player.translation[2] + 80_000
                 })
             });
+            let adaptive_orbit_target = self
+                .adaptive_checkpoint_capture
+                .then(|| {
+                    route_objects
+                        .iter()
+                        .filter_map(|object| {
+                            if matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 46,
+                                    subtype: 1
+                                }
+                            ) {
+                                object
+                                    .frame_bound
+                                    .or(object.bound)
+                                    .map(|bound| (object.translation, bound))
+                            } else {
+                                None
+                            }
+                        })
+                        .filter(|(_, bound)| {
+                            bound.min.x > player.translation[0] + 250_000
+                                && bound.min.x <= player.translation[0] + 950_000
+                                && player.translation[1].abs_diff(bound.max.y) <= 350_000
+                        })
+                        .min_by_key(|(_, bound)| {
+                            player.translation[1].abs_diff(bound.max.y)
+                                + player.translation[0].abs_diff(bound.min.x)
+                        })
+                })
+                .flatten();
+            if let Some((translation, _bound)) = adaptive_orbit_target {
+                let target_z = translation[2];
+                let horizontal_brake =
+                    if player.translation[0] > 16_440_000 || player.velocity[0] > 0 {
+                        PAD_LEFT
+                    } else if player.translation[0] < 16_400_000 || player.velocity[0] < 0 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                let lane = if player.translation[2] > target_z + 16_000
+                    || player.velocity[2] > 70_000
+                {
+                    PAD_UP
+                } else if player.translation[2] < target_z - 16_000 || player.velocity[2] < -70_000
+                {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                if player.translation[2].abs_diff(target_z) > 24_000
+                    || player.velocity[2].unsigned_abs() > 70_000
+                {
+                    return horizontal_brake | lane;
+                }
+                if self.first_orbit_runup == 0 {
+                    self.first_orbit_runup = 1;
+                    return PAD_RIGHT;
+                }
+                if player.status_a & 1 != 0 && takeoff_clear && player.translation[0] <= 16_620_000
+                {
+                    self.first_orbit_runup = 0;
+                    self.opening_stage = 31;
+                    self.jump_hold = 24;
+                    self.jump_release = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return if player.translation[0] > 16_600_000 {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
+            }
             if self.first_orbit_runup != 0 {
                 if takeoff_clear && player.translation[0] <= 16_560_000 {
                     self.first_orbit_runup = 0;
@@ -7232,11 +7531,46 @@ impl LostCityExactCarryRouteController {
             return horizontal_brake | lane;
         }
         if self.opening_stage == 38 {
+            let crossing_hazard = if self.adaptive_checkpoint_capture {
+                route_objects
+                    .iter()
+                    .find_map(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor)
+                                if descriptor.id == 81
+                                    && descriptor.executable == 46
+                                    && descriptor.subtype == 5
+                        )
+                        .then_some(object.frame_bound.or(object.bound))
+                        .flatten()
+                    })
+                    .is_some_and(|bound| {
+                        player.translation[0] < 19_580_000
+                            && player.translation[0].saturating_add(220_000) >= bound.min.x
+                            && player.translation[0] <= bound.max.x
+                    })
+            } else {
+                false
+            };
             if player.status_a & 1 != 0 && player.translation[0] >= 19_580_000 {
                 self.opening_stage = 40;
-                self.jump_hold = 16;
+                self.jump_hold = if self.adaptive_checkpoint_capture {
+                    0
+                } else {
+                    16
+                };
                 self.jump_release = 0;
-                return PAD_RIGHT | PAD_UP | PAD_CROSS;
+                return if self.adaptive_checkpoint_capture {
+                    PAD_LEFT | PAD_UP
+                } else {
+                    PAD_RIGHT | PAD_UP | PAD_CROSS
+                };
+            }
+            if crossing_hazard && player.status_a & 1 != 0 && self.jump_hold == 0 {
+                self.jump_hold = 8;
+                self.jump_release = 0;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
             }
             if self.jump_hold != 0 {
                 self.jump_hold -= 1;
@@ -7269,7 +7603,30 @@ impl LostCityExactCarryRouteController {
             if third_wall_train_in_corridor {
                 self.third_wall_train_seen = true;
             }
-            let lane = if player.translation[2] < BRIDGE_PLATFORM_Z - 20_000
+            let adaptive_launch_clear = !self.adaptive_checkpoint_capture
+                || route_objects.iter().all(|object| {
+                    !matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 42,
+                            subtype: 11
+                        }
+                    ) || object.frame_bound.is_none_or(|bound| {
+                        bound.max.x < player.translation[0].saturating_sub(80_000)
+                            || bound.min.x > 20_650_000
+                            || bound.max.z < BRIDGE_PLATFORM_Z - 80_000
+                            || bound.min.z > BRIDGE_PLATFORM_Z + 80_000
+                    })
+                });
+            let lane = if self.adaptive_checkpoint_capture {
+                if player.translation[2] < BRIDGE_PLATFORM_Z - 20_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > BRIDGE_PLATFORM_Z + 20_000 {
+                    PAD_UP
+                } else {
+                    0
+                }
+            } else if player.translation[2] < BRIDGE_PLATFORM_Z - 20_000
                 || player.velocity[2] < -50_000
             {
                 PAD_DOWN
@@ -7282,8 +7639,11 @@ impl LostCityExactCarryRouteController {
             };
             if self.third_wall_train_seen
                 && !third_wall_train_in_corridor
+                && adaptive_launch_clear
                 && player.status_a & 1 != 0
                 && (19_650_000..=19_900_000).contains(&player.translation[0])
+                && (!self.adaptive_checkpoint_capture
+                    || player.translation[2].abs_diff(BRIDGE_PLATFORM_Z) <= 30_000)
             {
                 self.opening_stage = 41;
                 self.jump_hold = 32;
@@ -7314,6 +7674,46 @@ impl LostCityExactCarryRouteController {
         if self.opening_stage == 41 {
             const ASCENT_START: [i32; 3] = [24_023_616, -8_294_156, 74_880];
             const BRIDGE_PLATFORM_Z: i32 = 204_544;
+            let stage_enemy_active = self.adaptive_checkpoint_capture
+                && route_objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 85
+                                && descriptor.executable == 47
+                                && descriptor.subtype == 1
+                    ) && object.frame_bound.is_some()
+                });
+            if stage_enemy_active && player.translation[0] >= 21_400_000 {
+                self.stage41_enemy_phase = self.stage41_enemy_phase.saturating_add(1).min(18);
+                let attack_active = (4..=11).contains(&self.stage41_enemy_phase);
+                let horizontal = if attack_active {
+                    PAD_RIGHT
+                } else if player.translation[0] > 21_750_000 {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
+                let lane = if player.translation[2] < 330_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 370_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                let attack = if attack_active {
+                    PAD_CROSS | PAD_SQUARE
+                } else {
+                    0
+                };
+                if self.stage41_enemy_phase == 18 {
+                    self.stage41_enemy_phase = 0;
+                }
+                return horizontal | lane | attack;
+            }
+            if !stage_enemy_active {
+                self.stage41_enemy_phase = 0;
+            }
             if player.translation[0] >= 23_450_000 {
                 self.opening_stage = 42;
                 self.jump_hold = 0;
@@ -7358,7 +7758,11 @@ impl LostCityExactCarryRouteController {
                 return PAD_RIGHT | lane | spin;
             }
             if player.status_a & 1 != 0 {
-                self.jump_hold = 16;
+                self.jump_hold = if self.adaptive_checkpoint_capture {
+                    24
+                } else {
+                    16
+                };
                 return PAD_RIGHT | PAD_CROSS | lane | spin;
             }
             return PAD_RIGHT | lane | spin;
@@ -7500,8 +7904,26 @@ impl LostCityExactCarryRouteController {
                 self.jump_hold = 0;
                 return 0;
             }
+            if self.adaptive_checkpoint_capture && !self.stage45_launch_ready {
+                let launch_platform_aligned = route_objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 46,
+                            subtype: 9
+                        }
+                    ) && object.frame_bound.is_some()
+                        && (24_270_000..=24_320_000).contains(&object.translation[0])
+                        && (-6_660_000..=-6_600_000).contains(&object.translation[1])
+                });
+                if !launch_platform_aligned {
+                    return 0;
+                }
+                self.stage45_launch_ready = true;
+                self.jump_hold = 1;
+            }
             const LANDING_SETTLE_FRAMES: u8 = 39;
-            if self.wall_jump_wait < LANDING_SETTLE_FRAMES {
+            if !self.adaptive_checkpoint_capture && self.wall_jump_wait < LANDING_SETTLE_FRAMES {
                 self.wall_jump_wait = self.wall_jump_wait.saturating_add(1);
                 return 0;
             }
@@ -13911,6 +14333,37 @@ impl RollingStonesRouteController {
                 self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
                 return PAD_UP | PAD_CROSS;
             }
+            if self.exact_campaign_phase
+                && self.exact_zero_x_late_platform_phase
+                && camera.path.zone == zero_y
+                && camera.path.index == 1
+                && let Some(player) = player
+                && player.status_a & 1 != 0
+                && matches!(player.state, 1 | 2 | 10)
+                && let Some(platform_bound) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 82
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                                && object.state == 8
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && (0..=350_000)
+                    .contains(&player.translation[2].saturating_sub(platform_bound.max.z))
+                && player.translation[0] + 38_400 < platform_bound.min.x
+            {
+                // A retained no-reset phase reaches the shelf-to-platform
+                // transfer while entity 82 is still moving right. Create the
+                // ordinary jump edge from the last grounded shelf sample and
+                // begin matching its live left edge instead of walking into
+                // the gap on the historical absolute schedule.
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                return PAD_UP | PAD_RIGHT | PAD_CROSS;
+            }
             if self.exact_zero_u_right_platform_phase
                 && self.exact_zero_x_late_platform_phase
                 && self.checkpoint_phase_recovered
@@ -14946,7 +15399,7 @@ impl RollingStonesRouteController {
             let at_post_bank_anchor = tick >= post_bank_phase
                 && camera.path.zone == zero_f
                 && camera.path.index == 0
-                && (11_736..=11_752).contains(&camera.progress.raw())
+                && (11_736..=11_760).contains(&camera.progress.raw())
                 && player
                     .as_ref()
                     .is_some_and(|player| player.state == 2 && player.status_a & 1 != 0);
@@ -14960,7 +15413,37 @@ impl RollingStonesRouteController {
                 self.post_bank_tick = Some(post_bank_tick.saturating_add(1));
                 let zero_o =
                     Eid::from_name("0O_lZ").expect("fixed Rolling Stones end-zone EID is valid");
+                let zero_j = Eid::from_name("0J_lZ")
+                    .expect("fixed Rolling Stones boulder-zone EID is valid");
                 let warp_eid = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+                if self.exact_campaign_phase
+                    && self.exact_zero_x_late_platform_phase
+                    && let Some(player) = player
+                    && player.zone == zero_j
+                    && player.status_a & 1 != 0
+                    && matches!(player.state, 1 | 2 | 10)
+                    && let Some(boulder) = objects.iter().find(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor)
+                                if descriptor.id == 101
+                                    && descriptor.executable == 22
+                                    && descriptor.subtype == 8
+                                    && object.state == 1
+                        )
+                    })
+                    && player.translation[0].abs_diff(boulder.translation[0]) <= 400_000
+                    && (0..=500_000)
+                        .contains(&boulder.translation[2].saturating_sub(player.translation[2]))
+                    && player.translation[1].abs_diff(boulder.translation[1]) <= 800_000
+                {
+                    // The retained late-platform phase reaches 0J's rolling
+                    // JunOC immediately after the preceding jump lands.
+                    // Create a fresh physical jump from that live encounter;
+                    // the historical window begins one sample after the
+                    // boulder's collision has already reached Crash.
+                    return PAD_UP | PAD_CROSS;
+                }
                 if camera.path.zone == zero_o
                     && post_bank_tick >= 450
                     && let Some(player) = player
@@ -15009,6 +15492,17 @@ impl RollingStonesRouteController {
                     } else {
                         0
                     };
+                    if self.exact_campaign_phase
+                        && self.exact_zero_x_late_platform_phase
+                        && player.status_a & 1 != 0
+                        && player.translation[2] <= platform_bound.min.z.saturating_add(64_000)
+                    {
+                        // The retained phase lands on entity 97 after the
+                        // historical final-platform jump window has elapsed.
+                        // Jump from its live forward edge instead of walking
+                        // off while the absolute schedule catches up.
+                        return PAD_UP | lateral | PAD_CROSS;
+                    }
                     return PAD_UP | lateral;
                 }
                 if self.session_globals && matches!(post_bank_tick, 24..=25) {
@@ -19099,13 +19593,17 @@ struct BoulderDashCompletionRouteController {
     suffix_jump_stage: u8,
     zero_a_path0_tick: u8,
     zero_a_zero_entry: bool,
+    zero_a_early_jump_air_frames: u8,
+    zero_a_exit_steer_frames: u8,
+    zero_y_approach_aligned: bool,
     zero_r_first_spin: bool,
     zero_r_second_spin: bool,
     zero_m_jump: bool,
     zero_m_jump_hold: u8,
     zero_m_exit_jump: bool,
     zero_l_exit_jump: bool,
-    zero_i_lane_tap: bool,
+    zero_k_platform_jump: bool,
+    zero_i_lane_taps: u8,
     zero_lower_c_exit_jump: bool,
     zero_lower_b_entry_jump: bool,
     zero_lower_b_exit_jump: bool,
@@ -19329,6 +19827,81 @@ impl BoulderDashCompletionRouteController {
         let zero_y = Eid::from_name("0y_jZ").expect("fixed Boulder Dash suffix EID is valid");
         if self.zero_a_zero_entry
             && camera.path.zone == zero_y
+            && camera.path.index == 0
+            && self.suffix_jump_stage == 8
+            && let (Some(player), Some(bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 87
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 13
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
+            && matches!(player.state, 2 | 17 | 19)
+        {
+            // Enter the first jump from the same live left edge as a fresh
+            // route. The carried phase starts about one player-width right;
+            // jumping there pins Crash against entity 87 for several samples
+            // while the boulder keeps advancing.
+            let target_x = bound.min.x.saturating_sub(64_000);
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            if predicted_x > target_x.saturating_add(16_000) {
+                return (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_LEFT;
+            }
+            if (400..=2_100).contains(&camera.progress.raw()) {
+                self.suffix_jump_stage = 9;
+                return (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_LEFT | PAD_CROSS;
+            }
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_y
+            && camera.path.index == 0
+            && self.suffix_jump_stage == 9
+            && camera.progress.raw() >= 9_000
+            && !self.zero_y_approach_aligned
+            && let (Some(player), Some(bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 69
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 13
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
+        {
+            // The carried shelf phase enters 0y's second path about one
+            // player-width right of the fresh route. Join the live approach
+            // lane before the jump; correcting after the boundary collides
+            // with JunOC 69, stalls forward progress, and arrives below the
+            // following moving wall.
+            let target_x = bound.min.x.saturating_sub(30_000);
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            if predicted_x <= target_x.saturating_add(32_000) {
+                // Stop once the open-lane momentum is sufficient. A
+                // continuously closed-loop correction alternates full digital
+                // diagonals and loses more chase distance than it corrects.
+                self.zero_y_approach_aligned = true;
+                held &= !(PAD_LEFT | PAD_RIGHT);
+            } else {
+                held = (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_LEFT;
+            }
+        }
+        if self.zero_a_zero_entry
+            && !self.zero_y_approach_aligned
+            && camera.path.zone == zero_y
             && camera.path.index == 1
             && self.suffix_jump_stage == 10
             && let Some(player) = player
@@ -19346,21 +19919,34 @@ impl BoulderDashCompletionRouteController {
                     .flatten()
                 })
             };
-            let target_x = wall_bound(69)
-                .filter(|bound| {
-                    (bound.min.z.saturating_sub(220_000)..=bound.max.z.saturating_add(16_000))
-                        .contains(&player.translation[2])
-                })
-                .map(|bound| bound.min.x.saturating_sub(64_000))
-                .or_else(|| {
-                    wall_bound(66)
-                        .filter(|bound| {
-                            (bound.min.z.saturating_sub(180_000)
-                                ..=bound.max.z.saturating_add(32_000))
-                                .contains(&player.translation[2])
-                        })
-                        .map(|bound| bound.max.x.saturating_add(64_000))
-                });
+            let right_wall = wall_bound(69);
+            let left_wall = wall_bound(66);
+            let target_x = match (right_wall, left_wall) {
+                (Some(right_wall), Some(left_wall))
+                    if player.translation[2] >= right_wall.max.z.saturating_add(16_000) =>
+                {
+                    // The retail lane continues just inside the next moving
+                    // wall's right edge. Steering around its outside reverses
+                    // the carried run's lateral velocity and lets the wall
+                    // crush Crash as it changes state.
+                    Some(left_wall.max.x.saturating_sub(32_000))
+                }
+                (Some(bound), _)
+                    if (bound.min.z.saturating_sub(220_000)
+                        ..=bound.max.z.saturating_add(16_000))
+                        .contains(&player.translation[2]) =>
+                {
+                    Some(bound.min.x.saturating_sub(64_000))
+                }
+                (_, Some(bound))
+                    if (bound.min.z.saturating_sub(180_000)
+                        ..=bound.max.z.saturating_add(32_000))
+                        .contains(&player.translation[2]) =>
+                {
+                    Some(bound.max.x.saturating_sub(32_000))
+                }
+                _ => None,
+            };
             if let Some(target_x) = target_x {
                 // The carried object phase closes the first half of this
                 // alternating pair three samples earlier than a fresh boot.
@@ -19381,6 +19967,21 @@ impl BoulderDashCompletionRouteController {
         let zero_w = Eid::from_name("0w_jZ").expect("fixed Boulder Dash suffix EID is valid");
         let zero_x = Eid::from_name("0x_jZ").expect("fixed Boulder Dash suffix EID is valid");
         let zero_z = Eid::from_name("0z_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_z
+            && camera.path.index == 0
+            && self.suffix_jump_stage == 6
+            && (14_200..=15_000).contains(&camera.progress.raw())
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+            })
+        {
+            // The earlier live 0A takeoff lands one camera sample beyond the
+            // fresh boot's 14,200 marker. Consume that first grounded sample
+            // so the ordered suffix route does not remain stuck at stage 6.
+            self.suffix_jump_stage = 7;
+            return (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_CROSS;
+        }
         if self.zero_a_zero_entry
             && camera.path.zone == zero_z
             && camera.path.index == 1
@@ -19435,6 +20036,20 @@ impl BoulderDashCompletionRouteController {
         if self.zero_a_zero_entry
             && camera.path.zone == zero_x
             && camera.path.index == 0
+            && self.suffix_jump_stage == 12
+            && (17_500..18_000).contains(&camera.progress.raw())
+            && player.is_some_and(|player| matches!(player.state, 2 | 17 | 19))
+        {
+            // In the faster carried lane the next sample is already contact
+            // state 1 against the wall. Consume this last ordinary grounded
+            // sample instead of letting the generic 18,800 marker produce a
+            // pinned state-4 jump.
+            self.suffix_jump_stage = 13;
+            return (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_CROSS;
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_x
+            && camera.path.index == 0
             && self.suffix_jump_stage == 11
         {
             // The carried route reaches this takeoff during the opposite
@@ -19460,7 +20075,7 @@ impl BoulderDashCompletionRouteController {
                     .flatten()
                 }),
             )
-            && (bound.min.z.saturating_sub(240_000)..=bound.max.z.saturating_add(32_000))
+            && (bound.min.z.saturating_sub(280_000)..=bound.max.z.saturating_add(32_000))
                 .contains(&player.translation[2])
         {
             // Take the live right-hand gap around JunOC 55. The carried route
@@ -19541,13 +20156,15 @@ impl BoulderDashCompletionRouteController {
             let target_x = bound.max.x.saturating_add(80_000);
             let predicted_x =
                 player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
-            let lateral = if predicted_x > target_x.saturating_add(16_000) {
-                PAD_LEFT
-            } else if predicted_x < target_x.saturating_sub(16_000) {
+            let lateral = if predicted_x < target_x.saturating_sub(16_000) {
                 PAD_RIGHT
             } else {
                 0
             };
+            // Do not brake back toward the live wall after acquiring its
+            // outside edge. In the carried phase entity 89 remains raised
+            // four samples longer, and one opposite digital diagonal loses
+            // enough forward separation for the boulder to catch Crash.
             held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
         }
         if camera.path.zone == zero_w {
@@ -19674,6 +20291,40 @@ impl BoulderDashCompletionRouteController {
             // landing absorbs this short diagonal before 0t's narrow cadence.
             held |= PAD_RIGHT;
         }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_u
+            && camera.path.index == 1
+            && self.suffix_jump_stage == 21
+            && player.is_some_and(|player| player.status_a & 1 == 0)
+            && let (Some(player), Some(bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 109
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
+            && (bound.min.z.saturating_sub(400_000)..=bound.max.z.saturating_add(32_000))
+                .contains(&player.translation[2])
+        {
+            // The faster carried 0A handoff reaches the last 0u jump before
+            // its old lateral phase. Track the next moving shelf's live left
+            // edge through the zone boundary instead of falling just outside
+            // object-floor overlap at the start of 0t.
+            let target_x = bound.min.x.saturating_add(24_000);
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            held &= !(PAD_LEFT | PAD_RIGHT);
+            if predicted_x < target_x.saturating_sub(12_000) {
+                held |= PAD_RIGHT;
+            }
+        }
         let zero_t = Eid::from_name("0t_jZ").expect("fixed Boulder Dash suffix EID is valid");
         if camera.path.zone == zero_t {
             let progress = camera.progress.raw();
@@ -19717,10 +20368,10 @@ impl BoulderDashCompletionRouteController {
                         )
                     } else if progress < 8_500 {
                         2_660_000_i32.saturating_sub(
-                            140_000_i32.saturating_mul(progress.saturating_sub(6_000)) / 2_500,
+                            100_000_i32.saturating_mul(progress.saturating_sub(6_000)) / 2_500,
                         )
                     } else {
-                        2_520_000
+                        2_560_000
                     };
                     let platform_target_x = objects.iter().find_map(|object| {
                         matches!(
@@ -19733,9 +20384,10 @@ impl BoulderDashCompletionRouteController {
                         .then_some(object.frame_bound.or(object.bound))
                         .flatten()
                         .filter(|bound| {
-                            (bound.min.z.saturating_sub(400_000)
-                                ..=bound.max.z.saturating_add(32_000))
-                                .contains(&player.translation[2])
+                            progress < 8_500
+                                && (bound.min.z.saturating_sub(400_000)
+                                    ..=bound.max.z.saturating_add(32_000))
+                                    .contains(&player.translation[2])
                         })
                         .map(|bound| bound.max.x.saturating_sub(64_000))
                     });
@@ -19842,24 +20494,33 @@ impl BoulderDashCompletionRouteController {
         if camera.path.zone == zero_b
             && camera.path.index == 0
             && self.suffix_jump_stage == 0
-            && (2_500..=7_500).contains(&camera.progress.raw())
-            && let Some(player) = player
+            && camera.progress.raw() <= 7_500
+            && let (Some(player), Some(platform_bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 74
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
         {
-            // The first carried-session shelf can resolve its landing support
-            // one substep to the left of a fresh boot. Follow the successful
-            // live lane until takeoff instead of relying on the accumulated
-            // hazard phase to push Crash into it.
-            let target_x = 2_480_000_i32.saturating_add(
-                camera
-                    .progress
-                    .raw()
-                    .saturating_sub(2_500)
-                    .saturating_mul(10),
-            );
+            // Entity 74's lateral cycle is intentionally session-persistent.
+            // A carried campaign can therefore meet its first shelf nearly
+            // one platform-width to the right of a fresh boot. Join the
+            // shelf's live left edge as soon as 0B owns the camera; waiting
+            // for the old progress-2,500 correction is already one sample
+            // after Crash has fallen below its collision top.
+            let target_x = platform_bound.min.x.saturating_add(16_000);
             let predicted_x =
                 player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
             if predicted_x < target_x.saturating_sub(10_000) {
-                held = (held & !PAD_LEFT) | PAD_RIGHT;
+                held = (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_RIGHT;
             }
         }
         if camera.path.zone == zero_b && camera.path.index == 1 && self.suffix_jump_stage >= 2 {
@@ -19961,23 +20622,95 @@ impl BoulderDashCompletionRouteController {
         }
         if self.zero_a_zero_entry
             && camera.path.zone == zero_a
+            && camera.path.index == 0
+            && self.suffix_jump_stage == 3
+            && let (Some(player), Some(platform_bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 88
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
+            && (player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19))
+            && (platform_bound.min.z.saturating_sub(32_000)
+                ..=platform_bound.max.z.saturating_add(32_000))
+                .contains(&player.translation[2])
+        {
+            // Once the carried descent has landed on entity 88, continue
+            // walking toward its live right edge before the path boundary.
+            // The platform can be moving left fast enough that waiting for
+            // path 1 makes the old fixed takeoff lane unreachable.
+            let target_x = 2_650_000_i32.min(platform_bound.max.x.saturating_sub(64_000));
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            held &= !(PAD_LEFT | PAD_RIGHT);
+            if predicted_x < target_x.saturating_sub(10_000) || player.velocity[0] < 0 {
+                held |= PAD_RIGHT;
+            }
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_a
+            && camera.path.index == 0
+            && self.suffix_jump_stage == 3
+            && (16_800..=17_600).contains(&camera.progress.raw())
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+            })
+        {
+            // The moving platform still owns Crash on this final grounded
+            // sample. Jumping here carries ordinary forward velocity across
+            // the path boundary; waiting for path 1 pins the launch against
+            // the platform edge for four chase-critical samples.
+            self.zero_a_early_jump_air_frames = 1;
+            self.suffix_jump_stage = 4;
+            return PAD_DOWN | PAD_CROSS;
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_a
             && camera.path.index == 1
             && self.suffix_jump_stage == 3
-            && camera.progress.raw() < 1_024
-            && let Some(player) = player
+            && camera.progress.raw() <= 2_048
+            && let (Some(player), Some(platform_bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 88
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
             && (player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19))
         {
             // The carried route reaches this path boundary roughly one lane
             // left of the fresh route and still has leftward momentum. Walk
             // across the live platform until its successful takeoff lane is
             // under Crash, then launch with a clean Cross edge.
+            let target_x = 2_650_000_i32.min(platform_bound.max.x.saturating_sub(64_000));
             let predicted_x =
                 player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
-            if predicted_x < 2_650_000 || player.velocity[0] < 0 {
+            if predicted_x < target_x.saturating_sub(10_000) {
                 return PAD_RIGHT;
             }
+            if player.velocity[0] > 50_000 {
+                // Brake the rightward platform walk before takeoff. Launching
+                // with that lateral velocity clears entity 88 but misses the
+                // left-hand static shelf at the start of 0z.
+                return PAD_LEFT;
+            }
             self.suffix_jump_stage = 4;
-            return PAD_DOWN | PAD_RIGHT | PAD_CROSS;
+            return PAD_DOWN | PAD_CROSS;
         }
         if self.zero_a_zero_entry
             && camera.path.zone == zero_a
@@ -19985,21 +20718,48 @@ impl BoulderDashCompletionRouteController {
             && self.suffix_jump_stage == 4
             && camera.progress.raw() < 9_100
             && let Some(player) = player
-            && player.status_a & 1 == 0
         {
-            // The next support is the authored static ledge, not the moving
-            // PoPlC just crossed. Rejoin its live world-space landing lane.
-            let target_x = 2_672_000_i32;
-            let predicted_x =
-                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
-            let lateral = if predicted_x > target_x.saturating_add(16_000) {
-                PAD_LEFT
-            } else if predicted_x < target_x.saturating_sub(16_000) {
-                PAD_RIGHT
+            // Once the clean forward jump is airborne, carry it toward the
+            // left-hand static shelf. Once grounded, settle near the live
+            // takeoff lane instead of continuing sideways off its narrow
+            // edge. Suppress the old absolute right pulses, which belong to
+            // the fresh platform phase.
+            held &= !(PAD_LEFT | PAD_RIGHT);
+            let grounded = player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19);
+            if grounded {
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+                if predicted_x > 2_470_000 {
+                    held |= PAD_LEFT;
+                } else if predicted_x < 2_410_000 {
+                    held |= PAD_RIGHT;
+                }
+            } else if self.zero_a_early_jump_air_frames > 0 {
+                self.zero_a_early_jump_air_frames =
+                    self.zero_a_early_jump_air_frames.saturating_add(1);
+                held |= if self.zero_a_early_jump_air_frames <= 5 {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
             } else {
-                0
-            };
-            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+                held |= PAD_LEFT;
+            }
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_a
+            && camera.path.index == 1
+            && self.suffix_jump_stage == 4
+            && (7_000..9_100).contains(&camera.progress.raw())
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+            })
+        {
+            // In this live platform phase the static shelf ends before the
+            // generic 9,100 marker. Consume its final grounded sample rather
+            // than waiting until Crash is already falling beyond the edge.
+            self.suffix_jump_stage = 5;
+            return PAD_DOWN | PAD_CROSS;
         }
         if camera.path.zone == zero_a
             && camera.path.index == 1
@@ -20007,6 +20767,25 @@ impl BoulderDashCompletionRouteController {
             && camera.progress.raw() < 13_000
         {
             held = (held & !PAD_RIGHT) | PAD_LEFT;
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_a
+            && camera.path.index == 1
+            && self.suffix_jump_stage == 5
+            && player.is_some_and(|player| player.status_a & 1 == 0)
+        {
+            // The carried platform phase reaches this jump on a different
+            // absolute-frame steering half-cycle. Reproduce the successful
+            // live arc: four leftward airborne samples clear the source shelf,
+            // then rightward input recenters the much farther-left carried
+            // takeoff and preserves forward speed into 0z.
+            self.zero_a_exit_steer_frames = self.zero_a_exit_steer_frames.saturating_add(1);
+            held = (held & !(PAD_LEFT | PAD_RIGHT))
+                | if self.zero_a_exit_steer_frames <= 4 {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
         }
         let zero_r = Eid::from_name("0r_jZ").expect("fixed Boulder Dash suffix EID is valid");
         if camera.path.zone == zero_r {
@@ -20146,9 +20925,31 @@ impl BoulderDashCompletionRouteController {
                 return held | PAD_CROSS;
             }
         }
+        let zero_k = Eid::from_name("0k_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_k
+            && camera.path.index == 0
+            && (5_000..=7_000).contains(&camera.progress.raw())
+        {
+            // Entity 128 is descending while entity 126 crosses below it in
+            // the carried phase. The absolute direct-route Cross launches one
+            // sample too early and meets entity 126's front below its top.
+            // Consume the next live grounded sample so the same ordinary jump
+            // reaches the platform after its downward crossing.
+            held &= !PAD_CROSS;
+            if !self.zero_k_platform_jump
+                && camera.progress.raw() >= 5_900
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+                })
+            {
+                self.zero_k_platform_jump = true;
+                return held | PAD_CROSS;
+            }
+        }
         let zero_i = Eid::from_name("0i_jZ").expect("fixed Boulder Dash suffix EID is valid");
         if self.zero_a_zero_entry
-            && !self.zero_i_lane_tap
+            && self.zero_i_lane_taps < 3
             && camera.path.zone == zero_i
             && camera.path.index == 1
             && let (Some(player), Some(bound)) = (
@@ -20172,9 +20973,9 @@ impl BoulderDashCompletionRouteController {
             // The carried route reaches JunOC 145 one lateral step to the
             // right. Clipping its front-left corner consumes enough forward
             // speed for the chasing boulder to crush Crash a few frames
-            // later. One live left pulse joins the successful fresh lane;
-            // repeating it would rotate too much forward velocity sideways.
-            self.zero_i_lane_tap = true;
+            // later. Three live left pulses join the successful fresh lane;
+            // stopping there preserves enough forward velocity to outrun it.
+            self.zero_i_lane_taps += 1;
             return (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_LEFT;
         }
         let zero_lower_c = Eid::from_name("0c_jZ").expect("fixed Boulder Dash suffix EID is valid");
@@ -20309,6 +21110,7 @@ impl BoulderDashCompletionRouteController {
                         // its Cross edge. Absolute-frame steering from the
                         // original characterization can otherwise leak into
                         // a phase-shifted jump and miss the authored shelf.
+                        4 if self.zero_a_zero_entry => (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_LEFT,
                         2 | 4 | 7 | 9 | 17 | 20 => (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_RIGHT,
                         8 | 10 | 11 | 15 | 22 | 24 => (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_LEFT,
                         5..=24 => held & !(PAD_LEFT | PAD_RIGHT),
@@ -47578,6 +48380,30 @@ impl TempleRuinsCompletionRouteController {
             && collider_entity != Some(158)
             && player.is_some_and(|player| player.status_a & 1 != 0)
         {
+            if self.session_globals
+                && let Some(player) = player
+            {
+                // The carried gate phase lands on the b8 floor farther back
+                // than the fresh route. Reproduce the fresh route's proven
+                // staging point while Crash is grounded; otherwise the
+                // eventual lift jump intersects the diagonal dart row.
+                let target_z = 14_200_288_i32;
+                let staged = player.translation[2].abs_diff(target_z) <= 20_000
+                    && player.velocity[2].unsigned_abs() <= 100_000;
+                if !staged {
+                    return if player.velocity[2] < -100_000 {
+                        PAD_DOWN
+                    } else if player.velocity[2] > 100_000
+                        || player.translation[2] > target_z + 20_000
+                    {
+                        PAD_UP
+                    } else if player.translation[2] < target_z - 20_000 {
+                        PAD_DOWN
+                    } else {
+                        0
+                    };
+                }
+            }
             let lift_y = objects.iter().find_map(|object| match object.origin {
                 ObjectOrigin::Entity(descriptor) if descriptor.id == 157 => {
                     Some(object.translation[1])
@@ -48441,6 +49267,21 @@ impl TempleRuinsCompletionRouteController {
                 }
                 return 0;
             }
+        }
+        if self.session_globals
+            && b7
+            && camera.path.index == 1
+            && self.b7_crossing_stage == 3
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            // A carried gate phase can close underneath the long launch and
+            // turn held Cross into repeated jumps across the moving panels.
+            // Once that launch first lands, walk out of the gate corridor so
+            // b8's grounded lift-phase wait can take over at its staging
+            // floor.
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_UP;
         }
         if b4 && self.b4_crossing_stage == 10 {
             if player.is_some_and(|player| {
@@ -49771,13 +50612,17 @@ impl SurveyInputController {
                 suffix_jump_stage: 0,
                 zero_a_path0_tick: 0,
                 zero_a_zero_entry: false,
+                zero_a_early_jump_air_frames: 0,
+                zero_a_exit_steer_frames: 0,
+                zero_y_approach_aligned: false,
                 zero_r_first_spin: false,
                 zero_r_second_spin: false,
                 zero_m_jump: false,
                 zero_m_jump_hold: 0,
                 zero_m_exit_jump: false,
                 zero_l_exit_jump: false,
-                zero_i_lane_tap: false,
+                zero_k_platform_jump: false,
+                zero_i_lane_taps: 0,
                 zero_lower_c_exit_jump: false,
                 zero_lower_b_entry_jump: false,
                 zero_lower_b_exit_jump: false,
@@ -50415,7 +51260,11 @@ impl SurveyInputController {
                 second_wall_gate_phase: 0,
                 zero_recovery_carry: false,
             },
-            lost_city_exact_carry: LostCityExactCarryRouteController::default(),
+            lost_city_exact_carry: LostCityExactCarryRouteController {
+                adaptive_checkpoint_capture: profile == SurveyInputProfile::LostCityExactCarryRoute
+                    && initial_draw_count == 36_593,
+                ..LostCityExactCarryRouteController::default()
+            },
             road_to_nowhere: RoadToNowhereRouteController {
                 jump_hold: 0,
                 final_stage: 0,
@@ -50570,7 +51419,12 @@ impl SurveyInputController {
         } else if self.profile == SurveyInputProfile::LostCityCompletionRoute {
             self.lost_city = LostCityCompletionRouteController::default();
         } else if self.profile == SurveyInputProfile::LostCityExactCarryRoute {
-            self.lost_city_exact_carry = LostCityExactCarryRouteController::default();
+            let adaptive_checkpoint_capture =
+                self.lost_city_exact_carry.adaptive_checkpoint_capture;
+            self.lost_city_exact_carry = LostCityExactCarryRouteController {
+                adaptive_checkpoint_capture,
+                ..LostCityExactCarryRouteController::default()
+            };
         }
         if self.profile == SurveyInputProfile::RoadToNowhereCompletionRoute {
             self.road_to_nowhere.jump_hold = 0;
@@ -59631,6 +60485,621 @@ fn temple_ruins_direct_boot_reaches_level_complete() {
     assert_eq!(player.state, 32);
     assert_eq!(player.event, 0x1600);
     assert_eq!(player.translation, [15_678_144, 4_742_996, 5_412_560]);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn temple_ruins_current_uninterrupted_campaign_phase_reaches_level_complete() {
+    macro_rules! chain_trace {
+        ($($argument:tt)*) => {
+            if std::env::var_os("C1_CHAIN_TRACE").is_some() {
+                eprintln!($($argument)*);
+            }
+        };
+    }
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x1c);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Temple Ruins pair must parse");
+    let mut title = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 13),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 13),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title
+            .set_global_word(index, value)
+            .expect("current uninterrupted campaign global must exist");
+    }
+    let mut carry = title.export_session_carry();
+    carry.random_seed = 0xda29_1494;
+    carry.draw_count = 44_164;
+    carry.set_random_seed_b(0xacef_8c31);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("Temple Ruins must import the current uninterrupted campaign phase");
+    let mut pad = PersistentPadState {
+        snapshot: RetailPadSnapshot {
+            tapped: PAD_CROSS,
+            held: PAD_CROSS,
+            tapped_previous: 0,
+            held_previous: 0,
+            held_previous_2: 0,
+        },
+        ..PersistentPadState::default()
+    };
+    let (survey, mut runtime) = survey_pair_with_persistent_pad(
+        "Temple Ruins current uninterrupted campaign phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::TempleRuinsCompletionRoute,
+        6_000,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: PAD_CROSS,
+            ..PersistentSurveyPlan::default()
+        },
+    )
+    .expect("Temple Ruins' current uninterrupted campaign route must execute");
+    chain_trace!(
+        "TEMPLE_FOCUSED_FINAL {} player={:?} seed={:#010x} seed_b={:#010x} draws={} globals={:?} pad={:?}",
+        survey.summary(),
+        player_trace(&runtime).expect("Temple Ruins player trace must resolve"),
+        runtime.machine().random_seed(),
+        runtime.random_seed_b(),
+        runtime.draw_count(),
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| runtime.global_word(index).unwrap()),
+        pad.snapshot,
+    );
+
+    assert_eq!(survey.frames, 4_860, "{}", survey.summary());
+    assert_eq!(
+        survey.next_lid,
+        Some((
+            survey.frames,
+            i32::try_from(LevelId::LEVEL_COMPLETE.get()).expect("Level Complete LID fits i32"),
+        )),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
+
+    {
+        // Continue the same persistent session through the two following
+        // levels. This characterizes the real no-reset campaign phase rather
+        // than treating fresh level boots as sufficient coverage.
+        let completion = LevelId::LEVEL_COMPLETE;
+        let title = LevelId::TITLE;
+        let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+        let completion_carry = runtime
+            .finish_level_transition(
+                &mut host,
+                i32::try_from(completion.get()).expect("Level Complete LID fits i32"),
+            )
+            .expect("Temple Ruins must export its carried Level Complete state")
+            .carry;
+        let (completion_nsd, completion_nsf, completion_nsf_bytes) =
+            parse_local_pair(&root, completion)
+                .expect("the legally local Level Complete pair must parse");
+        let mount_held = pad.snapshot.held;
+        let (completion_survey, mut completion_runtime) = survey_pair_with_persistent_pad(
+            "Temple Ruins current carried Level Complete",
+            completion,
+            &completion_nsd,
+            &completion_nsf,
+            &completion_nsf_bytes,
+            RetailRuntime::new_from_session(GLOBAL_WORDS, completion, completion_carry)
+                .expect("Level Complete must import Temple Ruins' current carry"),
+            LevelContextSource::SessionGlobals,
+            SurveyInputProfile::DirectionAndButtonSweepToTransition,
+            700,
+            &mut pad,
+            PersistentSurveyPlan {
+                mount_held,
+                ..PersistentSurveyPlan::default()
+            },
+        )
+        .expect("Temple Ruins' current Level Complete screen must execute");
+        chain_trace!(
+            "TEMPLE_CHAIN_COMPLETION {} seed={:#010x} seed_b={:#010x} draws={} globals={:?} pad={:?}",
+            completion_survey.summary(),
+            completion_runtime.machine().random_seed(),
+            completion_runtime.random_seed_b(),
+            completion_runtime.draw_count(),
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| completion_runtime.global_word(index).unwrap()),
+            pad.snapshot,
+        );
+        assert_eq!(
+            completion_survey.frames,
+            633,
+            "{}",
+            completion_survey.summary()
+        );
+        assert_eq!(
+            completion_survey.next_lid,
+            Some((
+                completion_survey.frames,
+                i32::try_from(title.get()).expect("Title LID fits i32"),
+            )),
+            "{}",
+            completion_survey.summary()
+        );
+        assert_eq!(
+            completion_survey.restarts,
+            0,
+            "{}",
+            completion_survey.summary()
+        );
+        assert_eq!(
+            completion_survey.death_camera_frames,
+            0,
+            "{}",
+            completion_survey.summary()
+        );
+        assert!(
+            completion_survey.first_terminal_fall.is_none(),
+            "{}",
+            completion_survey.summary()
+        );
+        assert!(
+            completion_survey.is_clean(),
+            "{}",
+            completion_survey.summary()
+        );
+
+        let mut host = NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+        let title_carry = completion_runtime
+            .finish_level_transition(
+                &mut host,
+                i32::try_from(title.get()).expect("Title LID fits i32"),
+            )
+            .expect("Temple Ruins' Level Complete screen must export Title")
+            .carry;
+        let (title_nsd, title_nsf, title_nsf_bytes) =
+            parse_local_pair(&root, title).expect("the legally local Title pair must parse");
+        let mut map = AuthoredTitleMapHarness::from_session_with_pad(
+            &title_nsd,
+            &title_nsf,
+            &title_nsf_bytes,
+            title_carry,
+            pad,
+        );
+        map.wait_until_ready(64);
+        chain_trace!(
+            "TEMPLE_CHAIN_MAP_READY frame={} camera={:?} seed={:#010x} seed_b={:#010x} draws={} globals={:?}",
+            map.frame,
+            map.camera.location(),
+            map.runtime.machine().random_seed(),
+            map.runtime.random_seed_b(),
+            map.runtime.draw_count(),
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| map.runtime.global_word(index).unwrap()),
+        );
+        for _ in 0..120 {
+            map.step(0);
+        }
+        map.tap(PAD_UP);
+        chain_trace!(
+            "TEMPLE_CHAIN_MAP_NODE frame={} camera={:?} seed={:#010x} seed_b={:#010x} draws={} globals={:?}",
+            map.frame,
+            map.camera.location(),
+            map.runtime.machine().random_seed(),
+            map.runtime.random_seed_b(),
+            map.runtime.draw_count(),
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| map.runtime.global_word(index).unwrap()),
+        );
+        for _ in 0..120 {
+            map.step(0);
+        }
+        map.step(PAD_CROSS);
+        chain_trace!(
+            "TEMPLE_CHAIN_MAP_FINAL frame={} transitions={:?} camera={:?} seed={:#010x} seed_b={:#010x} draws={} globals={:?} pad={:?}",
+            map.frame,
+            map.transitions,
+            map.camera.location(),
+            map.runtime.machine().random_seed(),
+            map.runtime.random_seed_b(),
+            map.runtime.draw_count(),
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| map.runtime.global_word(index).unwrap()),
+            map.pad.snapshot,
+        );
+
+        let road = LevelId::new_const(0x14);
+        assert_eq!(
+            map.transitions,
+            vec![(
+                253,
+                i32::try_from(road.get()).expect("Road to Nowhere LID fits i32"),
+            )]
+        );
+        let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+        let road_carry = map
+            .runtime
+            .finish_level_transition(
+                &mut host,
+                i32::try_from(road.get()).expect("Road to Nowhere LID fits i32"),
+            )
+            .expect("the current post-Temple map must export Road to Nowhere")
+            .carry;
+        let (road_nsd, road_nsf, road_nsf_bytes) = parse_local_pair(&root, road)
+            .expect("the legally local Road to Nowhere pair must parse");
+        let mut road_mount_pad = map.pad;
+        let mount_held = road_mount_pad.snapshot.held;
+        let (road_mount_survey, road_mount_runtime) = survey_pair_with_persistent_pad(
+            "Road to Nowhere current carried first frame",
+            road,
+            &road_nsd,
+            &road_nsf,
+            &road_nsf_bytes,
+            RetailRuntime::new_from_session(GLOBAL_WORDS, road, road_carry.clone())
+                .expect("Road to Nowhere must import the current post-Temple carry"),
+            LevelContextSource::SessionGlobals,
+            SurveyInputProfile::RoadToNowhereCompletionRoute,
+            1,
+            &mut road_mount_pad,
+            PersistentSurveyPlan {
+                mount_held,
+                ..PersistentSurveyPlan::default()
+            },
+        )
+        .expect("Road to Nowhere's current carried first frame must execute");
+        chain_trace!(
+            "TEMPLE_CHAIN_ROAD_MOUNT {} player={:?} seed={:#010x} seed_b={:#010x} draws={} globals={:?} pad={:?}",
+            road_mount_survey.summary(),
+            player_trace(&road_mount_runtime)
+                .expect("Road to Nowhere first-frame player trace must resolve"),
+            road_mount_runtime.machine().random_seed(),
+            road_mount_runtime.random_seed_b(),
+            road_mount_runtime.draw_count(),
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| road_mount_runtime.global_word(index).unwrap()),
+            road_mount_pad.snapshot,
+        );
+        assert_eq!(
+            road_mount_survey.frames,
+            1,
+            "{}",
+            road_mount_survey.summary()
+        );
+        assert_eq!(
+            road_mount_survey.next_lid,
+            None,
+            "{}",
+            road_mount_survey.summary()
+        );
+        assert_eq!(
+            road_mount_survey.restarts,
+            0,
+            "{}",
+            road_mount_survey.summary()
+        );
+        assert!(
+            road_mount_survey.is_clean(),
+            "{}",
+            road_mount_survey.summary()
+        );
+
+        let mut road_pad = map.pad;
+        let mount_held = road_pad.snapshot.held;
+        let (road_survey, mut road_runtime) = survey_pair_with_persistent_pad(
+            "Road to Nowhere current carried completion",
+            road,
+            &road_nsd,
+            &road_nsf,
+            &road_nsf_bytes,
+            RetailRuntime::new_from_session(GLOBAL_WORDS, road, road_carry)
+                .expect("Road to Nowhere must import the current post-Temple carry"),
+            LevelContextSource::SessionGlobals,
+            SurveyInputProfile::RoadToNowhereCompletionRoute,
+            4_000,
+            &mut road_pad,
+            PersistentSurveyPlan {
+                mount_held,
+                ..PersistentSurveyPlan::default()
+            },
+        )
+        .expect("Road to Nowhere's current carried completion must execute");
+        chain_trace!(
+            "TEMPLE_CHAIN_ROAD_FINAL {} player={:?} seed={:#010x} seed_b={:#010x} draws={} globals={:?} pad={:?}",
+            road_survey.summary(),
+            player_trace(&road_runtime)
+                .expect("Road to Nowhere completion player trace must resolve"),
+            road_runtime.machine().random_seed(),
+            road_runtime.random_seed_b(),
+            road_runtime.draw_count(),
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| road_runtime.global_word(index).unwrap()),
+            road_pad.snapshot,
+        );
+        assert_eq!(road_survey.frames, 2_449, "{}", road_survey.summary());
+        assert_eq!(
+            road_survey.next_lid,
+            Some((
+                road_survey.frames,
+                i32::try_from(completion.get()).expect("Level Complete LID fits i32"),
+            )),
+            "{}",
+            road_survey.summary()
+        );
+        assert_eq!(road_survey.restarts, 0, "{}", road_survey.summary());
+        assert_eq!(
+            road_survey.death_camera_frames,
+            0,
+            "{}",
+            road_survey.summary()
+        );
+        assert!(
+            road_survey.first_terminal_fall.is_none(),
+            "{}",
+            road_survey.summary()
+        );
+        assert!(road_survey.is_clean(), "{}", road_survey.summary());
+
+        let mut host = NsfProgramHost::new(&road_nsd, &road_nsf, &road_nsf_bytes);
+        let road_completion_carry = road_runtime
+            .finish_level_transition(&mut host, 0x2d)
+            .expect("the current Road to Nowhere carry must export Level Complete")
+            .carry;
+        let road_completion_mount_held = road_pad.snapshot.held;
+        let (road_completion_survey, mut road_completion_runtime) =
+            survey_pair_with_persistent_pad(
+                "Road to Nowhere current carried Level Complete",
+                completion,
+                &completion_nsd,
+                &completion_nsf,
+                &completion_nsf_bytes,
+                RetailRuntime::new_from_session(GLOBAL_WORDS, completion, road_completion_carry)
+                    .expect("Level Complete must import the current Road to Nowhere carry"),
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                700,
+                &mut road_pad,
+                PersistentSurveyPlan {
+                    mount_held: road_completion_mount_held,
+                    ..PersistentSurveyPlan::default()
+                },
+            )
+            .expect("Road to Nowhere's current Level Complete screen must execute");
+        chain_trace!(
+            "TEMPLE_CHAIN_ROAD_COMPLETION_FINAL {}",
+            road_completion_survey.summary()
+        );
+        assert_eq!(
+            road_completion_survey.frames,
+            393,
+            "{}",
+            road_completion_survey.summary()
+        );
+        assert_eq!(
+            road_completion_survey.next_lid,
+            Some((
+                road_completion_survey.frames,
+                i32::try_from(title.get()).expect("Title LID fits i32"),
+            )),
+            "{}",
+            road_completion_survey.summary()
+        );
+        assert_eq!(
+            road_completion_survey.restarts,
+            0,
+            "{}",
+            road_completion_survey.summary()
+        );
+        assert_eq!(
+            road_completion_survey.death_camera_frames,
+            0,
+            "{}",
+            road_completion_survey.summary()
+        );
+        assert!(
+            road_completion_survey.first_terminal_fall.is_none(),
+            "{}",
+            road_completion_survey.summary()
+        );
+        assert!(
+            road_completion_survey.is_clean(),
+            "{}",
+            road_completion_survey.summary()
+        );
+
+        let mut host = NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+        let post_road_title_carry = road_completion_runtime
+            .finish_level_transition(&mut host, 0x19)
+            .expect("Road to Nowhere's Level Complete must export Title")
+            .carry;
+        let mut post_road_map = AuthoredTitleMapHarness::from_session_with_pad(
+            &title_nsd,
+            &title_nsf,
+            &title_nsf_bytes,
+            post_road_title_carry,
+            road_pad,
+        );
+        post_road_map.wait_until_ready(64);
+        for _ in 0..120 {
+            post_road_map.step(0);
+        }
+        post_road_map.tap(PAD_UP);
+        for _ in 0..120 {
+            post_road_map.step(0);
+        }
+        post_road_map.step(PAD_CROSS);
+        chain_trace!(
+            "TEMPLE_CHAIN_POST_ROAD_MAP_FINAL frame={} transitions={:?}",
+            post_road_map.frame,
+            post_road_map.transitions
+        );
+
+        let boulder_dash = LevelId::new_const(0x13);
+        assert_eq!(
+            post_road_map.transitions,
+            vec![(
+                253,
+                i32::try_from(boulder_dash.get()).expect("Boulder Dash LID fits i32"),
+            )]
+        );
+        let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+        let boulder_dash_carry = post_road_map
+            .runtime
+            .finish_level_transition(
+                &mut host,
+                i32::try_from(boulder_dash.get()).expect("Boulder Dash LID fits i32"),
+            )
+            .expect("the current post-Road map must export Boulder Dash")
+            .carry;
+        let (boulder_dash_nsd, boulder_dash_nsf, boulder_dash_nsf_bytes) =
+            parse_local_pair(&root, boulder_dash)
+                .expect("the legally local Boulder Dash pair must parse");
+        let mut boulder_dash_pad = post_road_map.pad;
+        let boulder_dash_mount_held = boulder_dash_pad.snapshot.held;
+        let (boulder_dash_survey, boulder_dash_runtime) = survey_pair_with_persistent_pad(
+            "Boulder Dash current carried completion",
+            boulder_dash,
+            &boulder_dash_nsd,
+            &boulder_dash_nsf,
+            &boulder_dash_nsf_bytes,
+            RetailRuntime::new_from_session(GLOBAL_WORDS, boulder_dash, boulder_dash_carry)
+                .expect("Boulder Dash must import the current post-Road carry"),
+            LevelContextSource::SessionGlobals,
+            SurveyInputProfile::BoulderDashCompletionRoute,
+            3_100,
+            &mut boulder_dash_pad,
+            PersistentSurveyPlan {
+                mount_held: boulder_dash_mount_held,
+                ..PersistentSurveyPlan::default()
+            },
+        )
+        .expect("Boulder Dash's current carried completion route must execute");
+        chain_trace!(
+            "TEMPLE_CHAIN_BOULDER_FINAL {} player={:?} seed={:#010x} seed_b={:#010x} draws={} globals={:?} pad={:?}",
+            boulder_dash_survey.summary(),
+            player_trace(&boulder_dash_runtime)
+                .expect("Boulder Dash completion player trace must resolve"),
+            boulder_dash_runtime.machine().random_seed(),
+            boulder_dash_runtime.random_seed_b(),
+            boulder_dash_runtime.draw_count(),
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| boulder_dash_runtime.global_word(index).unwrap()),
+            boulder_dash_pad.snapshot,
+        );
+        assert_eq!(
+            boulder_dash_survey.frames,
+            3_085,
+            "{}",
+            boulder_dash_survey.summary()
+        );
+        assert_eq!(
+            boulder_dash_survey.next_lid,
+            Some((
+                boulder_dash_survey.frames,
+                i32::try_from(LevelId::LEVEL_COMPLETE.get()).expect("Level Complete LID fits i32"),
+            )),
+            "{}",
+            boulder_dash_survey.summary()
+        );
+        assert_eq!(
+            boulder_dash_survey.restarts,
+            0,
+            "{}",
+            boulder_dash_survey.summary()
+        );
+        assert_eq!(
+            boulder_dash_survey.death_camera_frames,
+            0,
+            "{}",
+            boulder_dash_survey.summary()
+        );
+        assert!(
+            boulder_dash_survey.first_terminal_fall.is_none(),
+            "{}",
+            boulder_dash_survey.summary()
+        );
+        assert!(
+            boulder_dash_survey.is_clean(),
+            "{}",
+            boulder_dash_survey.summary()
+        );
+    }
 }
 
 #[test]
@@ -71928,6 +73397,74 @@ fn exact_post_papu_rolling_stones_phase_completes_with_live_controller() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn current_no_reset_post_papu_rolling_stones_phase_exports_route() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let rolling_stones = CampaignPair::parse(&root, LevelId::new_const(0x15));
+    let mut source = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (SAVED_TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (CURRENT_MAP_LEVEL_GLOBAL, 7),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 7),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+        (CHECKPOINT_ID_GLOBAL, (-1_i32).cast_unsigned()),
+        (CHECKPOINT_TRANSLATION_GLOBALS[0], 2_252_800),
+        (CHECKPOINT_TRANSLATION_GLOBALS[1], 2_350_080),
+        (CHECKPOINT_TRANSLATION_GLOBALS[2], 15_564_288),
+    ] {
+        source
+            .set_global_word(index, value)
+            .expect("current no-reset Rolling Stones carry global must be writable");
+    }
+    let mut carry = source.export_session_carry();
+    carry.random_seed = 0x1930_1bfe;
+    carry.draw_count = 16_369;
+    carry.set_random_seed_b(0x490f_c4ba);
+
+    let mut pad = PersistentPadState::default();
+    pad.update(PAD_CROSS);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, rolling_stones.level, carry)
+        .expect("Rolling Stones must import the current no-reset post-Papu carry");
+    let (survey, _) = survey_pair_with_persistent_pad(
+        rolling_stones.name,
+        rolling_stones.level,
+        &rolling_stones.nsd,
+        &rolling_stones.nsf,
+        &rolling_stones.nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::RollingStonesExactCampaign,
+        3_200,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: PAD_CROSS,
+            initial_idle_frames: 0,
+            fixed_cross_frame: None,
+            cross_pulse_period: None,
+        },
+    )
+    .expect("current no-reset Rolling Stones phase must execute");
+
+    assert_eq!(survey.frames, 2_655, "{}", survey.summary());
+    assert_eq!(
+        survey.next_lid,
+        Some((2_655, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),)),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn exact_current_browser_rolling_stones_phase_exports_route() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -73087,6 +74624,13 @@ fn exported_publisher_opening_composes_through_jungle_mount() {
 fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bool) {
     const N_SANITY_FRAMES: u32 = 2_100;
     const COMPLETION_FRAMES: u32 = 600;
+    macro_rules! campaign_trace {
+        ($($argument:tt)*) => {
+            if std::env::var_os("C1_AGGREGATE_TRACE").is_some() {
+                eprintln!($($argument)*);
+            }
+        };
+    }
 
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -74601,7 +76145,6 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             0xc90d_87bc
         );
         assert_eq!(post_great_gate_map.runtime.draw_count(), 9_451);
-        let post_great_gate_map_draw_count = post_great_gate_map.runtime.draw_count();
         let (boulders_carry, next_pad) = post_great_gate_map.finish_transition(boulders);
         pad = next_pad;
         assert_eq!(
@@ -75072,8 +76615,6 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             0x98a5_de72
         );
         assert_eq!(post_boulders_map.runtime.draw_count(), 12_124);
-        let post_boulders_map_draw_count = post_boulders_map.runtime.draw_count();
-
         let (upstream_carry, next_pad) = post_boulders_map.finish_transition(upstream);
         pad = next_pad;
         assert_eq!(upstream_carry.random_seed, 0x98a5_de72);
@@ -75972,32 +77513,32 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             // Pin the carried route to its current path-anchored phase.
             assert_eq!(
                 rolling_stones_survey.frames,
-                2_521,
+                2_655,
                 "{}",
                 rolling_stones_survey.summary()
             );
             assert_eq!(
                 rolling_stones_survey.terminal.as_deref(),
-                Some("frame 2521 requested level transition to 0x2d")
+                Some("frame 2655 requested level transition to 0x2d")
             );
             assert_eq!(rolling_stones_survey.final_live_objects, 22);
-            assert_eq!(rolling_stones_survey.max_live_objects, 35);
-            assert_eq!(rolling_stones_survey.successful_spawns, 117);
-            assert_eq!(rolling_stones_survey.spawn_attempts, 30_046);
-            assert_eq!(rolling_stones_survey.expected_spawn_rejections, 29_929);
+            assert_eq!(rolling_stones_survey.max_live_objects, 33);
+            assert_eq!(rolling_stones_survey.successful_spawns, 123);
+            assert_eq!(rolling_stones_survey.spawn_attempts, 31_368);
+            assert_eq!(rolling_stones_survey.expected_spawn_rejections, 31_245);
             assert_eq!(rolling_stones_survey.unexpected_spawn_errors, 0);
-            assert_eq!(rolling_stones_survey.executions, 56_703);
-            assert_eq!(rolling_stones_survey.zone_transitions, 32);
+            assert_eq!(rolling_stones_survey.executions, 58_743);
+            assert_eq!(rolling_stones_survey.zone_transitions, 34);
             assert_eq!(rolling_stones_survey.camera_ranges.len(), 45);
-            assert_eq!(rolling_stones_survey.camera_path_changes, 46);
-            assert_eq!(rolling_stones_survey.last_camera_path_change, 2_395);
-            assert_eq!(rolling_stones_survey.last_camera_progress_change, 2_432);
+            assert_eq!(rolling_stones_survey.camera_path_changes, 48);
+            assert_eq!(rolling_stones_survey.last_camera_path_change, 2_518);
+            assert_eq!(rolling_stones_survey.last_camera_progress_change, 2_566);
             assert_eq!(rolling_stones_survey.restarts, 0);
             assert!(rolling_stones_survey.restart_frames.is_empty());
             assert_eq!(rolling_stones_survey.death_camera_frames, 0);
             assert!(rolling_stones_survey.first_below_zero.is_none());
             assert!(rolling_stones_survey.first_terminal_fall.is_none());
-            assert_eq!(rolling_stones_survey.next_lid, Some((2_521, 0x2d)));
+            assert_eq!(rolling_stones_survey.next_lid, Some((2_655, 0x2d)));
             assert_eq!(rolling_stones_survey.faulted_objects, 0);
             assert_eq!(rolling_stones_survey.execution_errors, 0);
             assert!(rolling_stones_survey.issue_counts.is_empty());
@@ -76026,14 +77567,14 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     index: 0,
                 }
             );
-            assert_eq!(rolling_final_camera.progress.raw(), 8_404);
+            assert_eq!(rolling_final_camera.progress.raw(), 9_984);
             assert_eq!(
                 rolling_stones_survey.initial_player_translation,
                 Some([2_252_544, 1_023_744, 31_794_432])
             );
             assert_eq!(
                 rolling_stones_survey.final_player_translation,
-                Some([2_239_968, 9_256_242, -1_749_760])
+                Some([2_235_456, 9_256_245, -1_821_440])
             );
             assert_eq!(
                 player_trace(rolling_stones_runtime)
@@ -76044,15 +77585,15 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             );
             assert_eq!(
                 rolling_stones_survey.checkpoint_samples.last(),
-                Some(&(1_159, 8 << 8, [2_815_232, 2_979_072, 17_458_688]))
+                Some(&(1_298, 8 << 8, [2_815_232, 2_979_072, 17_458_688]))
             );
             assert_eq!(
                 rolling_stones_survey.saved_box_count_samples,
-                [(1_159, 0x900)]
+                [(1_298, 0x700)]
             );
             assert_eq!(
                 rolling_stones_runtime.global_word(BOX_COUNT_GLOBAL),
-                Ok(0xb00_u32)
+                Ok(0x900_u32)
             );
             assert_eq!(
                 rolling_stones_survey.effect_counts.get("save-state"),
@@ -76060,9 +77601,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             );
             assert_eq!(
                 rolling_stones_survey.effect_counts.get("send-event"),
-                Some(&95)
+                Some(&101)
             );
-            assert_eq!(rolling_stones_survey.effect_counts.get("solid"), Some(&214));
+            assert_eq!(rolling_stones_survey.effect_counts.get("solid"), Some(&212));
             assert_eq!(
                 rolling_stones_survey.effect_counts.get("master-fade-reset"),
                 Some(&1)
@@ -76092,7 +77633,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     0,
                 ]
             );
-            assert_eq!(rolling_stones_runtime.machine().random_seed(), 0x562e_0400);
+            assert_eq!(rolling_stones_runtime.machine().random_seed(), 0xfb56_14ca);
             let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
             for state in 0..=4 {
                 assert!(
@@ -76102,7 +77643,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     "carried WarpC state {state} must execute before the authored transition"
                 );
             }
-            assert_eq!(rolling_stones_runtime.draw_count(), 18_890);
+            assert_eq!(rolling_stones_runtime.draw_count(), 19_024);
             assert!(
                 rolling_stones_survey.is_clean(),
                 "Rolling Stones' carried ordinary-pad route must remain clean: {}",
@@ -76130,8 +77671,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             rolling_stones_survey
                 .export_finished_browser_replay(&report.carry, LevelId::LEVEL_COMPLETE)
                 .expect("Rolling Stones replay export must finish at Level Complete");
-            assert_eq!(report.carry.random_seed, 0x562e_0400);
-            assert_eq!(report.carry.draw_count, 18_890);
+            assert_eq!(report.carry.random_seed, 0xfb56_14ca);
+            assert_eq!(report.carry.draw_count, 19_024);
             assert_eq!(
                 [
                     GAME_STATE_GLOBAL,
@@ -76237,30 +77778,30 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     },
                 )
                 .expect("Rolling Stones' Level Complete screen must execute");
-            assert_eq!(rolling_completion_survey.frames, 465);
+            assert_eq!(rolling_completion_survey.frames, 426);
             assert_eq!(
                 rolling_completion_survey.terminal.as_deref(),
-                Some("frame 465 requested level transition to 0x19")
+                Some("frame 426 requested level transition to 0x19")
             );
-            assert_eq!(rolling_completion_survey.next_lid, Some((465, 0x19)));
+            assert_eq!(rolling_completion_survey.next_lid, Some((426, 0x19)));
             assert_eq!(rolling_completion_survey.final_live_objects, 5);
             assert_eq!(rolling_completion_survey.max_live_objects, 8);
             assert_eq!(rolling_completion_survey.successful_spawns, 2);
-            assert_eq!(rolling_completion_survey.spawn_attempts, 930);
-            assert_eq!(rolling_completion_survey.expected_spawn_rejections, 928);
+            assert_eq!(rolling_completion_survey.spawn_attempts, 852);
+            assert_eq!(rolling_completion_survey.expected_spawn_rejections, 850);
             assert_eq!(rolling_completion_survey.unexpected_spawn_errors, 0);
-            assert_eq!(rolling_completion_survey.executions, 2_975);
+            assert_eq!(rolling_completion_survey.executions, 2_868);
             assert_eq!(rolling_completion_survey.execution_errors, 0);
             assert_eq!(rolling_completion_survey.restarts, 0);
             assert_eq!(rolling_completion_survey.faulted_objects, 0);
-            assert_eq!(rolling_completion_survey.box_count_samples.len(), 36);
+            assert_eq!(rolling_completion_survey.box_count_samples.len(), 38);
             assert_eq!(
                 rolling_completion_survey.box_count_samples.first(),
                 Some(&(1, 0))
             );
             assert_eq!(
                 rolling_completion_survey.box_count_samples.last(),
-                Some(&(374, 0x2300))
+                Some(&(371, 0x2500))
             );
             assert_eq!(
                 rolling_completion_survey.effect_counts.get("transition"),
@@ -76281,9 +77822,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             );
             assert_eq!(
                 rolling_completion_runtime.machine().random_seed(),
-                0x76ec_574e
+                0xdbb3_b1a7
             );
-            assert_eq!(rolling_completion_runtime.draw_count(), 19_355);
+            assert_eq!(rolling_completion_runtime.draw_count(), 19_450);
             assert!(
                 rolling_completion_survey.is_clean(),
                 "{}",
@@ -76304,8 +77845,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 rolling_completion_survey
                     .export_finished_browser_replay(&report.carry, title)
                     .expect("Rolling Stones completion replay export must finish at Title");
-                assert_eq!(report.carry.random_seed, 0x76ec_574e);
-                assert_eq!(report.carry.draw_count, 19_355);
+                assert_eq!(report.carry.random_seed, 0xdbb3_b1a7);
+                assert_eq!(report.carry.draw_count, 19_450);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -76362,8 +77903,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| pre_hog_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 8, 1, 8, 1]
             );
-            assert_eq!(pre_hog_map.runtime.machine().random_seed(), 0x697f_94bd);
-            assert_eq!(pre_hog_map.runtime.draw_count(), 19_608);
+            assert_eq!(pre_hog_map.runtime.machine().random_seed(), 0xd613_e24a);
+            assert_eq!(pre_hog_map.runtime.draw_count(), 19_703);
             assert_eq!(pre_hog_map.runtime.faulted_object_count(), 0);
             let hog_carry = {
                 let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
@@ -76380,8 +77921,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 assert_eq!(report.resolved.level, hog_wild);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0x697f_94bd);
-                assert_eq!(report.carry.draw_count, 19_608);
+                assert_eq!(report.carry.random_seed, 0xd613_e24a);
+                assert_eq!(report.carry.draw_count, 19_703);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -76496,8 +78037,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| hog_runtime.global_word(index).unwrap()),
                 [0x500, 15, 15, 8, 1, 9, 0]
             );
-            assert_eq!(hog_runtime.machine().random_seed(), 0xab9a_b36b);
-            assert_eq!(hog_runtime.draw_count(), 21_557);
+            assert_eq!(hog_runtime.machine().random_seed(), 0x1192_71dd);
+            assert_eq!(hog_runtime.draw_count(), 21_652);
             assert!(hog_survey.is_clean(), "{}", hog_survey.summary());
             let hog_completion_carry = {
                 let mut host = NsfProgramHost::new(&hog_nsd, &hog_nsf, &hog_nsf_bytes);
@@ -76513,8 +78054,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 hog_survey
                     .export_finished_browser_replay(&report.carry, completion)
                     .expect("Hog Wild replay export must finish at Level Complete");
-                assert_eq!(report.carry.random_seed, 0xab9a_b36b);
-                assert_eq!(report.carry.draw_count, 21_557);
+                assert_eq!(report.carry.random_seed, 0x1192_71dd);
+                assert_eq!(report.carry.draw_count, 21_652);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -76551,19 +78092,19 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     },
                 )
                 .expect("Hog Wild's authentic Level Complete screen must execute");
-            assert_eq!(hog_completion_survey.frames, 305);
+            assert_eq!(hog_completion_survey.frames, 273);
             assert_eq!(
                 hog_completion_survey.terminal.as_deref(),
-                Some("frame 305 requested level transition to 0x19")
+                Some("frame 273 requested level transition to 0x19")
             );
-            assert_eq!(hog_completion_survey.next_lid, Some((305, 0x19)));
+            assert_eq!(hog_completion_survey.next_lid, Some((273, 0x19)));
             assert_eq!(hog_completion_survey.final_live_objects, 5);
             assert_eq!(hog_completion_survey.max_live_objects, 8);
             assert_eq!(hog_completion_survey.successful_spawns, 2);
-            assert_eq!(hog_completion_survey.spawn_attempts, 610);
-            assert_eq!(hog_completion_survey.expected_spawn_rejections, 608);
+            assert_eq!(hog_completion_survey.spawn_attempts, 546);
+            assert_eq!(hog_completion_survey.expected_spawn_rejections, 544);
             assert_eq!(hog_completion_survey.unexpected_spawn_errors, 0);
-            assert_eq!(hog_completion_survey.executions, 1_773);
+            assert_eq!(hog_completion_survey.executions, 1_613);
             assert_eq!(hog_completion_survey.execution_errors, 0);
             assert_eq!(hog_completion_survey.restarts, 0);
             assert_eq!(hog_completion_survey.faulted_objects, 0);
@@ -76584,8 +78125,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| hog_completion_runtime.global_word(index).unwrap()),
                 [0x300, 15, 15, 8, 1, 9, 0]
             );
-            assert_eq!(hog_completion_runtime.machine().random_seed(), 0x53a6_4a6e);
-            assert_eq!(hog_completion_runtime.draw_count(), 21_862);
+            assert_eq!(hog_completion_runtime.machine().random_seed(), 0xaeb2_81c8);
+            assert_eq!(hog_completion_runtime.draw_count(), 21_925);
             assert!(
                 hog_completion_survey.is_clean(),
                 "{}",
@@ -76606,8 +78147,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 hog_completion_survey
                     .export_finished_browser_replay(&report.carry, title)
                     .expect("Hog Wild completion replay export must finish at Title");
-                assert_eq!(report.carry.random_seed, 0x53a6_4a6e);
-                assert_eq!(report.carry.draw_count, 21_862);
+                assert_eq!(report.carry.random_seed, 0xaeb2_81c8);
+                assert_eq!(report.carry.draw_count, 21_925);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -76665,8 +78206,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| post_hog_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 9, 1, 9, 1]
             );
-            assert_eq!(post_hog_map.runtime.machine().random_seed(), 0xa257_0e5d);
-            assert_eq!(post_hog_map.runtime.draw_count(), 22_115);
+            assert_eq!(post_hog_map.runtime.machine().random_seed(), 0x13e9_5b5e);
+            assert_eq!(post_hog_map.runtime.draw_count(), 22_178);
             assert_eq!(post_hog_map.runtime.faulted_object_count(), 0);
             let native_carry = {
                 let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
@@ -76683,8 +78224,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 assert_eq!(report.resolved.level, native_fortress);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0xa257_0e5d);
-                assert_eq!(report.carry.draw_count, 22_115);
+                assert_eq!(report.carry.random_seed, 0x13e9_5b5e);
+                assert_eq!(report.carry.draw_count, 22_178);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -76732,26 +78273,26 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 },
             )
             .expect("the authentic carried Native Fortress route must execute");
-            assert_eq!(native_survey.frames, 6_730, "{}", native_survey.summary());
+            assert_eq!(native_survey.frames, 6_667, "{}", native_survey.summary());
             assert_eq!(
                 native_survey.terminal.as_deref(),
-                Some("frame 6730 requested level transition to 0x2d")
+                Some("frame 6667 requested level transition to 0x2d")
             );
-            assert_eq!(native_survey.next_lid, Some((6_730, 0x2d)));
+            assert_eq!(native_survey.next_lid, Some((6_667, 0x2d)));
             assert_eq!(native_survey.final_live_objects, 27);
             assert_eq!(native_survey.max_live_objects, 51);
             assert_eq!(native_survey.successful_spawns, 323);
-            assert_eq!(native_survey.spawn_attempts, 91_626);
-            assert_eq!(native_survey.expected_spawn_rejections, 91_303);
+            assert_eq!(native_survey.spawn_attempts, 91_248);
+            assert_eq!(native_survey.expected_spawn_rejections, 90_925);
             assert_eq!(native_survey.unexpected_spawn_errors, 0);
-            assert_eq!(native_survey.executions, 167_147);
+            assert_eq!(native_survey.executions, 166_074);
             assert_eq!(native_survey.execution_errors, 0);
             assert_eq!(native_survey.zone_transitions, 66);
             assert_eq!(native_survey.camera_ranges.len(), 60);
             assert_eq!(native_survey.camera_path_changes, 75);
-            assert_eq!(native_survey.last_camera_path_change, 6_609);
-            assert_eq!(native_survey.last_camera_progress_change, 6_701);
-            assert_eq!(native_survey.last_player_movement, 6_726);
+            assert_eq!(native_survey.last_camera_path_change, 6_546);
+            assert_eq!(native_survey.last_camera_progress_change, 6_638);
+            assert_eq!(native_survey.last_player_movement, 6_663);
             assert_eq!(native_survey.restarts, 0, "{}", native_survey.summary());
             assert!(native_survey.restart_frames.is_empty());
             assert_eq!(native_survey.death_camera_frames, 0);
@@ -76762,16 +78303,16 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             assert!(native_survey.first_issue.is_none());
             assert!(!native_survey.observed_player_states.contains(&27));
             assert_eq!(native_survey.effect_counts.get("transition"), Some(&1));
-            assert_eq!(native_survey.effect_counts.get("solid"), Some(&704));
+            assert_eq!(native_survey.effect_counts.get("solid"), Some(&705));
             assert_eq!(native_survey.effect_counts.get("save-state"), Some(&3));
             assert_eq!(native_survey.effect_counts.get("load-state"), None);
             assert_eq!(
                 native_survey.box_count_samples.last(),
-                Some(&(5_470, 3_072))
+                Some(&(5_407, 3_072))
             );
             assert_eq!(
                 native_survey.checkpoint_samples.last(),
-                Some(&(4_783, 48_128, [13_106_432, -2_150_400, 128_000]))
+                Some(&(4_720, 48_128, [13_106_432, -2_150_400, 128_000]))
             );
             let native_camera = native_survey
                 .final_camera
@@ -76806,7 +78347,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| native_runtime.global_word(index).unwrap()),
                 [0x500, 15, 15, 9, 1, 10, 0]
             );
-            assert_eq!(native_runtime.machine().random_seed(), 0x2388_0145);
+            assert_eq!(native_runtime.machine().random_seed(), 0x1ab0_6ec9);
             assert_eq!(native_runtime.draw_count(), 28_845);
             assert!(native_survey.is_clean(), "{}", native_survey.summary());
 
@@ -76824,7 +78365,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 native_survey
                     .export_finished_browser_replay(&report.carry, completion)
                     .expect("Native Fortress replay export must finish at Level Complete");
-                assert_eq!(report.carry.random_seed, 0x2388_0145);
+                assert_eq!(report.carry.random_seed, 0x1ab0_6ec9);
                 assert_eq!(report.carry.draw_count, 28_845);
                 report.carry
             };
@@ -76853,18 +78394,34 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     },
                 )
                 .expect("Native Fortress' authentic Level Complete screen must execute");
-            assert_eq!(native_completion_survey.frames, 425);
+            campaign_trace!(
+                "NATIVE_COMPLETION_FINAL {} seed={:#010x} draws={} globals={:?}",
+                native_completion_survey.summary(),
+                native_completion_runtime.machine().random_seed(),
+                native_completion_runtime.draw_count(),
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| native_completion_runtime.global_word(index).unwrap())
+            );
+            assert_eq!(native_completion_survey.frames, 393);
             assert_eq!(
                 native_completion_survey.terminal.as_deref(),
-                Some("frame 425 requested level transition to 0x19")
+                Some("frame 393 requested level transition to 0x19")
             );
-            assert_eq!(native_completion_survey.next_lid, Some((425, 0x19)));
+            assert_eq!(native_completion_survey.next_lid, Some((393, 0x19)));
             assert_eq!(native_completion_survey.final_live_objects, 5);
             assert_eq!(native_completion_survey.max_live_objects, 8);
             assert_eq!(native_completion_survey.successful_spawns, 2);
-            assert_eq!(native_completion_survey.spawn_attempts, 850);
-            assert_eq!(native_completion_survey.expected_spawn_rejections, 848);
-            assert_eq!(native_completion_survey.executions, 2_667);
+            assert_eq!(native_completion_survey.spawn_attempts, 786);
+            assert_eq!(native_completion_survey.expected_spawn_rejections, 784);
+            assert_eq!(native_completion_survey.executions, 2_512);
             assert_eq!(native_completion_survey.restarts, 0);
             assert_eq!(native_completion_survey.unexpected_spawn_errors, 0);
             assert_eq!(native_completion_survey.execution_errors, 0);
@@ -76885,9 +78442,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             );
             assert_eq!(
                 native_completion_runtime.machine().random_seed(),
-                0xf44b_20c8
+                0xad61_0369
             );
-            assert_eq!(native_completion_runtime.draw_count(), 29_270);
+            assert_eq!(native_completion_runtime.draw_count(), 29_238);
             let post_native_title_carry = {
                 let mut host =
                     NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
@@ -76903,8 +78460,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 native_completion_survey
                     .export_finished_browser_replay(&report.carry, title)
                     .expect("Native Fortress completion replay export must finish at Title");
-                assert_eq!(report.carry.random_seed, 0xf44b_20c8);
-                assert_eq!(report.carry.draw_count, 29_270);
+                assert_eq!(report.carry.random_seed, 0xad61_0369);
+                assert_eq!(report.carry.draw_count, 29_238);
                 report.carry
             };
 
@@ -76925,6 +78482,24 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 post_native_map.step(0);
             }
             post_native_map.step(PAD_CROSS);
+            campaign_trace!(
+                "POST_NATIVE_MAP_FINAL frame={} transitions={:?} progress={} seed={:#010x} draws={} globals={:?}",
+                post_native_map.frame,
+                post_native_map.transitions,
+                post_native_map.camera.location().progress.raw(),
+                post_native_map.runtime.machine().random_seed(),
+                post_native_map.runtime.draw_count(),
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| post_native_map.runtime.global_word(index).unwrap())
+            );
             assert_eq!(post_native_map.frame, 253);
             assert_eq!(post_native_map.transitions, [(253, 0x18)]);
             assert_eq!(post_native_map.camera.location().progress.raw(), 3_840);
@@ -76941,8 +78516,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| post_native_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 10, 1, 10, 1]
             );
-            assert_eq!(post_native_map.runtime.machine().random_seed(), 0xeb35_f712);
-            assert_eq!(post_native_map.runtime.draw_count(), 29_523);
+            assert_eq!(post_native_map.runtime.machine().random_seed(), 0x813c_b6a1);
+            assert_eq!(post_native_map.runtime.draw_count(), 29_491);
             let up_the_creek_carry = {
                 let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
                 let report = post_native_map
@@ -76969,8 +78544,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     )
                     .expect("post-Native map replay export must finish at Up the Creek");
                 pad = post_native_map.pad;
-                assert_eq!(report.carry.random_seed, 0xeb35_f712);
-                assert_eq!(report.carry.draw_count, 29_523);
+                assert_eq!(report.carry.random_seed, 0x813c_b6a1);
+                assert_eq!(report.carry.draw_count, 29_491);
                 report.carry
             };
 
@@ -76995,6 +78570,22 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 },
             )
             .expect("the authentic carried Up the Creek route must execute");
+            campaign_trace!(
+                "UP_THE_CREEK_FINAL {} seed={:#010x} draws={} globals={:?}",
+                up_survey.summary(),
+                up_runtime.machine().random_seed(),
+                up_runtime.draw_count(),
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| up_runtime.global_word(index).unwrap())
+            );
             assert_eq!(up_survey.frames, 4_346, "{}", up_survey.summary());
             assert_eq!(
                 up_survey.terminal.as_deref(),
@@ -77007,7 +78598,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             assert_eq!(up_survey.spawn_attempts, 66_978);
             assert_eq!(up_survey.expected_spawn_rejections, 66_786);
             assert_eq!(up_survey.unexpected_spawn_errors, 0);
-            assert_eq!(up_survey.executions, 125_902);
+            assert_eq!(up_survey.executions, 125_931);
             assert_eq!(up_survey.execution_errors, 0);
             assert_eq!(up_survey.zone_transitions, 36);
             assert_eq!(up_survey.restarts, 0);
@@ -77036,8 +78627,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             );
             assert_eq!(up_survey.saved_box_count_samples, [(1_245, 0x400)]);
             assert_eq!(up_survey.effect_counts.get("save-state"), Some(&1));
-            assert_eq!(up_survey.effect_counts.get("send-event"), Some(&164));
-            assert_eq!(up_survey.effect_counts.get("solid"), Some(&1_706));
+            assert_eq!(up_survey.effect_counts.get("send-event"), Some(&166));
+            assert_eq!(up_survey.effect_counts.get("solid"), Some(&1_709));
             assert_eq!(up_survey.effect_counts.get("reparent"), Some(&43));
             assert_eq!(up_survey.effect_counts.get("master-fade-reset"), Some(&1));
             assert_eq!(up_survey.effect_counts.get("transition"), Some(&1));
@@ -77055,8 +78646,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| up_runtime.global_word(index).unwrap()),
                 [0x500, 15, 15, 10, 1, 11, 0]
             );
-            assert_eq!(up_runtime.machine().random_seed(), 0xe4e1_81e6);
-            assert_eq!(up_runtime.draw_count(), 33_869);
+            assert_eq!(up_runtime.machine().random_seed(), 0x787a_ca26);
+            assert_eq!(up_runtime.draw_count(), 33_837);
 
             let up_completion_carry = {
                 let mut host = NsfProgramHost::new(&up_nsd, &up_nsf, &up_nsf_bytes);
@@ -77072,8 +78663,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 up_survey
                     .export_finished_browser_replay(&report.carry, completion)
                     .expect("Up the Creek replay export must finish at Level Complete");
-                assert_eq!(report.carry.random_seed, 0xe4e1_81e6);
-                assert_eq!(report.carry.draw_count, 33_869);
+                assert_eq!(report.carry.random_seed, 0x787a_ca26);
+                assert_eq!(report.carry.draw_count, 33_837);
                 report.carry
             };
             let mount_held = pad.snapshot.held;
@@ -77096,18 +78687,34 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     },
                 )
                 .expect("Up the Creek's authentic Level Complete screen must execute");
-            assert_eq!(up_completion_survey.frames, 185);
+            campaign_trace!(
+                "UP_COMPLETION_FINAL {} seed={:#010x} draws={} globals={:?}",
+                up_completion_survey.summary(),
+                up_completion_runtime.machine().random_seed(),
+                up_completion_runtime.draw_count(),
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| up_completion_runtime.global_word(index).unwrap())
+            );
+            assert_eq!(up_completion_survey.frames, 186);
             assert_eq!(
                 up_completion_survey.terminal.as_deref(),
-                Some("frame 185 requested level transition to 0x19")
+                Some("frame 186 requested level transition to 0x19")
             );
-            assert_eq!(up_completion_survey.next_lid, Some((185, 0x19)));
+            assert_eq!(up_completion_survey.next_lid, Some((186, 0x19)));
             assert_eq!(up_completion_survey.final_live_objects, 5);
             assert_eq!(up_completion_survey.max_live_objects, 8);
             assert_eq!(up_completion_survey.successful_spawns, 2);
-            assert_eq!(up_completion_survey.spawn_attempts, 370);
-            assert_eq!(up_completion_survey.expected_spawn_rejections, 368);
-            assert_eq!(up_completion_survey.executions, 996);
+            assert_eq!(up_completion_survey.spawn_attempts, 372);
+            assert_eq!(up_completion_survey.expected_spawn_rejections, 370);
+            assert_eq!(up_completion_survey.executions, 959);
             assert_eq!(up_completion_survey.zone_transitions, 0);
             assert_eq!(up_completion_survey.restarts, 0);
             assert_eq!(up_completion_survey.unexpected_spawn_errors, 0);
@@ -77117,14 +78724,14 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 up_completion_survey.box_count_samples,
                 [
                     (1, 0),
-                    (47, 0x100),
-                    (56, 0x200),
-                    (65, 0x300),
-                    (74, 0x400),
-                    (83, 0x500),
-                    (92, 0x600),
-                    (101, 0x700),
-                    (110, 0x800),
+                    (68, 0x100),
+                    (77, 0x200),
+                    (86, 0x300),
+                    (95, 0x400),
+                    (104, 0x500),
+                    (113, 0x600),
+                    (122, 0x700),
+                    (131, 0x800),
                 ]
             );
             assert_eq!(
@@ -77162,8 +78769,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| up_completion_runtime.global_word(index).unwrap()),
                 [0x300, 15, 15, 10, 1, 11, 0]
             );
-            assert_eq!(up_completion_runtime.machine().random_seed(), 0x9147_eb46);
-            assert_eq!(up_completion_runtime.draw_count(), 34_054);
+            assert_eq!(up_completion_runtime.machine().random_seed(), 0x082c_9c61);
+            assert_eq!(up_completion_runtime.draw_count(), 34_023);
 
             let post_up_title_carry = {
                 let mut host =
@@ -77180,8 +78787,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 up_completion_survey
                     .export_finished_browser_replay(&report.carry, title)
                     .expect("Up the Creek completion replay export must finish at Title");
-                assert_eq!(report.carry.random_seed, 0x9147_eb46);
-                assert_eq!(report.carry.draw_count, 34_054);
+                assert_eq!(report.carry.random_seed, 0x082c_9c61);
+                assert_eq!(report.carry.draw_count, 34_023);
                 report.carry
             };
 
@@ -77202,6 +78809,24 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 post_up_map.step(0);
             }
             post_up_map.step(PAD_CROSS);
+            campaign_trace!(
+                "POST_UP_MAP_FINAL frame={} transitions={:?} progress={} seed={:#010x} draws={} globals={:?}",
+                post_up_map.frame,
+                post_up_map.transitions,
+                post_up_map.camera.location().progress.raw(),
+                post_up_map.runtime.machine().random_seed(),
+                post_up_map.runtime.draw_count(),
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| post_up_map.runtime.global_word(index).unwrap())
+            );
             assert_eq!(post_up_map.frame, 253);
             assert_eq!(post_up_map.transitions, [(253, 0x17)]);
             assert_eq!(
@@ -77225,8 +78850,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| post_up_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 11, 1, 11, 1]
             );
-            assert_eq!(post_up_map.runtime.machine().random_seed(), 0x7bff_c615);
-            assert_eq!(post_up_map.runtime.draw_count(), 34_307);
+            assert_eq!(post_up_map.runtime.machine().random_seed(), 0x25d3_7699);
+            assert_eq!(post_up_map.runtime.draw_count(), 34_276);
             assert_eq!(post_up_map.runtime.faulted_object_count(), 0);
 
             let ripper_carry = {
@@ -77251,8 +78876,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     .export_transition_from_carry(&report.carry, &post_up_map.pad, ripper_roo.get())
                     .expect("post-Up map replay export must finish at Ripper Roo");
                 pad = post_up_map.pad;
-                assert_eq!(report.carry.random_seed, 0x7bff_c615);
-                assert_eq!(report.carry.draw_count, 34_307);
+                assert_eq!(report.carry.random_seed, 0x25d3_7699);
+                assert_eq!(report.carry.draw_count, 34_276);
                 report.carry
             };
 
@@ -77277,6 +78902,22 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 },
             )
             .expect("the authentic carried Ripper Roo route must execute");
+            campaign_trace!(
+                "RIPPER_ROO_FINAL {} seed={:#010x} draws={} globals={:?}",
+                ripper_survey.summary(),
+                ripper_runtime.machine().random_seed(),
+                ripper_runtime.draw_count(),
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| ripper_runtime.global_word(index).unwrap())
+            );
             assert_eq!(ripper_survey.frames, 2_064, "{}", ripper_survey.summary());
             assert_eq!(
                 ripper_survey.terminal.as_deref(),
@@ -77288,7 +78929,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             assert_eq!(ripper_survey.successful_spawns, 5);
             assert_eq!(ripper_survey.spawn_attempts, 10_320);
             assert_eq!(ripper_survey.expected_spawn_rejections, 10_315);
-            assert_eq!(ripper_survey.executions, 46_664);
+            assert_eq!(ripper_survey.executions, 46_666);
             assert_eq!(ripper_survey.zone_transitions, 0);
             assert_eq!(ripper_survey.save_handshakes, 2);
             assert_eq!(ripper_survey.restarts, 0);
@@ -77332,8 +78973,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 assert!(boss_event_frames.contains(&frame));
             }
             assert_eq!(ripper_survey.effect_counts.get("transition"), Some(&1));
-            assert_eq!(ripper_survey.effect_counts.get("send-event"), Some(&105));
-            assert_eq!(ripper_survey.effect_counts.get("solid"), Some(&106));
+            assert_eq!(ripper_survey.effect_counts.get("send-event"), Some(&103));
+            assert_eq!(ripper_survey.effect_counts.get("solid"), Some(&105));
             assert!(ripper_survey.is_clean(), "{}", ripper_survey.summary());
             assert_eq!(
                 [
@@ -77348,8 +78989,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| ripper_runtime.global_word(index).unwrap()),
                 [0x300, 15, 15, 11, 1, 12, 0]
             );
-            assert_eq!(ripper_runtime.machine().random_seed(), 0xca54_0d03);
-            assert_eq!(ripper_runtime.draw_count(), 36_371);
+            assert_eq!(ripper_runtime.machine().random_seed(), 0xaf6f_6053);
+            assert_eq!(ripper_runtime.draw_count(), 36_340);
 
             let post_ripper_title_carry = {
                 let mut host = NsfProgramHost::new(&ripper_nsd, &ripper_nsf, &ripper_nsf_bytes);
@@ -77365,8 +79006,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 ripper_survey
                     .export_finished_browser_replay(&report.carry, title)
                     .expect("Ripper Roo replay export must finish at Title");
-                assert_eq!(report.carry.random_seed, 0xca54_0d03);
-                assert_eq!(report.carry.draw_count, 36_371);
+                assert_eq!(report.carry.random_seed, 0xaf6f_6053);
+                assert_eq!(report.carry.draw_count, 36_340);
                 report.carry
             };
 
@@ -77387,6 +79028,24 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 post_ripper_map.step(0);
             }
             post_ripper_map.step(PAD_CROSS);
+            campaign_trace!(
+                "POST_RIPPER_MAP_FINAL frame={} transitions={:?} progress={} seed={:#010x} draws={} globals={:?}",
+                post_ripper_map.frame,
+                post_ripper_map.transitions,
+                post_ripper_map.camera.location().progress.raw(),
+                post_ripper_map.runtime.machine().random_seed(),
+                post_ripper_map.runtime.draw_count(),
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| post_ripper_map.runtime.global_word(index).unwrap())
+            );
             assert_eq!(post_ripper_map.frame, 253);
             assert_eq!(post_ripper_map.transitions, [(253, 0x20)]);
             assert_eq!(
@@ -77410,8 +79069,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| post_ripper_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 12, 1, 12, 1]
             );
-            assert_eq!(post_ripper_map.runtime.machine().random_seed(), 0xc1e0_197b);
-            assert_eq!(post_ripper_map.runtime.draw_count(), 36_624);
+            assert_eq!(post_ripper_map.runtime.machine().random_seed(), 0xebad_34fd);
+            assert_eq!(post_ripper_map.runtime.draw_count(), 36_593);
             assert_eq!(post_ripper_map.runtime.faulted_object_count(), 0);
 
             let lost_city_carry = {
@@ -77440,8 +79099,8 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     )
                     .expect("post-Ripper map replay export must finish at The Lost City");
                 pad = post_ripper_map.pad;
-                assert_eq!(report.carry.random_seed, 0xc1e0_197b);
-                assert_eq!(report.carry.draw_count, 36_624);
+                assert_eq!(report.carry.random_seed, 0xebad_34fd);
+                assert_eq!(report.carry.draw_count, 36_593);
                 report.carry
             };
             let (lost_city_nsd, lost_city_nsf, lost_city_nsf_bytes) =
@@ -77456,7 +79115,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     .expect("The Lost City must import authentic Ripper Roo campaign carry"),
                 LevelContextSource::SessionGlobals,
                 SurveyInputProfile::LostCityExactCarryRoute,
-                7_000,
+                7_200,
                 &mut pad,
                 PersistentSurveyPlan {
                     mount_held: PAD_CROSS,
@@ -77466,24 +79125,42 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 },
             )
             .expect("the authentic campaign must execute The Lost City's exact carried route");
+            campaign_trace!(
+                "LOST_CITY_FINAL {} seed={:#010x} seed_b={:#010x} draws={} globals={:?} pad={:?}",
+                lost_city_survey.summary(),
+                lost_city_runtime.machine().random_seed(),
+                lost_city_runtime.random_seed_b(),
+                lost_city_runtime.draw_count(),
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| lost_city_runtime.global_word(index).unwrap()),
+                pad.snapshot
+            );
             assert_eq!(
                 lost_city_survey.frames,
-                6_447,
+                7_014,
                 "{}",
                 lost_city_survey.summary()
             );
             assert_eq!(
                 lost_city_survey.terminal.as_deref(),
-                Some("frame 6447 requested level transition to 0x2d")
+                Some("frame 7014 requested level transition to 0x2d")
             );
-            assert_eq!(lost_city_survey.next_lid, Some((6_447, 0x2d)));
+            assert_eq!(lost_city_survey.next_lid, Some((7_014, 0x2d)));
             assert_eq!(lost_city_survey.final_live_objects, 34);
             assert_eq!(lost_city_survey.max_live_objects, 47);
-            assert_eq!(lost_city_survey.successful_spawns, 179);
-            assert_eq!(lost_city_survey.spawn_attempts, 77_968);
-            assert_eq!(lost_city_survey.expected_spawn_rejections, 77_789);
-            assert_eq!(lost_city_survey.executions, 166_431);
-            assert_eq!(lost_city_survey.zone_transitions, 49);
+            assert_eq!(lost_city_survey.successful_spawns, 207);
+            assert_eq!(lost_city_survey.spawn_attempts, 83_252);
+            assert_eq!(lost_city_survey.expected_spawn_rejections, 83_045);
+            assert_eq!(lost_city_survey.executions, 175_690);
+            assert_eq!(lost_city_survey.zone_transitions, 59);
             assert_eq!(lost_city_survey.restarts, 0);
             assert!(lost_city_survey.restart_frames.is_empty());
             assert_eq!(lost_city_survey.death_camera_frames, 0);
@@ -77492,30 +79169,29 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 lost_city_survey.checkpoint_samples,
                 [
                     (1, -1, [2_048_000, 1_738_240, 19_455_744]),
-                    (781, 0x4000, [11_571_200, -8_295_168, 204_544]),
-                    (1_879, 0x5400, [20_991_232, -8_295_168, 204_544]),
-                    (2_713, 0x5f00, [24_166_400, -6_349_568, 50_944]),
-                    (4_819, 0x8000, [16_588_800, -3_072_768, 204_544]),
+                    (796, 0x4000, [11_571_200, -8_295_168, 204_544]),
+                    (1_946, 0x5400, [20_991_232, -8_295_168, 204_544]),
+                    (3_192, 0x5f00, [24_166_400, -6_349_568, 50_944]),
+                    (5_330, 0x8000, [16_588_800, -3_072_768, 204_544]),
                 ]
             );
             assert_eq!(
                 lost_city_survey.box_count_samples,
                 [
                     (1, 0),
-                    (547, 0x100),
-                    (781, 0x200),
-                    (1_879, 0x300),
-                    (2_713, 0x400),
-                    (4_819, 0x500),
-                    (5_742, 0x600),
-                    (5_907, 0x700),
-                    (6_280, 0x800),
-                    (6_286, 0x900),
+                    (796, 0x100),
+                    (1_946, 0x200),
+                    (3_192, 0x300),
+                    (5_330, 0x400),
+                    (6_276, 0x500),
+                    (6_441, 0x600),
+                    (6_847, 0x700),
+                    (6_853, 0x800),
                 ]
             );
             assert_eq!(
                 lost_city_survey.saved_box_count_samples,
-                [(781, 0x100), (1_879, 0x200), (2_713, 0x300), (4_819, 0x400)]
+                [(796, 0), (1_946, 0x100), (3_192, 0x200), (5_330, 0x300)]
             );
             assert_eq!(lost_city_survey.save_handshakes, 0);
             assert_eq!(lost_city_survey.effect_counts.get("save-state"), Some(&4));
@@ -77538,7 +79214,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .expect("carried Lost City must retain Crash through the exit warp");
             assert_eq!(lost_city_player.zone, Eid::from_name("h5_wZ").unwrap());
             assert_eq!(lost_city_player.state, 32);
-            assert_eq!(lost_city_player.translation, [1_212_224, 650_575, 236_800]);
+            assert_eq!(lost_city_player.translation, [1_220_448, 650_576, 234_752]);
             assert_eq!(
                 [
                     GAME_STATE_GLOBAL,
@@ -77552,10 +79228,10 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| lost_city_runtime.global_word(index).unwrap()),
                 [0x500, 15, 15, 12, 1, 13, 0]
             );
-            assert_eq!(lost_city_runtime.machine().random_seed(), 0x1e7c_7803);
-            assert_eq!(lost_city_runtime.random_seed_b(), 0xf306_0442);
-            assert_eq!(lost_city_runtime.draw_count(), 43_071);
-            assert_eq!(pad.snapshot.held, PAD_LEFT | PAD_SQUARE);
+            assert_eq!(lost_city_runtime.machine().random_seed(), 0xbf11_d6c5);
+            assert_eq!(lost_city_runtime.random_seed_b(), 0xacef_8c31);
+            assert_eq!(lost_city_runtime.draw_count(), 43_607);
+            assert_eq!(pad.snapshot.held, PAD_LEFT | PAD_CROSS);
             assert_eq!(lost_city_runtime.faulted_object_count(), 0);
 
             let lost_city_completion_carry = {
@@ -77578,9 +79254,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 lost_city_survey
                     .export_finished_browser_replay(&report.carry, completion)
                     .expect("The Lost City replay export must finish at Level Complete");
-                assert_eq!(report.carry.random_seed, 0x1e7c_7803);
-                assert_eq!(report.carry.random_seed_b(), 0xf306_0442);
-                assert_eq!(report.carry.draw_count, 43_071);
+                assert_eq!(report.carry.random_seed, 0xbf11_d6c5);
+                assert_eq!(report.carry.random_seed_b(), 0xacef_8c31);
+                assert_eq!(report.carry.draw_count, 43_607);
                 report.carry
             };
             let completion_mount_held = pad.snapshot.held;
@@ -77609,24 +79285,42 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     },
                 )
                 .expect("The Lost City's authentic Level Complete screen must execute");
+            campaign_trace!(
+                "LOST_COMPLETION_FINAL {} seed={:#010x} seed_b={:#010x} draws={} globals={:?} pad={:?}",
+                lost_completion_survey.summary(),
+                lost_completion_runtime.machine().random_seed(),
+                lost_completion_runtime.random_seed_b(),
+                lost_completion_runtime.draw_count(),
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| lost_completion_runtime.global_word(index).unwrap()),
+                pad.snapshot,
+            );
             assert_eq!(
                 lost_completion_survey.frames,
-                272,
+                304,
                 "{}",
                 lost_completion_survey.summary()
             );
             assert_eq!(
                 lost_completion_survey.terminal.as_deref(),
-                Some("frame 272 requested level transition to 0x19")
+                Some("frame 304 requested level transition to 0x19")
             );
-            assert_eq!(lost_completion_survey.next_lid, Some((272, 0x19)));
+            assert_eq!(lost_completion_survey.next_lid, Some((304, 0x19)));
             assert_eq!(lost_completion_survey.final_live_objects, 5);
             assert_eq!(lost_completion_survey.max_live_objects, 8);
             assert_eq!(lost_completion_survey.successful_spawns, 2);
-            assert_eq!(lost_completion_survey.spawn_attempts, 544);
-            assert_eq!(lost_completion_survey.expected_spawn_rejections, 542);
+            assert_eq!(lost_completion_survey.spawn_attempts, 608);
+            assert_eq!(lost_completion_survey.expected_spawn_rejections, 606);
             assert_eq!(lost_completion_survey.unexpected_spawn_errors, 0);
-            assert_eq!(lost_completion_survey.executions, 1_623);
+            assert_eq!(lost_completion_survey.executions, 1_779);
             assert_eq!(lost_completion_survey.execution_errors, 0);
             assert_eq!(lost_completion_survey.zone_transitions, 0);
             assert_eq!(lost_completion_survey.restarts, 0);
@@ -77639,14 +79333,14 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 Some(&1)
             );
             assert!(lost_completion_survey.first_terminal_fall.is_none());
-            assert_eq!(lost_completion_survey.box_count_samples.len(), 18);
+            assert_eq!(lost_completion_survey.box_count_samples.len(), 19);
             assert_eq!(
                 lost_completion_survey.box_count_samples.first(),
                 Some(&(1, 0))
             );
             assert_eq!(
                 lost_completion_survey.box_count_samples.last(),
-                Some(&(191, 0x1100))
+                Some(&(206, 0x1200))
             );
             assert_eq!(
                 [
@@ -77661,9 +79355,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| lost_completion_runtime.global_word(index).unwrap()),
                 [0x300, 15, 15, 12, 1, 13, 0]
             );
-            assert_eq!(lost_completion_runtime.machine().random_seed(), 0xc89d_8ae6);
-            assert_eq!(lost_completion_runtime.random_seed_b(), 0xf306_0442);
-            assert_eq!(lost_completion_runtime.draw_count(), 43_343);
+            assert_eq!(lost_completion_runtime.machine().random_seed(), 0xfeb4_81fc);
+            assert_eq!(lost_completion_runtime.random_seed_b(), 0xacef_8c31);
+            assert_eq!(lost_completion_runtime.draw_count(), 43_911);
             assert_eq!(
                 pad.snapshot,
                 RetailPadSnapshot {
@@ -77694,9 +79388,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 lost_completion_survey
                     .export_finished_browser_replay(&report.carry, title)
                     .expect("The Lost City completion replay export must finish at Title");
-                assert_eq!(report.carry.random_seed, 0xc89d_8ae6);
-                assert_eq!(report.carry.random_seed_b(), 0xf306_0442);
-                assert_eq!(report.carry.draw_count, 43_343);
+                assert_eq!(report.carry.random_seed, 0xfeb4_81fc);
+                assert_eq!(report.carry.random_seed_b(), 0xacef_8c31);
+                assert_eq!(report.carry.draw_count, 43_911);
                 report.carry
             };
             let mut post_lost_city_map = AuthoredTitleMapHarness::from_session_with_pad(
@@ -77731,10 +79425,10 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             );
             assert_eq!(
                 post_lost_city_map.runtime.machine().random_seed(),
-                0xc89d_8ae6
+                0xfeb4_81fc
             );
-            assert_eq!(post_lost_city_map.runtime.random_seed_b(), 0xf306_0442);
-            assert_eq!(post_lost_city_map.runtime.draw_count(), 43_353);
+            assert_eq!(post_lost_city_map.runtime.random_seed_b(), 0xacef_8c31);
+            assert_eq!(post_lost_city_map.runtime.draw_count(), 43_921);
             assert_eq!(post_lost_city_map.runtime.faulted_object_count(), 0);
 
             for _ in 0..120 {
@@ -77745,6 +79439,26 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 post_lost_city_map.step(0);
             }
             post_lost_city_map.step(PAD_CROSS);
+            campaign_trace!(
+                "POST_LOST_MAP_FINAL frame={} transitions={:?} progress={} seed={:#010x} seed_b={:#010x} draws={} globals={:?} pad={:?}",
+                post_lost_city_map.frame,
+                post_lost_city_map.transitions,
+                post_lost_city_map.camera.location().progress.raw(),
+                post_lost_city_map.runtime.machine().random_seed(),
+                post_lost_city_map.runtime.random_seed_b(),
+                post_lost_city_map.runtime.draw_count(),
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| post_lost_city_map.runtime.global_word(index).unwrap()),
+                post_lost_city_map.pad.snapshot,
+            );
             assert_eq!(post_lost_city_map.frame, 253);
             assert_eq!(post_lost_city_map.transitions, [(253, 0x1c)]);
             assert_eq!(
@@ -77771,10 +79485,10 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             );
             assert_eq!(
                 post_lost_city_map.runtime.machine().random_seed(),
-                0x391a_351f
+                0xda29_1494
             );
-            assert_eq!(post_lost_city_map.runtime.random_seed_b(), 0xf306_0442);
-            assert_eq!(post_lost_city_map.runtime.draw_count(), 43_596);
+            assert_eq!(post_lost_city_map.runtime.random_seed_b(), 0xacef_8c31);
+            assert_eq!(post_lost_city_map.runtime.draw_count(), 44_164);
             assert_eq!(post_lost_city_map.runtime.faulted_object_count(), 0);
 
             let temple_ruins_carry = {
@@ -77816,9 +79530,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     .map(|index| report.carry.globals[index]),
                     [0, 15, 15, 13, 1, 13, 1]
                 );
-                assert_eq!(report.carry.random_seed, 0x391a_351f);
-                assert_eq!(report.carry.random_seed_b(), 0xf306_0442);
-                assert_eq!(report.carry.draw_count, 43_596);
+                assert_eq!(report.carry.random_seed, 0xda29_1494);
+                assert_eq!(report.carry.random_seed_b(), 0xacef_8c31);
+                assert_eq!(report.carry.draw_count, 44_164);
                 report.carry
             };
             let (temple_nsd, temple_nsf, temple_nsf_bytes) =
@@ -77842,30 +79556,48 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 },
             )
             .expect("the authentic campaign must execute Temple Ruins' completion route");
+            campaign_trace!(
+                "TEMPLE_RUINS_FINAL {} seed={:#010x} seed_b={:#010x} draws={} globals={:?} pad={:?}",
+                temple_mount_survey.summary(),
+                temple_runtime.machine().random_seed(),
+                temple_runtime.random_seed_b(),
+                temple_runtime.draw_count(),
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| temple_runtime.global_word(index).unwrap()),
+                pad.snapshot,
+            );
             assert_eq!(
                 temple_mount_survey.frames,
-                4_437,
+                4_860,
                 "{}",
                 temple_mount_survey.summary()
             );
-            assert_eq!(temple_mount_survey.next_lid, Some((4_437, 0x2d)));
+            assert_eq!(temple_mount_survey.next_lid, Some((4_860, 0x2d)));
             assert_eq!(
                 temple_mount_survey.terminal.as_deref(),
-                Some("frame 4437 requested level transition to 0x2d")
+                Some("frame 4860 requested level transition to 0x2d")
             );
             assert_eq!(temple_mount_survey.final_live_objects, 35);
-            assert_eq!(temple_mount_survey.max_live_objects, 66);
+            assert_eq!(temple_mount_survey.max_live_objects, 70);
             assert_eq!(temple_mount_survey.successful_spawns, 190);
-            assert_eq!(temple_mount_survey.spawn_attempts, 78_505);
-            assert_eq!(temple_mount_survey.expected_spawn_rejections, 78_315);
+            assert_eq!(temple_mount_survey.spawn_attempts, 90_827);
+            assert_eq!(temple_mount_survey.expected_spawn_rejections, 90_637);
             assert_eq!(temple_mount_survey.unexpected_spawn_errors, 0);
-            assert_eq!(temple_mount_survey.executions, 150_727);
+            assert_eq!(temple_mount_survey.executions, 169_462);
             assert_eq!(temple_mount_survey.execution_errors, 0);
             assert_eq!(temple_mount_survey.zone_transitions, 33);
             assert_eq!(temple_mount_survey.camera_ranges.len(), 60);
             assert_eq!(temple_mount_survey.camera_path_changes, 59);
-            assert_eq!(temple_mount_survey.last_camera_path_change, 4_253);
-            assert_eq!(temple_mount_survey.last_camera_progress_change, 4_341);
+            assert_eq!(temple_mount_survey.last_camera_path_change, 4_698);
+            assert_eq!(temple_mount_survey.last_camera_progress_change, 4_764);
             assert_eq!(temple_mount_survey.restarts, 0);
             assert!(temple_mount_survey.restart_frames.is_empty());
             assert_eq!(temple_mount_survey.death_camera_frames, 0);
@@ -77891,7 +79623,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             assert_eq!(temple_player.event, 0x1600);
             assert_eq!(
                 temple_player.translation,
-                [15_667_040, 4_742_990, 5_402_784]
+                [15_664_864, 4_743_001, 5_395_248]
             );
             assert_eq!(
                 [
@@ -77912,7 +79644,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     temple_runtime.random_seed_b(),
                     temple_runtime.draw_count(),
                 ),
-                (0x1160_9e42, 0xdff3_7021, 48_033)
+                (0x4f16_c990, 0xe9ca_6a3b, 49_024)
             );
             assert_eq!(temple_runtime.faulted_object_count(), 0);
             assert!(
@@ -77935,9 +79667,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 temple_mount_survey
                     .export_finished_browser_replay(&report.carry, completion)
                     .expect("Temple Ruins replay export must finish at Level Complete");
-                assert_eq!(report.carry.random_seed, 0x1160_9e42);
-                assert_eq!(report.carry.random_seed_b(), 0xdff3_7021);
-                assert_eq!(report.carry.draw_count, 48_033);
+                assert_eq!(report.carry.random_seed, 0x4f16_c990);
+                assert_eq!(report.carry.random_seed_b(), 0xe9ca_6a3b);
+                assert_eq!(report.carry.draw_count, 49_024);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -77989,18 +79721,18 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             assert_eq!(temple_completion_survey.spawn_attempts, 1_266);
             assert_eq!(temple_completion_survey.expected_spawn_rejections, 1_264);
             assert_eq!(temple_completion_survey.unexpected_spawn_errors, 0);
-            assert_eq!(temple_completion_survey.executions, 4_264);
+            assert_eq!(temple_completion_survey.executions, 4_229);
             assert_eq!(temple_completion_survey.execution_errors, 0);
             assert_eq!(temple_completion_survey.restarts, 0);
             assert_eq!(temple_completion_survey.faulted_objects, 0);
-            assert_eq!(temple_completion_survey.box_count_samples.len(), 55);
+            assert_eq!(temple_completion_survey.box_count_samples.len(), 54);
             assert_eq!(
                 temple_completion_survey.box_count_samples.first(),
                 Some(&(1, 0))
             );
             assert_eq!(
                 temple_completion_survey.box_count_samples.last(),
-                Some(&(524, 0x3600))
+                Some(&(521, 0x3500))
             );
             assert_eq!(
                 temple_completion_survey.effect_counts.get("transition"),
@@ -78025,7 +79757,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     temple_completion_runtime.random_seed_b(),
                     temple_completion_runtime.draw_count(),
                 ),
-                (0x3601_0088, 0xdff3_7021, 48_666)
+                (0xe6be_d688, 0xe9ca_6a3b, 49_657)
             );
             assert!(
                 temple_completion_survey.is_clean(),
@@ -78048,9 +79780,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 temple_completion_survey
                     .export_finished_browser_replay(&report.carry, title)
                     .expect("Temple Ruins completion replay export must finish at Title");
-                assert_eq!(report.carry.random_seed, 0x3601_0088);
-                assert_eq!(report.carry.random_seed_b(), 0xdff3_7021);
-                assert_eq!(report.carry.draw_count, 48_666);
+                assert_eq!(report.carry.random_seed, 0xe6be_d688);
+                assert_eq!(report.carry.random_seed_b(), 0xe9ca_6a3b);
+                assert_eq!(report.carry.draw_count, 49_657);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -78096,9 +79828,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| post_temple_map.runtime.global_word(index).unwrap()),
                 [0x300, 15, 15, 13, 1, 14, 1]
             );
-            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0x3601_0088);
-            assert_eq!(post_temple_map.runtime.random_seed_b(), 0xdff3_7021);
-            assert_eq!(post_temple_map.runtime.draw_count(), 48_676);
+            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0xe6be_d688);
+            assert_eq!(post_temple_map.runtime.random_seed_b(), 0xe9ca_6a3b);
+            assert_eq!(post_temple_map.runtime.draw_count(), 49_667);
             for _ in 0..120 {
                 post_temple_map.step(0);
             }
@@ -78126,9 +79858,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| post_temple_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 13, 1, 14, 1]
             );
-            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0xfaa7_1e46);
-            assert_eq!(post_temple_map.runtime.random_seed_b(), 0xdff3_7021);
-            assert_eq!(post_temple_map.runtime.draw_count(), 48_798);
+            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0x173f_e446);
+            assert_eq!(post_temple_map.runtime.random_seed_b(), 0xe9ca_6a3b);
+            assert_eq!(post_temple_map.runtime.draw_count(), 49_789);
             for _ in 0..120 {
                 post_temple_map.step(0);
             }
@@ -78157,9 +79889,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| post_temple_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 14, 1, 14, 1]
             );
-            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0x2d26_d8d2);
-            assert_eq!(post_temple_map.runtime.random_seed_b(), 0xdff3_7021);
-            assert_eq!(post_temple_map.runtime.draw_count(), 48_919);
+            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0xf3ff_eea0);
+            assert_eq!(post_temple_map.runtime.random_seed_b(), 0xe9ca_6a3b);
+            assert_eq!(post_temple_map.runtime.draw_count(), 49_910);
             assert_eq!(post_temple_map.runtime.faulted_object_count(), 0);
 
             let road_carry = {
@@ -78188,9 +79920,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     )
                     .expect("post-Temple map replay export must finish at Road to Nowhere");
                 pad = post_temple_map.pad;
-                assert_eq!(report.carry.random_seed, 0x2d26_d8d2);
-                assert_eq!(report.carry.random_seed_b(), 0xdff3_7021);
-                assert_eq!(report.carry.draw_count, 48_919);
+                assert_eq!(report.carry.random_seed, 0xf3ff_eea0);
+                assert_eq!(report.carry.random_seed_b(), 0xe9ca_6a3b);
+                assert_eq!(report.carry.draw_count, 49_910);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -78277,9 +80009,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| road_mount_runtime.global_word(index).unwrap()),
                 [0x100, 15, 15, 14, 1, 14, 0]
             );
-            assert_eq!(road_mount_runtime.machine().random_seed(), 0x296b_2832);
-            assert_eq!(road_mount_runtime.random_seed_b(), 0xdff3_7021);
-            assert_eq!(road_mount_runtime.draw_count(), 48_920);
+            assert_eq!(road_mount_runtime.machine().random_seed(), 0x1787_3d00);
+            assert_eq!(road_mount_runtime.random_seed_b(), 0xe9ca_6a3b);
+            assert_eq!(road_mount_runtime.draw_count(), 49_911);
             let road_mount_player = player_trace(&road_mount_runtime)
                 .expect("Road to Nowhere mount player trace must resolve")
                 .expect("Road to Nowhere mount must retain Crash");
@@ -78411,9 +80143,9 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| road_runtime.global_word(index).unwrap()),
                 [0x500, 15, 15, 14, 1, 15, 0]
             );
-            assert_eq!(road_runtime.machine().random_seed(), 0x8fd9_baba);
-            assert_eq!(road_runtime.random_seed_b(), 0xdff3_7021);
-            assert_eq!(road_runtime.draw_count(), 51_368);
+            assert_eq!(road_runtime.machine().random_seed(), 0x2185_655b);
+            assert_eq!(road_runtime.random_seed_b(), 0xe9ca_6a3b);
+            assert_eq!(road_runtime.draw_count(), 52_359);
             assert_eq!(road_runtime.faulted_object_count(), 0);
             assert!(
                 road_survey.is_clean(),
@@ -78462,12 +80194,20 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 )
                 .expect("Road to Nowhere's authentic Level Complete screen must execute");
             assert_eq!(
-                road_completion_survey.next_lid.map(|(_, lid)| lid),
-                Some(0x19),
+                road_completion_survey.frames,
+                393,
                 "{}",
                 road_completion_survey.summary()
             );
-            assert!(road_completion_survey.is_clean());
+            assert_eq!(road_completion_survey.next_lid, Some((393, 0x19)));
+            assert_eq!(road_completion_survey.restarts, 0);
+            assert_eq!(road_completion_survey.death_camera_frames, 0);
+            assert!(road_completion_survey.first_terminal_fall.is_none());
+            assert!(
+                road_completion_survey.is_clean(),
+                "{}",
+                road_completion_survey.summary()
+            );
 
             let post_road_title_carry = {
                 let mut host =
@@ -78539,7 +80279,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 parse_local_pair(root, boulder_dash).expect("Boulder Dash pair must parse");
             let mut boulder_dash_mount_pad = pad;
             let mount_held = boulder_dash_mount_pad.snapshot.held;
-            let (boulder_dash_mount_survey, _boulder_dash_mount_runtime) =
+            let (boulder_dash_mount_survey, boulder_dash_mount_runtime) =
                 survey_pair_with_persistent_pad(
                     known_name(boulder_dash),
                     boulder_dash,
@@ -78562,7 +80302,27 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                     },
                 )
                 .expect("Boulder Dash's carried first frame must execute");
-            assert!(boulder_dash_mount_survey.is_clean());
+            assert_eq!(boulder_dash_mount_survey.frames, 1);
+            assert_eq!(boulder_dash_mount_survey.next_lid, None);
+            assert_eq!(boulder_dash_mount_survey.restarts, 0);
+            assert_eq!(boulder_dash_mount_survey.death_camera_frames, 0);
+            assert!(boulder_dash_mount_survey.first_terminal_fall.is_none());
+            assert_eq!(
+                boulder_dash_mount_survey.final_player_translation,
+                Some([2_099_200, 8_293_888, -17_664_768])
+            );
+            assert_eq!(
+                player_trace(&boulder_dash_mount_runtime)
+                    .expect("Boulder Dash mount player trace must resolve")
+                    .expect("Boulder Dash mount must retain Crash")
+                    .state,
+                40
+            );
+            assert!(
+                boulder_dash_mount_survey.is_clean(),
+                "{}",
+                boulder_dash_mount_survey.summary()
+            );
 
             let mount_held = pad.snapshot.held;
             let (boulder_dash_survey, mut boulder_dash_runtime) = survey_pair_with_persistent_pad(
@@ -78584,15 +80344,48 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             )
             .expect("Boulder Dash's authentic carried completion route must execute");
             assert_eq!(
-                boulder_dash_survey.next_lid.map(|(_, lid)| lid),
-                Some(0x2d),
+                boulder_dash_survey.frames,
+                3_085,
                 "{}",
                 boulder_dash_survey.summary()
             );
+            assert_eq!(boulder_dash_survey.next_lid, Some((3_085, 0x2d)));
+            assert_eq!(
+                boulder_dash_survey.terminal.as_deref(),
+                Some("frame 3085 requested level transition to 0x2d")
+            );
+            assert_eq!(boulder_dash_survey.zone_transitions, 38);
+            assert_eq!(boulder_dash_survey.camera_ranges.len(), 71);
+            assert_eq!(boulder_dash_survey.camera_path_changes, 70);
+            assert_eq!(boulder_dash_survey.last_camera_path_change, 2_925);
+            let boulder_dash_camera = boulder_dash_survey
+                .final_camera
+                .expect("Boulder Dash must retain its authored end-zone camera");
+            assert_eq!(
+                boulder_dash_camera.path,
+                RetailPathId {
+                    zone: Eid::from_name("0a_jZ")
+                        .expect("fixed Boulder Dash end-zone EID is valid"),
+                    index: 0,
+                }
+            );
+            assert_eq!(boulder_dash_camera.progress.raw(), 20_479);
             assert_eq!(boulder_dash_survey.restarts, 0);
             assert!(boulder_dash_survey.restart_frames.is_empty());
             assert_eq!(boulder_dash_survey.death_camera_frames, 0);
             assert!(boulder_dash_survey.first_terminal_fall.is_none());
+            assert_eq!(
+                boulder_dash_survey.final_player_translation,
+                Some([2_283_072, 4_753_702, 32_124_160])
+            );
+            let boulder_dash_player = player_trace(&boulder_dash_runtime)
+                .expect("carried Boulder Dash player trace must resolve")
+                .expect("carried Boulder Dash must retain Crash through WarpC");
+            assert_eq!(boulder_dash_player.state, 32);
+            assert_eq!(
+                boulder_dash_player.translation,
+                [2_283_072, 4_753_702, 32_124_160]
+            );
             assert_eq!(
                 [
                     GAME_STATE_GLOBAL,
@@ -78606,7 +80399,14 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .map(|index| boulder_dash_runtime.global_word(index).unwrap()),
                 [0x500, 15, 15, 15, 1, 16, 0]
             );
-            assert!(boulder_dash_survey.is_clean());
+            assert_eq!(boulder_dash_runtime.machine().random_seed(), 0x550a_52f0);
+            assert_eq!(boulder_dash_runtime.random_seed_b(), 0xe9ca_6a3b);
+            assert_eq!(boulder_dash_runtime.draw_count(), 56_090);
+            assert!(
+                boulder_dash_survey.is_clean(),
+                "{}",
+                boulder_dash_survey.summary()
+            );
             let boulder_completion_carry = {
                 let mut host = NsfProgramHost::new(
                     &boulder_dash_nsd,
@@ -78638,74 +80438,6 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 continue_after_sunset_mount,
             );
         }
-
-        eprintln!(
-            concat!(
-                "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete ",
-                "at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); ",
-                "Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete ",
-                "at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); ",
-                "Map -> The Great Gate at frame 253 (draw {}); Great Gate -> Level Complete at ",
-                "frame {} (draw {}); third Level Complete -> Title at frame {} (draw {}); Map -> ",
-                "Boulders at frame 253 (draw {}); Boulders legally local authored PBAK: 990 frames, ",
-                "0Q_eZ:0@0 -> 0I_eZ:1@3840, 16 paths/21 changes, 10 zone transitions, 8 boxes, ",
-                "RNG {:#010x}, draw {}; completion route: {} frames -> Level Complete, 48 paths/53 ",
-                "changes, 26 zone transitions, 15 boxes, RNG {:#010x}, draw {}; fourth Level ",
-                "Complete -> Title at frame {} (draw {}); Map -> Upstream at frame 253 (draw {}); ",
-                "Upstream carried-spawn PBAK phase mismatch and recovery: {} frames, 3 prefix ",
-                "restarts, 0n checkpoint through the normal end transition, RNG {:#010x}, draw {}; ",
-                "Papu Papu: 3 authentic hits -> Title at frame 812 (draw 4332); Map -> Rolling ",
-                "Stones at frame 66 (draw 4398); Rolling Stones carried route: 2465 frames -> ",
-                "Level Complete, 45 paths/46 changes, 32 zone transitions, 11 boxes, RNG ",
-                "0xb40bac74, draw 6863; Rolling Stones Level Complete -> Title at frame 425 ",
-                "(draw 7288); Map -> Hog Wild at frame 253 (draw 7541); Hog Wild -> Level ",
-                "Complete at frame 1949 (draw 9490); sixth Level Complete -> Title at frame ",
-                "273 (draw 9763); Map -> Native Fortress at frame 253 (draw 10016); Native ",
-                "Fortress carried route: 6949 frames -> Level Complete, 60 paths/77 changes, ",
-                "68 zone transitions, no deaths/restarts, RNG 0x8e26e064, draw 16965; seventh ",
-                "Level Complete -> Title at frame 425 (draw 17390); Map -> Up the Creek at ",
-                "frame 253 (draw 17643); Up the Creek carried route: 4346 frames -> Level ",
-                "Complete, 53 paths/58 changes, 36 zone transitions, no deaths/restarts, RNG ",
-                "0x93e26958, draw 21989; eighth Level Complete -> Title at frame 225 (draw ",
-                "22214); Map -> Ripper Roo at frame 253 (draw 22467); Ripper Roo: 3 authentic ",
-                "hits -> Title at frame 2064, RNG 0xe2d784b2, draw 24531; Map -> The Lost City ",
-                "at frame 253 (draw 24784); The Lost City carried route: 7445 frames -> Title, ",
-                "61 paths/101 changes, 58 zone transitions, RNG 0xba042128, draw 1610; Map -> ",
-                "Temple Ruins at frame 253 (RNG 0xa5a69d6c, draw 1863); Temple Ruins crossed ",
-                "its carried route in 5041 frames -> Level Complete, 60 paths/59 changes, 33 ",
-                "zone transitions, no deaths/restarts, RNG 0x0cfc7096, draw 6904; Temple Ruins ",
-                "Level Complete -> Title at frame 633 (RNG 0x7f0dda49, draw 7537); Map -> Road ",
-                "to Nowhere at frame 253 (RNG 0xcd833c8b, draw 7790); Road to Nowhere crossed ",
-                "its carried route in 2449 frames -> Level Complete, 50 paths/49 changes, 26 ",
-                "zone transitions, no deaths/restarts, RNG 0xa2cc489a, draw 10239",
-            ),
-            n_sanity_survey.next_lid.unwrap().0,
-            n_sanity_draw_count,
-            completion_survey.next_lid.unwrap().0,
-            completion_draw_count,
-            2_677,
-            jungle_survey.next_lid.unwrap().0,
-            5_223,
-            jungle_completion_survey.next_lid.unwrap().0,
-            5_529,
-            5_782,
-            great_gate_survey.frames,
-            great_gate_runtime.draw_count(),
-            great_gate_completion_survey.frames,
-            great_gate_completion_runtime.draw_count(),
-            post_great_gate_map_draw_count,
-            boulders_runtime.machine().random_seed(),
-            boulders_runtime.draw_count(),
-            completion_route_survey.frames,
-            completion_route_runtime.machine().random_seed(),
-            completion_route_runtime.draw_count(),
-            boulders_completion_survey.frames,
-            boulders_completion_runtime.draw_count(),
-            post_boulders_map_draw_count,
-            upstream_survey.frames,
-            upstream_runtime.machine().random_seed(),
-            upstream_runtime.draw_count(),
-        );
     }
 }
 

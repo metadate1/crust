@@ -383,6 +383,89 @@ test("publisher discovery keeps a bonus return on the one continuous campaign pa
   );
 });
 
+test("composer joins a bonus final pad to the returned parent's post-restart boundary", async () => {
+  const bonusEntry = checkpoint(0x33, 20, 2);
+  const returnedParentEntry = {
+    ...checkpoint(0x12, 30, 3),
+    retailHardRestarts: 1,
+    retailLoadStates: 1,
+  };
+  const completionEntry = {
+    ...checkpoint(0x2d, 40, 4),
+    retailHardRestarts: 1,
+    retailLoadStates: 1,
+  };
+  const bonusFragment = fragment(
+    bonusEntry,
+    returnedParentEntry,
+    [{ frames: 1, held: 0x0040 }],
+  );
+  const mountedParentPad = advancePadSnapshot(
+    bonusFragment.finalPad,
+    bonusFragment.finalPad.held,
+  );
+  const returnedParentFragment = fragment(
+    returnedParentEntry,
+    completionEntry,
+    [{ frames: 1, held: 0 }],
+    { initialPad: mountedParentPad },
+  );
+  const manifest = {
+    schema: 1,
+    localDiagnosticOnly: true,
+    canonicalCampaign: false,
+    bootLid: bonusEntry.currentLid,
+    unlockAll: false,
+    phases: [
+      phase(
+        "bonus-two",
+        "./bonus-two.json",
+        bonusEntry,
+        returnedParentEntry,
+      ),
+      phase(
+        "returned-great-gate",
+        "./returned-great-gate.json",
+        returnedParentEntry,
+        completionEntry,
+      ),
+    ],
+    titleMapHandoffs: [],
+  };
+  const fragments = new Map([
+    ["./bonus-two.json", bonusFragment],
+    ["./returned-great-gate.json", returnedParentFragment],
+  ]);
+
+  const replay = await composeCampaignReplay(
+    manifest,
+    async (reference) => fragments.get(reference),
+  );
+  assert.equal(replay.composition.phaseIds.length, 2);
+  assert.equal(
+    bonusFragment.exitCheckpoint.retailHardRestarts,
+    returnedParentFragment.entryCheckpoint.retailHardRestarts,
+  );
+  assert.notDeepEqual(
+    bonusFragment.finalPad,
+    returnedParentFragment.initialPad,
+    "the source fragment keeps its final pad while the destination owns the mount shift",
+  );
+
+  const staleBonus = structuredClone(bonusFragment);
+  staleBonus.exitCheckpoint.retailHardRestarts = 0;
+  await assert.rejects(
+    composeCampaignReplay(
+      manifest,
+      async (reference) =>
+        reference === "./bonus-two.json"
+          ? staleBonus
+          : fragments.get(reference),
+    ),
+    /exitCheckpoint does not match the exact manifest checkpoint.*retailHardRestarts/s,
+  );
+});
+
 test("longest-path discovery refuses to bridge a physical-pad seam", () => {
   const { fragments } = syntheticCampaign();
   const disconnected = structuredClone(fragments.get("./jungle.json"));

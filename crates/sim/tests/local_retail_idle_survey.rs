@@ -238,6 +238,45 @@ fn jungle_rollers_pbak_hard_restart_preserves_crash() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn stormy_ascent_direct_boot_reaches_late_authored_lift() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x22);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Stormy Ascent pair must parse");
+    let (survey, _) = survey_pair_with_runtime(
+        "Stormy Ascent",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::StormyAscentCompletionRoute,
+        8_250,
+    )
+    .expect("Stormy Ascent's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.next_lid, None, "{}", survey.summary());
+    let [x, y, _] = survey
+        .final_player_translation
+        .expect("the late authored lift must retain Crash");
+    assert!(x >= 34_000_000, "{}", survey.summary());
+    assert!(
+        (-3_100_000..=-2_800_000).contains(&y),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn synthetic_post_castle_session_reaches_ending_and_returns_to_title() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -1998,6 +2037,7 @@ enum SurveyInputProfile {
     CastleMachineryExactCampaignPhase,
     FumblingInTheDarkCompletionRoute,
     SlipperyClimbCompletionRoute,
+    StormyAscentCompletionRoute,
     UpstreamPhaseRobust,
     RollingStonesCheckpoint,
     RollingStonesExactCampaign,
@@ -2122,6 +2162,7 @@ impl SurveyInputProfile {
             Self::CastleMachineryExactCampaignPhase => "castle-machinery-exact-campaign-phase",
             Self::FumblingInTheDarkCompletionRoute => "fumbling-in-the-dark-completion-route",
             Self::SlipperyClimbCompletionRoute => "slippery-climb-completion-route",
+            Self::StormyAscentCompletionRoute => "stormy-ascent-completion-route",
             Self::UpstreamPhaseRobust => "upstream-phase-robust",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
             Self::RollingStonesExactCampaign => "rolling-stones-exact-campaign",
@@ -2195,6 +2236,7 @@ impl SurveyInputProfile {
                 | Self::CastleMachineryExactCampaignPhase
                 | Self::FumblingInTheDarkCompletionRoute
                 | Self::SlipperyClimbCompletionRoute
+                | Self::StormyAscentCompletionRoute
                 | Self::UpstreamPhaseRobust
                 | Self::RollingStonesCheckpoint
                 | Self::RollingStonesExactCampaign
@@ -33183,6 +33225,5624 @@ impl CastleMachineryCompletionRouteController {
 ///
 /// Moving-platform handoffs use observed position and direction rather than a
 /// frame schedule so small changes in earlier landing timing do not compound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StormyAscentCompletionRouteController {
+    horizontal: u32,
+    jump_frames: u8,
+    release_frames: u8,
+    tick: u32,
+    first_retracting_stair_stage: u8,
+    first_retracting_stair_wait: u8,
+    a4_wall_stage: u8,
+    a4_wall_wait: u8,
+    a4_door_wait: u8,
+    b2_upper_wait: u8,
+    c2_lift_last_top: Option<i32>,
+    c2_horizontal_last_x: Option<i32>,
+    c2_outer_lift_target: Option<VmObjectHandle>,
+    c2_transfer_runup: u8,
+    c2_transfer_stage: u8,
+    c2_checkpoint_recentered: bool,
+    c3_retract_target: Option<VmObjectHandle>,
+    c3_retract_hops: u8,
+    d1_platform_last_top: Option<i32>,
+    d3_platform_last_y: Option<i32>,
+    d3_phase_complete: bool,
+    d3_target_platform: Option<VmObjectHandle>,
+    d3_platform_hops: u8,
+    d3_platform_runup: u8,
+    f1_platform_wait: u8,
+    i1_third_last_x: Option<i32>,
+    i3_runup: u8,
+    j2_rotating_target: Option<VmObjectHandle>,
+}
+
+impl Default for StormyAscentCompletionRouteController {
+    fn default() -> Self {
+        Self {
+            horizontal: PAD_RIGHT,
+            jump_frames: 0,
+            release_frames: 0,
+            tick: 0,
+            first_retracting_stair_stage: 0,
+            first_retracting_stair_wait: 0,
+            a4_wall_stage: 0,
+            a4_wall_wait: 0,
+            a4_door_wait: 0,
+            b2_upper_wait: 0,
+            c2_lift_last_top: None,
+            c2_horizontal_last_x: None,
+            c2_outer_lift_target: None,
+            c2_transfer_runup: 0,
+            c2_transfer_stage: 0,
+            c2_checkpoint_recentered: false,
+            c3_retract_target: None,
+            c3_retract_hops: 0,
+            d1_platform_last_top: None,
+            d3_platform_last_y: None,
+            d3_phase_complete: false,
+            d3_target_platform: None,
+            d3_platform_hops: 0,
+            d3_platform_runup: 0,
+            f1_platform_wait: 0,
+            i1_third_last_x: None,
+            i3_runup: 0,
+            j2_rotating_target: None,
+        }
+    }
+}
+
+impl StormyAscentCompletionRouteController {
+    fn held(
+        &mut self,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        player_collider_entity: Option<u16>,
+        checkpoint_id: i32,
+        route_objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        if matches!(player.state, 22 | 23 | 40) {
+            self.jump_frames = 0;
+            return 0;
+        }
+        self.tick = self.tick.saturating_add(1);
+
+        let zone = camera.path.zone.name();
+        let name = zone.as_deref().unwrap_or_default();
+        let predicted_depth = player.translation[2].saturating_add(player.velocity[2] / 4);
+        let a4_box_lane = if predicted_depth > -130_000 {
+            PAD_UP
+        } else if predicted_depth < -180_000 {
+            PAD_DOWN
+        } else {
+            0
+        };
+        if name == "a3_yZ" && player_collider_entity == Some(16) {
+            let first_lift_top = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 16
+                )
+                .then_some(object.bound?.max.y)
+            });
+            if first_lift_top.is_some_and(|top| top < -16_020_000) {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            self.jump_frames = 17;
+            self.release_frames = 3;
+            return PAD_LEFT | PAD_CROSS;
+        }
+        if name == "a3_yZ" && self.first_retracting_stair_stage < 2 {
+            let retracting_stair = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 28
+                )
+                .then_some((object.translation, object.bound?))
+            });
+            if self.first_retracting_stair_stage == 0
+                && player.status_a & 1 != 0
+                && retracting_stair.is_some_and(|(_, bound)| {
+                    bound.max.y.abs_diff(player.translation[1]) <= 90_000
+                        && (bound.min.x - 50_000..=bound.max.x + 50_000)
+                            .contains(&player.translation[0])
+                })
+            {
+                self.first_retracting_stair_stage = 1;
+            }
+            if self.first_retracting_stair_stage == 1 {
+                self.first_retracting_stair_wait =
+                    self.first_retracting_stair_wait.saturating_add(1);
+            }
+            let first_wait = std::env::var("C1_STORMY_FIRST_WAIT")
+                .ok()
+                .and_then(|value| value.parse::<u8>().ok())
+                .unwrap_or(80);
+            if self.first_retracting_stair_stage == 1
+                && self.first_retracting_stair_wait >= first_wait
+            {
+                self.first_retracting_stair_stage = 2;
+                self.horizontal = PAD_LEFT;
+                self.jump_frames = 17;
+                self.release_frames = 3;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.first_retracting_stair_stage == 1 {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+        }
+        if name == "a4_yZ" && self.a4_wall_stage < 2 {
+            if self.a4_wall_stage == 0 && player.translation[0] <= 1_900_000 {
+                self.a4_wall_stage = 1;
+            }
+            if self.a4_wall_stage == 1 {
+                self.a4_wall_stage = 2;
+                self.horizontal = PAD_RIGHT;
+                self.jump_frames = 17;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+        }
+        if name == "a4_yZ"
+            && self.a4_wall_stage == 2
+            && player.translation[0] >= 2_500_000
+            && player.translation[1] >= -15_000_000
+        {
+            self.a4_wall_stage = 3;
+            self.a4_door_wait = 0;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if name == "a4_yZ" && self.a4_wall_stage == 3 {
+            self.a4_door_wait = self.a4_door_wait.saturating_add(1);
+            if self.a4_door_wait >= 3 && player.status_a & 1 != 0 && matches!(player.state, 1..=3) {
+                self.a4_wall_stage = 6;
+                self.horizontal = PAD_RIGHT;
+                self.jump_frames = 17;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | a4_box_lane;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return if player.translation[0] < 2_600_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if name == "a4_yZ"
+            && self.a4_wall_stage == 6
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 2_980_000
+            && player.translation[1] >= -14_500_000
+        {
+            self.a4_wall_stage = 7;
+            self.a4_door_wait = 0;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if name == "a4_yZ" && self.a4_wall_stage == 7 {
+            self.a4_door_wait = self.a4_door_wait.saturating_add(1);
+            if self.a4_door_wait >= 3 && player.status_a & 1 != 0 {
+                self.a4_wall_stage = 77;
+                self.a4_door_wait = 0;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_CROSS | a4_box_lane;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if name == "a4_yZ" && self.a4_wall_stage == 77 {
+            self.a4_door_wait = self.a4_door_wait.saturating_add(1);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x > 3_100_000 {
+                PAD_LEFT
+            } else if predicted_x < 3_040_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if self.a4_door_wait > 8
+                && player.status_a & 1 != 0
+                && !route_objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 30
+                    )
+                })
+            {
+                self.a4_wall_stage = 78;
+                self.a4_door_wait = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let square = if self.a4_door_wait == 8 {
+                PAD_SQUARE
+            } else {
+                0
+            };
+            return horizontal | a4_box_lane | PAD_CROSS | square;
+        }
+        if name == "a4_yZ" && self.a4_wall_stage == 78 {
+            self.a4_door_wait = self.a4_door_wait.saturating_add(1);
+            if self.a4_door_wait >= 3 && player.status_a & 1 != 0 {
+                self.a4_wall_stage = 79;
+                self.horizontal = 0;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                self.a4_door_wait = 0;
+                return a4_box_lane | PAD_CROSS;
+            }
+            return 0;
+        }
+        if name == "a4_yZ" && self.a4_wall_stage == 79 {
+            self.a4_door_wait = self.a4_door_wait.saturating_add(1);
+            if route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 29 && object.state != 0
+                )
+            }) {
+                self.a4_wall_stage = 4;
+                self.a4_door_wait = 0;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                self.horizontal = PAD_LEFT;
+                return PAD_LEFT | PAD_UP;
+            }
+            let held = PAD_UP | if self.a4_door_wait >= 8 { PAD_LEFT } else { 0 };
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "a4_yZ" | "b1_yZ")
+            && self.a4_wall_stage == 4
+            && player.status_a & 1 != 0
+            && player.translation[0] <= 2_100_000
+            && player.translation[1] >= -13_900_000
+        {
+            self.a4_wall_stage = 5;
+        }
+        if matches!(name, "a4_yZ" | "b1_yZ") && self.a4_wall_stage == 5 {
+            let left_lift_y = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 27
+                )
+                .then_some(object.translation[1])
+            });
+            let upper_wall_phase_ready = route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 37
+                ) && object.state == 12
+                    && (40..=51)
+                        .contains(&player.animation_stamp.saturating_sub(object.state_stamp))
+            });
+            if left_lift_y.is_some_and(|y| y >= -13_120_000) && upper_wall_phase_ready {
+                self.a4_wall_stage = 9;
+                self.horizontal = PAD_RIGHT;
+                return PAD_RIGHT;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if name == "b1_yZ" && self.a4_wall_stage == 9 {
+            if player.translation[0] >= 1_960_000 {
+                self.a4_wall_stage = 8;
+                self.jump_frames = 17;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "b2_yZ"
+            && self.a4_wall_stage == 8
+            && player.status_a & 1 != 0
+            && (player_collider_entity == Some(40)
+                || (player.translation[0] >= 3_000_000 && player.translation[1] >= -12_600_000))
+        {
+            self.a4_wall_stage = 10;
+        }
+        if name == "b2_yZ" && self.a4_wall_stage == 10 {
+            self.a4_wall_stage = 13;
+            self.horizontal = PAD_LEFT;
+            return PAD_LEFT;
+        }
+        if name == "b2_yZ" && self.a4_wall_stage == 13 {
+            let upper_wall_lane_ready = route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 37
+                ) && object.frame_bound.is_some_and(|bound| {
+                    (bound.min.z..=bound.max.z).contains(&player.translation[2])
+                })
+            });
+            if upper_wall_lane_ready {
+                self.a4_wall_stage = 11;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            return PAD_LEFT;
+        }
+        if name == "b2_yZ"
+            && self.a4_wall_stage == 11
+            && player.status_a & 1 != 0
+            && player_collider_entity == Some(37)
+            && (2_450_000..=2_720_000).contains(&player.translation[0])
+            && player.translation[1] >= -12_750_000
+        {
+            self.a4_wall_stage = 120;
+        }
+        if name == "b2_yZ" && self.a4_wall_stage == 120 {
+            self.a4_wall_stage = 121;
+            self.jump_frames = 32;
+            self.release_frames = 3;
+            self.horizontal = PAD_LEFT;
+            return PAD_LEFT;
+        }
+        if matches!(name, "b1_yZ" | "b2_yZ") && self.a4_wall_stage == 121 {
+            if player.status_a & 1 != 0
+                && player_collider_entity != Some(37)
+                && player.translation[0] <= 2_350_000
+                && player.translation[1] >= -12_150_000
+            {
+                self.a4_wall_stage = 20;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            return PAD_LEFT;
+        }
+        if name == "b2_yZ" && self.a4_wall_stage == 20 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let staircase_phase_ready = route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 38
+                ) && object.state == 13
+                    && player.animation_stamp.saturating_sub(object.state_stamp) <= 3
+            }) && route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 53,
+                        subtype: 10,
+                    }
+                ) && object.translation[0] >= 2_600_000
+                    && object.frame_bound.is_some()
+            });
+            if staircase_phase_ready {
+                self.a4_wall_stage = 23;
+            }
+            return 0;
+        }
+        if name == "b2_yZ" && self.a4_wall_stage == 23 {
+            self.a4_wall_stage = 21;
+            self.jump_frames = 32;
+            self.release_frames = 3;
+            return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+        }
+        if matches!(name, "b2_yZ" | "b3_yZ")
+            && self.a4_wall_stage == 21
+            && player.status_a & 1 != 0
+            && (3_000_000..=3_350_000).contains(&player.translation[0])
+            && player.translation[1] >= -11_550_000
+        {
+            self.a4_wall_stage = 22;
+        }
+        if name == "b2_yZ"
+            && self.a4_wall_stage == 21
+            && player.status_a & 1 != 0
+            && (2_450_000..3_000_000).contains(&player.translation[0])
+            && player.translation[1] >= -12_000_000
+        {
+            self.a4_wall_stage = 210;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if name == "b2_yZ" && self.a4_wall_stage == 210 {
+            self.a4_wall_stage = 21;
+            self.jump_frames = 32;
+            self.release_frames = 3;
+            return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+        }
+        if matches!(name, "b2_yZ" | "b3_yZ") && self.a4_wall_stage == 21 {
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) > 3_175_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS;
+            }
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+            }
+            return held;
+        }
+        if name == "b3_yZ" && self.a4_wall_stage == 22 {
+            let upper_casoc = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 53,
+                        subtype: 10,
+                    }
+                )
+                .then_some((object.translation, object.bound?))
+                .filter(|(translation, _)| translation[0] >= 2_850_000)
+            });
+            if player_collider_entity == Some(40)
+                && player.translation[1] >= -10_700_000
+                && upper_casoc.is_some_and(|(translation, bound)| {
+                    translation[0] >= 2_850_000 && bound.max.y >= -11_500_000
+                })
+            {
+                self.a4_wall_stage = 24;
+                self.jump_frames = 10;
+                self.release_frames = 3;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if name == "b3_yZ" && self.a4_wall_stage == 24 {
+            if player.status_a & 1 != 0
+                && (2_850_000..=3_100_000).contains(&player.translation[0])
+                && player.translation[1] >= -11_550_000
+            {
+                self.a4_wall_stage = 25;
+                self.b2_upper_wait = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) > 2_970_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return held;
+        }
+        if name == "b3_yZ" && self.a4_wall_stage == 25 {
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            let wait = std::env::var("C1_STORMY_B3_CASOC_WAIT")
+                .ok()
+                .and_then(|value| value.parse::<u8>().ok())
+                .unwrap_or(u8::MAX);
+            if self.b2_upper_wait >= wait {
+                self.a4_wall_stage = 26;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if name == "b3_yZ" && self.a4_wall_stage == 26 {
+            if player_collider_entity == Some(40)
+                || (player.status_a & 1 != 0
+                    && (3_050_000..=3_300_000).contains(&player.translation[0])
+                    && player.translation[1] >= -11_300_000)
+            {
+                self.a4_wall_stage = 27;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) < 3_170_000 {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return held;
+        }
+        if name == "b3_yZ" && self.a4_wall_stage == 27 {
+            if player_collider_entity == Some(40) && player.translation[1] >= -10_700_000 {
+                self.a4_wall_stage = 28;
+                self.jump_frames = 17;
+                self.release_frames = 3;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if matches!(name, "b3_yZ" | "b4_yZ") && self.a4_wall_stage == 28 {
+            if player.status_a & 1 != 0
+                && player.translation[0] <= 3_000_000
+                && player.translation[1] >= -10_900_000
+            {
+                self.a4_wall_stage = 29;
+            } else {
+                let held =
+                    if player.translation[0].saturating_add(player.velocity[0] / 8) > 2_700_000 {
+                        PAD_LEFT
+                    } else {
+                        PAD_RIGHT
+                    };
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS;
+                }
+                if self.release_frames > 0 {
+                    self.release_frames -= 1;
+                }
+                return held;
+            }
+        }
+        if name == "b3_yZ" && self.a4_wall_stage == 29 {
+            if player.state == 1 && player.status_a & 1 != 0 {
+                self.a4_wall_stage = 30;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if matches!(name, "b3_yZ" | "b4_yZ") && self.a4_wall_stage == 30 {
+            if player.status_a & 1 != 0
+                && (2_300_000..=2_750_000).contains(&player.translation[0])
+                && player.translation[1] >= -10_700_000
+            {
+                self.a4_wall_stage = 31;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) > 2_350_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return held | PAD_DOWN | PAD_SQUARE;
+        }
+        if matches!(name, "b3_yZ" | "b4_yZ") && self.a4_wall_stage == 31 {
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 32;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if matches!(name, "b3_yZ" | "b4_yZ") && self.a4_wall_stage == 32 {
+            if player.status_a & 1 != 0
+                && (1_850_000..=2_350_000).contains(&player.translation[0])
+                && player.translation[1] >= -10_700_000
+            {
+                self.a4_wall_stage = 33;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) > 2_100_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return held | PAD_SQUARE;
+        }
+        if matches!(name, "b3_yZ" | "b4_yZ") && self.a4_wall_stage == 33 {
+            let next_lift_top = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 41
+                )
+                .then_some(object.bound?.max.y)
+            });
+            if player.state == 1
+                && player.status_a & 1 != 0
+                && next_lift_top.is_some_and(|top| top <= -10_250_000)
+            {
+                self.a4_wall_stage = 34;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_SQUARE;
+        }
+        if matches!(name, "b3_yZ" | "b4_yZ") && self.a4_wall_stage == 34 {
+            if player_collider_entity == Some(41)
+                || (player.status_a & 1 != 0
+                    && (1_800_000..=2_080_000).contains(&player.translation[0])
+                    && player.translation[1] >= -10_600_000)
+            {
+                self.a4_wall_stage = 35;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) > 1_950_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return held | PAD_SQUARE;
+        }
+        if matches!(name, "b3_yZ" | "b4_yZ") && self.a4_wall_stage == 35 {
+            if player_collider_entity == Some(41) && player.translation[1] >= -9_850_000 {
+                self.a4_wall_stage = 36;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if name == "b4_yZ" && self.a4_wall_stage == 36 {
+            if player.status_a & 1 != 0
+                && (2_050_000..=2_450_000).contains(&player.translation[0])
+                && player.translation[1] >= -10_100_000
+            {
+                self.a4_wall_stage = 37;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) < 2_250_000 {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return held | PAD_SQUARE;
+        }
+        if name == "b4_yZ" && self.a4_wall_stage == 37 {
+            let rising_stair = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 46,
+                        subtype: 1,
+                    }
+                )
+                .then_some((object.translation, object.bound?))
+                .filter(|(translation, bound)| {
+                    (2_450_000..=2_650_000).contains(&translation[0]) && bound.max.y <= -9_300_000
+                })
+            });
+            if player.state == 1 && player.status_a & 1 != 0 && rising_stair.is_some() {
+                self.a4_wall_stage = 38;
+                self.b2_upper_wait = 0;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if name == "b4_yZ" && self.a4_wall_stage == 38 {
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait >= 12
+                && player.status_a & 1 != 0
+                && player.translation[0] >= 2_200_000
+                && player.translation[1] >= -9_550_000
+            {
+                self.a4_wall_stage = 39;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let target_x = route_objects
+                .iter()
+                .filter_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 46,
+                            subtype: 1,
+                        }
+                    )
+                    .then_some(object.translation)
+                })
+                .filter(|translation| {
+                    translation[0].abs_diff(player.translation[0]) <= 700_000
+                        && translation[1] >= -9_500_000
+                })
+                .map(|translation| translation[0])
+                .min_by_key(|x| x.abs_diff(player.translation[0]))
+                .unwrap_or(2_450_000);
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return held | PAD_SQUARE;
+        }
+        if name == "b4_yZ" && self.a4_wall_stage == 39 {
+            let next_stair = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 46,
+                        subtype: 1,
+                    }
+                )
+                .then_some((object.translation, object.bound?))
+                .filter(|(translation, bound)| {
+                    (2_550_000..=2_700_000).contains(&translation[0]) && bound.max.y <= -9_300_000
+                })
+            });
+            if player.state == 1 && player.status_a & 1 != 0 && next_stair.is_some() {
+                self.a4_wall_stage = 40;
+                self.b2_upper_wait = 0;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if name == "b4_yZ" && self.a4_wall_stage == 40 {
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait >= 12
+                && player.status_a & 1 != 0
+                && player.translation[0] >= 2_300_000
+                && player.translation[1] >= -9_400_000
+            {
+                self.a4_wall_stage = 41;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let target_x = route_objects
+                .iter()
+                .filter_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 46,
+                            subtype: 1,
+                        }
+                    )
+                    .then_some(object.translation)
+                })
+                .filter(|translation| {
+                    translation[0].abs_diff(player.translation[0]) <= 700_000
+                        && (-9_500_000..=-9_000_000).contains(&translation[1])
+                })
+                .min_by_key(|translation| translation[1])
+                .map_or(2_500_000, |translation| translation[0]);
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return held | PAD_SQUARE;
+        }
+        if matches!(name, "b4_yZ" | "c1_yZ") && self.a4_wall_stage == 41 {
+            if player.status_a & 1 != 0
+                && player.translation[0] >= 2_850_000
+                && player.translation[1] >= -8_950_000
+            {
+                self.a4_wall_stage = 42;
+                self.b2_upper_wait = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if name == "c1_yZ" && self.a4_wall_stage == 42 {
+            if player.state == 1
+                && player.status_a & 1 != 0
+                && player.translation[0] <= 2_950_000
+                && player.translation[1] <= -9_000_000
+            {
+                self.a4_wall_stage = 43;
+                self.b2_upper_wait = 0;
+                self.jump_frames = 17;
+                self.release_frames = 3;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if matches!(name, "b4_yZ" | "c1_yZ") && self.a4_wall_stage == 43 {
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait >= 10
+                && player.status_a & 1 != 0
+                && (2_400_000..=2_750_000).contains(&player.translation[0])
+                && player.translation[1] >= -9_200_000
+            {
+                self.a4_wall_stage = 44;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) > 2_600_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return held | PAD_SQUARE;
+        }
+        if matches!(name, "b4_yZ" | "c1_yZ") && self.a4_wall_stage == 44 {
+            let upper_stair = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 46,
+                        subtype: 1,
+                    }
+                )
+                .then_some((object.translation, object.bound?))
+                .filter(|(translation, bound)| {
+                    (2_850_000..=3_050_000).contains(&translation[0])
+                        && (-9_000_000..=-8_700_000).contains(&bound.max.y)
+                })
+            });
+            if player.state == 1 && player.status_a & 1 != 0 && upper_stair.is_some() {
+                self.a4_wall_stage = 45;
+                self.b2_upper_wait = 0;
+                self.jump_frames = 17;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if matches!(name, "b4_yZ" | "c1_yZ") && self.a4_wall_stage == 45 {
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait >= 10
+                && player.status_a & 1 != 0
+                && (2_800_000..=3_150_000).contains(&player.translation[0])
+                && player.translation[1] >= -9_200_000
+            {
+                self.a4_wall_stage = 46;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) > 2_970_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return held | PAD_SQUARE;
+        }
+        if matches!(name, "b4_yZ" | "c1_yZ") && self.a4_wall_stage == 46 {
+            if player.state == 1
+                && player.status_a & 1 != 0
+                && player.translation[0] >= 2_450_000
+                && player.translation[1] >= -8_500_000
+            {
+                self.a4_wall_stage = 47;
+                self.b2_upper_wait = 0;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if matches!(name, "b4_yZ" | "c1_yZ") && self.a4_wall_stage == 47 {
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait >= 12
+                && player.status_a & 1 != 0
+                && player.translation[0] >= 2_750_000
+                && player.translation[1] >= -9_400_000
+            {
+                self.a4_wall_stage = 48;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) > 2_950_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return held | PAD_SQUARE;
+        }
+        if matches!(name, "b4_yZ" | "c1_yZ") && self.a4_wall_stage == 48 {
+            let right_lift_top = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 22
+                )
+                .then_some(object.bound?.max.y)
+            });
+            if player.state == 1
+                && player.status_a & 1 != 0
+                && right_lift_top.is_some_and(|top| top <= -8_200_000)
+            {
+                self.a4_wall_stage = 49;
+                self.b2_upper_wait = 0;
+                self.jump_frames = 17;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if matches!(name, "b4_yZ" | "c1_yZ" | "c2_yZ") && self.a4_wall_stage == 49 {
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait >= 10
+                && player_collider_entity == Some(22)
+                && player.status_a & 1 != 0
+            {
+                self.a4_wall_stage = 50;
+                self.c2_lift_last_top = None;
+                self.c2_outer_lift_target = None;
+                self.c2_transfer_runup = 0;
+                self.c2_transfer_stage = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let (target_x, target_z) = route_objects
+                .iter()
+                .find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 22
+                    )
+                    .then_some(object.bound?)
+                    .filter(|bound| bound.max.x > bound.min.x && bound.max.z > bound.min.z)
+                    .map(|bound| {
+                        (
+                            bound.min.x.saturating_add(bound.max.x) / 2,
+                            bound.min.z.saturating_add(bound.max.z) / 2,
+                        )
+                    })
+                })
+                .unwrap_or((3_170_000, 100_000));
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+            let held = if predicted_z > target_z.saturating_add(20_000) {
+                held | PAD_UP
+            } else if predicted_z < target_z.saturating_sub(20_000) {
+                held | PAD_DOWN
+            } else {
+                held
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return held | PAD_SQUARE;
+        }
+        if matches!(
+            name,
+            "b4_yZ" | "c1_yZ" | "c2_yZ" | "c3_yZ" | "c4_yZ" | "c5_yZ"
+        ) && self.a4_wall_stage == 50
+        {
+            let active_lift = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 22
+                )
+                .then_some(object.bound?)
+                .filter(|bound| bound.max.x > bound.min.x && bound.max.z > bound.min.z)
+            });
+            let lift_top = active_lift.map(|bound| bound.max.y);
+            let c2_horizontal_platform = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 57
+                )
+                .then_some(object.bound?)
+                .filter(|bound| bound.max.x > bound.min.x && bound.max.z > bound.min.z)
+            });
+            let c2_horizontal_center =
+                c2_horizontal_platform.map(|bound| bound.min.x.saturating_add(bound.max.x) / 2);
+            let c2_horizontal_moving_left = c2_horizontal_center.is_some_and(|center| {
+                self.c2_horizontal_last_x
+                    .is_some_and(|previous| center < previous)
+            });
+            let c2_horizontal_moving_right = c2_horizontal_center.is_some_and(|center| {
+                self.c2_horizontal_last_x
+                    .is_some_and(|previous| center > previous)
+            });
+            self.c2_horizontal_last_x = c2_horizontal_center;
+            let c3_active_platform = route_objects
+                .iter()
+                .filter_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 46,
+                            subtype: 3,
+                        }
+                    )
+                    .then_some(object.bound?)
+                    .filter(|bound| {
+                        bound.max.x > bound.min.x
+                            && bound.max.z > bound.min.z
+                            && bound.min.x >= 3_800_000
+                    })
+                })
+                .min_by_key(|bound| bound.min.x);
+            self.c2_lift_last_top = lift_top;
+            if self.c2_transfer_stage == 0
+                && player_collider_entity == Some(22)
+                && player.status_a & 1 != 0
+                && lift_top.is_some_and(|top| top >= -7_820_000)
+                && player.translation[0] >= 3_200_000
+            {
+                self.c2_transfer_stage = 1;
+                return PAD_LEFT;
+            }
+            if self.c2_transfer_stage == 1 {
+                if player_collider_entity == Some(22)
+                    && player.status_a & 1 != 0
+                    && (player.velocity[0] <= -300_000 || player.translation[0] <= 3_110_000)
+                {
+                    self.c2_transfer_stage = 2;
+                    self.jump_frames = 32;
+                    self.release_frames = 3;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_LEFT;
+            }
+            if self.c2_transfer_stage == 2 {
+                if player_collider_entity == Some(21) {
+                    self.c2_transfer_stage = 3;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return PAD_RIGHT | PAD_SQUARE;
+                }
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.release_frames > 0 {
+                    self.release_frames -= 1;
+                }
+                return PAD_LEFT | PAD_SQUARE;
+            }
+            if self.c2_transfer_stage == 3 {
+                if player_collider_entity != Some(21)
+                    && player.status_a & 1 != 0
+                    && matches!(player.state, 1 | 2)
+                    && (2_400_000..=3_000_000).contains(&player.translation[0])
+                    && (-9_100_000..=-8_100_000).contains(&player.translation[1])
+                {
+                    self.c2_transfer_stage = 4;
+                    return 0;
+                }
+                let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+                let depth = if predicted_z > 40_000 {
+                    PAD_UP
+                } else if predicted_z < -40_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                return PAD_RIGHT | PAD_SQUARE | depth;
+            }
+            if self.c2_transfer_stage == 4 {
+                let outer_lift = if let Some(target) = self.c2_outer_lift_target {
+                    route_objects
+                        .iter()
+                        .find(|object| object.object == target)
+                        .and_then(|object| Some((object.object, object.translation, object.bound?)))
+                } else {
+                    route_objects
+                        .iter()
+                        .filter_map(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 46,
+                                    subtype: 1,
+                                }
+                            )
+                            .then_some((
+                                object.object,
+                                object.translation,
+                                object.bound?,
+                            ))
+                        })
+                        .filter(|(_, translation, bound)| {
+                            translation[0] <= 2_250_000
+                                && bound.max.y >= player.translation[1].saturating_sub(700_000)
+                                && bound.max.y <= player.translation[1].saturating_sub(120_000)
+                        })
+                        .max_by_key(|(_, _, bound)| bound.max.x)
+                };
+                if outer_lift.is_some() {
+                    self.c2_outer_lift_target = outer_lift.map(|(object, _, _)| object);
+                    self.c2_transfer_runup = self.c2_transfer_runup.saturating_add(1);
+                    if self.c2_transfer_runup >= 5 || player.velocity[0] <= -250_000 {
+                        self.c2_transfer_stage = 5;
+                        self.jump_frames = 32;
+                        self.release_frames = 3;
+                        return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                    }
+                    return PAD_LEFT;
+                }
+                return 0;
+            }
+            if self.c2_transfer_stage == 5 {
+                let outer_lift = route_objects
+                    .iter()
+                    .find(|object| Some(object.object) == self.c2_outer_lift_target)
+                    .and_then(|object| Some((object.translation, object.bound?)));
+                if player.status_a & 1 != 0
+                    && outer_lift.is_some_and(|(_, bound)| {
+                        (bound.min.x.saturating_add(20_000)..=bound.max.x.saturating_sub(20_000))
+                            .contains(&player.translation[0])
+                            && player.translation[1].abs_diff(bound.max.y) <= 50_000
+                    })
+                {
+                    self.c2_transfer_stage = 6;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return 0;
+                }
+                let target_x = outer_lift.map_or(2_200_000, |(translation, _)| translation[0]);
+                let held =
+                    if player.translation[0].saturating_add(player.velocity[0] / 8) > target_x {
+                        PAD_LEFT
+                    } else {
+                        PAD_RIGHT
+                    };
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.release_frames > 0 {
+                    self.release_frames -= 1;
+                }
+                return held | PAD_SQUARE;
+            }
+            if self.c2_transfer_stage == 6 {
+                let outer_lift = route_objects
+                    .iter()
+                    .find(|object| Some(object.object) == self.c2_outer_lift_target)
+                    .and_then(|object| Some((object.translation, object.bound?)));
+                if player.status_a & 1 != 0
+                    && outer_lift.is_some_and(|(translation, bound)| {
+                        translation[0] >= 2_450_000 && bound.max.y >= -8_500_000
+                    })
+                {
+                    self.c2_transfer_stage = 7;
+                    self.jump_frames = 32;
+                    self.release_frames = 3;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                let target_x = outer_lift
+                    .filter(|(_, bound)| {
+                        (bound.min.x.saturating_sub(50_000)..=bound.max.x.saturating_add(50_000))
+                            .contains(&player.translation[0])
+                            && player.translation[1].abs_diff(bound.max.y) <= 60_000
+                    })
+                    .map_or(player.translation[0], |(translation, _)| translation[0]);
+                return if player.translation[0].saturating_add(player.velocity[0] / 8) > target_x {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
+            }
+            if self.c2_transfer_stage == 7 {
+                if player.status_a & 1 != 0
+                    && player.translation[0] >= 2_600_000
+                    && player.translation[1] >= -8_400_000
+                {
+                    self.c2_transfer_stage = 8;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return 0;
+                }
+                let held =
+                    if player.translation[0].saturating_add(player.velocity[0] / 8) > 2_900_000 {
+                        PAD_LEFT
+                    } else {
+                        PAD_RIGHT
+                    };
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.release_frames > 0 {
+                    self.release_frames -= 1;
+                }
+                return held | PAD_SQUARE;
+            }
+            if self.c2_transfer_stage == 8 {
+                if player.status_a & 1 != 0 && lift_top.is_some_and(|top| top <= -8_180_000) {
+                    self.c2_transfer_stage = 9;
+                    self.jump_frames = 32;
+                    self.release_frames = 3;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                return 0;
+            }
+            if self.c2_transfer_stage == 9 {
+                if player_collider_entity == Some(22) && player.status_a & 1 != 0 {
+                    self.c2_transfer_stage = 10;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return 0;
+                }
+                let target_x = active_lift.map_or(3_170_000, |bound| {
+                    bound.min.x.saturating_add(bound.max.x) / 2
+                });
+                let held =
+                    if player.translation[0].saturating_add(player.velocity[0] / 8) > target_x {
+                        PAD_LEFT
+                    } else {
+                        PAD_RIGHT
+                    };
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.release_frames > 0 {
+                    self.release_frames -= 1;
+                }
+                return held | PAD_SQUARE;
+            }
+            if self.c2_transfer_stage == 10 {
+                if player_collider_entity == Some(22)
+                    && player.status_a & 1 != 0
+                    && lift_top.is_some_and(|top| top >= -7_820_000)
+                {
+                    self.c2_transfer_stage = 11;
+                    self.jump_frames = 32;
+                    self.release_frames = 3;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                let target_x = active_lift.map_or(3_170_000, |bound| {
+                    bound.min.x.saturating_add(bound.max.x) / 2
+                });
+                return if player.translation[0].saturating_add(player.velocity[0] / 8) > target_x {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
+            }
+            if self.c2_transfer_stage == 11 {
+                if self.jump_frames <= 28
+                    && player_collider_entity != Some(22)
+                    && player.status_a & 1 != 0
+                    && (2_500_000..=3_100_000).contains(&player.translation[0])
+                    && player.translation[1] >= -7_900_000
+                {
+                    self.c2_transfer_stage = 12;
+                    self.c2_transfer_runup = 0;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return 0;
+                }
+                let held =
+                    if player.translation[0].saturating_add(player.velocity[0] / 8) < 2_800_000 {
+                        PAD_RIGHT
+                    } else {
+                        PAD_LEFT
+                    };
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.release_frames > 0 {
+                    self.release_frames -= 1;
+                }
+                return held | PAD_SQUARE;
+            }
+            let stair_target_z: Option<i32> = None;
+            let stair_depth = 0;
+            let stair_left = true;
+            let stair_jump = true;
+            let stair_spin = true;
+            let stair_second_spin = true;
+            let stair_spin_frames = 32;
+            let stair_second_horizontal_delay = 0;
+            let stair_target_x = 2_350_000;
+            let stair_jump_frames = 32;
+            let stair_turn_x = 2_100_000;
+            let top_platform_wait: Option<u8> = None;
+            let top_platform_direction = 0;
+            let next_stair_target_x = 2_000_000;
+            let next_stair_target_z: i32 = 150_000;
+            let next_stair_jump_frames = 32;
+            let next_stair_spin = true;
+            let inner_stair_target_x = 2_300_000;
+            let inner_stair_target_z = next_stair_target_z;
+            let checkpoint_platform_target_x = 2_550_000;
+            let checkpoint_platform_target_z: i32 = -154_368;
+            if self.c2_transfer_stage == 12 {
+                if player.status_a & 1 != 0 {
+                    if self.c2_transfer_runup < 4 {
+                        self.c2_transfer_runup += 1;
+                        return if stair_left { PAD_RIGHT } else { PAD_LEFT };
+                    }
+                    if stair_left {
+                        if player.velocity[0] > -500_000 || player.translation[0] > 2_790_000 {
+                            return PAD_LEFT;
+                        }
+                    } else if player.velocity[0] < 300_000 && player.translation[0] < 2_910_000 {
+                        return PAD_RIGHT;
+                    }
+                    self.c2_transfer_stage = 13;
+                    self.jump_frames = if stair_jump { stair_jump_frames } else { 0 };
+                    self.release_frames = 3;
+                    let held = if stair_left { PAD_LEFT } else { PAD_RIGHT } | stair_depth;
+                    return held
+                        | if stair_jump { PAD_CROSS } else { 0 }
+                        | if stair_spin { PAD_SQUARE } else { 0 };
+                }
+                return 0;
+            }
+            if self.c2_transfer_stage == 13 {
+                if !stair_jump
+                    && stair_target_z
+                        .is_some_and(|target_z| player.translation[2].abs_diff(target_z) <= 12_000)
+                {
+                    self.c2_transfer_stage = 14;
+                    return if player.translation[0] < stair_turn_x {
+                        PAD_RIGHT
+                    } else {
+                        PAD_LEFT
+                    };
+                }
+                if stair_jump
+                    && self.jump_frames <= 28
+                    && player.status_a & 1 != 0
+                    && if stair_left {
+                        (2_250_000..=2_450_000).contains(&player.translation[0])
+                    } else {
+                        player.translation[0].abs_diff(stair_target_x) <= 80_000
+                    }
+                    && player.translation[1] >= -7_900_000
+                {
+                    self.c2_transfer_stage = 14;
+                    self.jump_frames = 32;
+                    self.release_frames = 1;
+                    return 0;
+                }
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+                let held = if predicted_x < stair_target_x {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held
+                        | stair_depth
+                        | PAD_CROSS
+                        | if stair_spin { PAD_SQUARE } else { 0 };
+                }
+                if self.release_frames > 0 {
+                    self.release_frames -= 1;
+                }
+                return held | stair_depth | if stair_spin { PAD_SQUARE } else { 0 };
+            }
+            if self.c2_transfer_stage == 14 {
+                if stair_left
+                    && self.jump_frames <= 28
+                    && player.status_a & 1 != 0
+                    && (2_050_000..=2_250_000).contains(&player.translation[0])
+                    && player.translation[1] >= -7_450_000
+                {
+                    self.c2_transfer_stage = 15;
+                    self.c2_transfer_runup = 0;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return 0;
+                }
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+                let mut held = if predicted_x < stair_turn_x {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+                if let Some(target_z) = stair_target_z {
+                    let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+                    if predicted_z > target_z.saturating_add(8_000) {
+                        held |= PAD_UP;
+                    } else if predicted_z < target_z.saturating_sub(8_000) {
+                        held |= PAD_DOWN;
+                    }
+                }
+                if self.release_frames > 0 {
+                    self.release_frames -= 1;
+                    return 0;
+                }
+                if self.jump_frames > 0 {
+                    let jump_elapsed = stair_jump_frames.saturating_sub(self.jump_frames);
+                    let held = if jump_elapsed < stair_second_horizontal_delay {
+                        0
+                    } else {
+                        held
+                    };
+                    let spin_held = stair_second_spin
+                        && self.jump_frames > stair_jump_frames.saturating_sub(stair_spin_frames);
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | if spin_held { PAD_SQUARE } else { 0 };
+                }
+                return held;
+            }
+            if self.c2_transfer_stage == 15 {
+                if let Some(wait) = top_platform_wait {
+                    if self.c2_transfer_runup < wait {
+                        self.c2_transfer_runup += 1;
+                        return 0;
+                    }
+                    self.c2_transfer_stage = 16;
+                    self.jump_frames = 32;
+                    self.release_frames = 3;
+                    return top_platform_direction | PAD_CROSS;
+                }
+                if player.status_a & 1 != 0 {
+                    if self.c2_transfer_runup == 0 {
+                        if player.translation[2] < 170_000 {
+                            return PAD_DOWN;
+                        }
+                        self.c2_transfer_runup = 1;
+                        return PAD_UP;
+                    }
+                    if player.translation[2] > 150_000 || player.velocity[2] > -200_000 {
+                        return PAD_UP;
+                    }
+                    self.c2_transfer_stage = 16;
+                    self.jump_frames = 32;
+                    self.release_frames = 3;
+                    return PAD_UP | PAD_CROSS;
+                }
+                return PAD_UP;
+            }
+            if self.c2_transfer_stage == 16 {
+                if top_platform_wait.is_some() {
+                    if self.jump_frames > 0 {
+                        self.jump_frames -= 1;
+                        return top_platform_direction | PAD_CROSS;
+                    }
+                    if self.release_frames > 0 {
+                        self.release_frames -= 1;
+                    }
+                    return 0;
+                }
+                if player.status_a & 1 != 0
+                    && (2_050_000..=2_200_000).contains(&player.translation[0])
+                    && player.translation[1] >= -7_400_000
+                {
+                    self.c2_transfer_stage = 17;
+                    self.c2_transfer_runup = 0;
+                    self.jump_frames = 0;
+                    self.release_frames = 3;
+                    return 0;
+                }
+                let target_x = 2_100_000;
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+                let mut held = if predicted_x < target_x {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+                let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+                if predicted_z > 0 {
+                    held |= PAD_UP;
+                } else {
+                    held |= PAD_DOWN;
+                }
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | if next_stair_spin { PAD_SQUARE } else { 0 };
+                }
+                if self.release_frames > 0 {
+                    self.release_frames -= 1;
+                }
+                return held;
+            }
+            if self.c2_transfer_stage == 17 {
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 4);
+                let mut held = if predicted_x < next_stair_target_x {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+                let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+                if predicted_z > next_stair_target_z.saturating_add(8_000) {
+                    held |= PAD_UP;
+                } else if predicted_z < next_stair_target_z.saturating_sub(8_000) {
+                    held |= PAD_DOWN;
+                }
+                if self.c2_transfer_runup == 0 {
+                    if self.release_frames > 0 {
+                        self.release_frames -= 1;
+                        return 0;
+                    }
+                    self.c2_transfer_runup = 1;
+                    self.jump_frames = next_stair_jump_frames;
+                    return held | PAD_CROSS | if next_stair_spin { PAD_SQUARE } else { 0 };
+                }
+                if self.c2_transfer_runup == 1 && player.status_a & 1 == 0 {
+                    self.c2_transfer_runup = 2;
+                }
+                if self.c2_transfer_runup == 2
+                    && self.jump_frames <= 28
+                    && player.status_a & 1 != 0
+                    && player.translation[0].abs_diff(next_stair_target_x) <= 100_000
+                    && player.translation[1] >= -7_300_000
+                {
+                    self.c2_transfer_stage = 18;
+                    self.c2_transfer_runup = 0;
+                    self.jump_frames = 0;
+                    self.release_frames = 3;
+                    return 0;
+                }
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | if next_stair_spin { PAD_SQUARE } else { 0 };
+                }
+                return held | if next_stair_spin { PAD_SQUARE } else { 0 };
+            }
+            if self.c2_transfer_stage == 18 {
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 4);
+                let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+                let mut held = if predicted_x < inner_stair_target_x {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+                if predicted_z > inner_stair_target_z.saturating_add(8_000) {
+                    held |= PAD_UP;
+                } else if predicted_z < inner_stair_target_z.saturating_sub(8_000) {
+                    held |= PAD_DOWN;
+                }
+                if self.c2_transfer_runup == 0 {
+                    if self.release_frames > 0 {
+                        self.release_frames -= 1;
+                        return 0;
+                    }
+                    self.c2_transfer_runup = 1;
+                    self.jump_frames = next_stair_jump_frames;
+                    return held | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.c2_transfer_runup == 1 && player.status_a & 1 == 0 {
+                    self.c2_transfer_runup = 2;
+                }
+                if self.c2_transfer_runup == 2
+                    && self.jump_frames <= 28
+                    && player.status_a & 1 != 0
+                    && player.translation[0] >= 2_280_000
+                    && player.translation[1] >= -7_150_000
+                {
+                    self.c2_transfer_stage = 19;
+                    self.c2_transfer_runup = 0;
+                    self.jump_frames = 0;
+                    self.release_frames = 3;
+                    return 0;
+                }
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | PAD_SQUARE;
+                }
+                return held | PAD_SQUARE;
+            }
+            if self.c2_transfer_stage == 19 {
+                if checkpoint_id == 54 << 8 {
+                    self.c2_transfer_stage = 20;
+                    self.c2_transfer_runup = 0;
+                    self.c2_checkpoint_recentered = false;
+                    self.c2_horizontal_last_x = None;
+                    self.jump_frames = 0;
+                    self.release_frames = 3;
+                    return 0;
+                }
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 4);
+                let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+                let mut held = if predicted_x < checkpoint_platform_target_x {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+                if predicted_z > checkpoint_platform_target_z.saturating_add(8_000) {
+                    held |= PAD_UP;
+                } else if predicted_z < checkpoint_platform_target_z.saturating_sub(8_000) {
+                    held |= PAD_DOWN;
+                }
+                if self.c2_transfer_runup == 0 {
+                    if self.release_frames > 0 {
+                        self.release_frames -= 1;
+                        return 0;
+                    }
+                    self.c2_transfer_runup = 1;
+                    self.jump_frames = 32;
+                    return held | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.c2_transfer_runup == 1 && player.status_a & 1 == 0 {
+                    self.c2_transfer_runup = 2;
+                }
+                if self.c2_transfer_runup == 2
+                    && self.jump_frames <= 28
+                    && player.status_a & 1 != 0
+                    && player.translation[0] >= 2_400_000
+                    && player.translation[1] >= -6_900_000
+                {
+                    self.c2_transfer_runup = 3;
+                    self.jump_frames = 0;
+                    self.release_frames = 3;
+                    return 0;
+                }
+                if self.c2_transfer_runup == 3 {
+                    if self.release_frames > 0 {
+                        self.release_frames -= 1;
+                        return 0;
+                    }
+                    self.c2_transfer_runup = 4;
+                    return held | PAD_SQUARE;
+                }
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | PAD_SQUARE;
+                }
+                return held | PAD_SQUARE;
+            }
+            if self.c2_transfer_stage == 20 {
+                if !self.c2_checkpoint_recentered {
+                    if self.release_frames > 0 {
+                        self.release_frames -= 1;
+                        return 0;
+                    }
+                    let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 4);
+                    let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+                    let mut held = if predicted_x < 2_530_000 {
+                        PAD_RIGHT
+                    } else if predicted_x > 2_570_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                    if predicted_z < 20_000 {
+                        held |= PAD_DOWN;
+                    } else if predicted_z > 40_000 {
+                        held |= PAD_UP;
+                    } else if (2_530_000..=2_570_000).contains(&predicted_x)
+                        && player.velocity[0].unsigned_abs() <= 100_000
+                        && player.velocity[2].unsigned_abs() <= 100_000
+                    {
+                        self.c2_checkpoint_recentered = true;
+                        self.c2_transfer_runup = 0;
+                        return 0;
+                    }
+                    return held;
+                }
+                if self.c2_transfer_runup < 4 {
+                    self.c2_transfer_runup += 1;
+                    return PAD_SQUARE;
+                }
+                let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+                let depth = if predicted_z > 40_000 {
+                    PAD_UP
+                } else if predicted_z < 20_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                if c2_horizontal_moving_left
+                    && c2_horizontal_center
+                        .is_some_and(|center| (3_450_000..=3_620_000).contains(&center))
+                {
+                    self.c2_transfer_stage = 21;
+                    self.c2_transfer_runup = 0;
+                    self.jump_frames = 32;
+                    return PAD_RIGHT | depth | PAD_CROSS | PAD_SQUARE;
+                }
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 4);
+                let horizontal = if predicted_x < 2_550_000 {
+                    PAD_RIGHT
+                } else if predicted_x > 2_600_000 || player.velocity[0] > 120_000 {
+                    PAD_LEFT
+                } else if player.velocity[0] < -120_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                return horizontal | depth | PAD_SQUARE;
+            }
+            if self.c2_transfer_stage == 21 {
+                if player_collider_entity == Some(57) && player.status_a & 1 != 0 {
+                    self.c2_transfer_stage = 22;
+                    self.c2_transfer_runup = 0;
+                    self.jump_frames = 0;
+                    return 0;
+                }
+                let target_x = 3_040_000;
+                let target_z = c2_horizontal_platform
+                    .map_or(0, |bound| bound.min.z.saturating_add(bound.max.z) / 2);
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+                let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+                let mut held = if predicted_x < target_x {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+                if predicted_z > target_z.saturating_add(12_000) {
+                    held |= PAD_UP;
+                } else if predicted_z < target_z.saturating_sub(12_000) {
+                    held |= PAD_DOWN;
+                }
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | PAD_SQUARE;
+                }
+                return held | PAD_SQUARE;
+            }
+            if self.c2_transfer_stage == 22 {
+                // Keep the launch arc on the rear half of the rotating slab.
+                // Runtime frame bounds are now available for these RWaOC
+                // children, but their geometric center is too far forward for
+                // the authored handoff from entity 57.
+                let target_z: i32 = 100_000;
+                if player_collider_entity == Some(57) && c2_horizontal_moving_right {
+                    if c2_horizontal_center.is_some_and(|center| center >= 3_300_000)
+                        && player.velocity[0] < 300_000
+                    {
+                        self.c2_transfer_runup = self.c2_transfer_runup.saturating_add(1);
+                        return PAD_RIGHT;
+                    }
+                    if c2_horizontal_center.is_some_and(|center| center >= 3_420_000) {
+                        self.c2_transfer_stage = 23;
+                        self.c2_transfer_runup = 0;
+                        self.jump_frames = 32;
+                        let depth = if player.translation[2] > target_z {
+                            PAD_UP
+                        } else {
+                            PAD_DOWN
+                        };
+                        return PAD_RIGHT | depth | PAD_CROSS | PAD_SQUARE;
+                    }
+                }
+                return 0;
+            }
+            if self.c2_transfer_stage == 23 {
+                if player.status_a & 1 != 0
+                    && c3_active_platform.is_some_and(|bound| {
+                        (bound.min.x..=bound.max.x).contains(&player.translation[0])
+                            && player.translation[1].abs_diff(bound.max.y) <= 60_000
+                    })
+                {
+                    self.c2_transfer_stage = 24;
+                    self.c2_transfer_runup = 0;
+                    self.c3_retract_target = None;
+                    self.c3_retract_hops = 0;
+                    self.jump_frames = 0;
+                    self.release_frames = 3;
+                    return 0;
+                }
+                let target_x = c3_active_platform.map_or(4_096_000, |bound| {
+                    bound.min.x.saturating_add(bound.max.x) / 2
+                });
+                let target_z: i32 = 100_000;
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+                let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+                let mut held = if predicted_x < target_x {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+                if predicted_z > target_z.saturating_add(12_000) {
+                    held |= PAD_UP;
+                } else if predicted_z < target_z.saturating_sub(12_000) {
+                    held |= PAD_DOWN;
+                }
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | PAD_SQUARE;
+                }
+                return held | PAD_SQUARE;
+            }
+            if self.c2_transfer_stage == 24 {
+                let target = if let Some(target) = self.c3_retract_target {
+                    route_objects
+                        .iter()
+                        .find(|object| object.object == target)
+                        .map(|object| (object.object, object.translation, object.bound))
+                } else {
+                    route_objects
+                        .iter()
+                        .filter_map(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 46,
+                                    subtype: 3,
+                                }
+                            )
+                            .then_some((
+                                object.object,
+                                object.translation,
+                                object.bound?,
+                            ))
+                        })
+                        .filter(|(_, translation, bound)| {
+                            translation[0] > player.translation[0].saturating_add(80_000)
+                                && bound.max.x > bound.min.x
+                                && bound.max.z > bound.min.z
+                        })
+                        .min_by_key(|(_, translation, _)| translation[0])
+                        .map(|(object, translation, bound)| (object, translation, Some(bound)))
+                };
+                if self.c3_retract_target.is_none() {
+                    self.c3_retract_target = target.map(|(object, _, _)| object);
+                }
+                let target_x = target.map_or(player.translation[0], |(_, translation, bound)| {
+                    bound.map_or(translation[0], |bound| {
+                        bound.min.x.saturating_add(bound.max.x) / 2
+                    })
+                });
+                let target_z = target
+                    .and_then(|(_, _, bound)| bound)
+                    .map_or(100_000, |bound| bound.min.z.saturating_add(bound.max.z) / 2);
+                if self.c2_transfer_runup == 0 {
+                    if target.is_none() {
+                        return 0;
+                    }
+                    if self.release_frames > 0 {
+                        self.release_frames -= 1;
+                        return 0;
+                    }
+                    self.c2_transfer_runup = 1;
+                    self.jump_frames = 32;
+                }
+                if self.c2_transfer_runup == 1 && player.status_a & 1 == 0 {
+                    self.c2_transfer_runup = 2;
+                }
+                if self.c2_transfer_runup == 2
+                    && player.status_a & 1 != 0
+                    && target.is_some_and(|(_, _, bound)| {
+                        bound.is_some_and(|bound| {
+                            (bound.min.x..=bound.max.x).contains(&player.translation[0])
+                                && player.translation[1].abs_diff(bound.max.y) <= 60_000
+                        })
+                    })
+                {
+                    self.c3_retract_hops = self.c3_retract_hops.saturating_add(1);
+                    self.c3_retract_target = None;
+                    self.c2_transfer_runup = 0;
+                    self.jump_frames = 0;
+                    self.release_frames = 3;
+                    if self.c3_retract_hops >= 3 {
+                        self.c2_transfer_stage = 25;
+                    }
+                    return 0;
+                }
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+                let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+                let mut held = if predicted_x < target_x {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+                if predicted_z > target_z.saturating_add(12_000) {
+                    held |= PAD_UP;
+                } else if predicted_z < target_z.saturating_sub(12_000) {
+                    held |= PAD_DOWN;
+                }
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | PAD_SQUARE;
+                }
+                return held | PAD_SQUARE;
+            }
+            if self.c2_transfer_stage == 25 {
+                let target_x = 5_300_000;
+                let target_z: i32 = 60_000;
+                if self.c2_transfer_runup == 0 {
+                    if self.release_frames > 0 {
+                        self.release_frames -= 1;
+                        return 0;
+                    }
+                    self.c2_transfer_runup = 1;
+                    self.jump_frames = 32;
+                }
+                if self.c2_transfer_runup == 1 && player.status_a & 1 == 0 {
+                    self.c2_transfer_runup = 2;
+                }
+                if self.c2_transfer_runup == 2
+                    && self.jump_frames <= 28
+                    && player.status_a & 1 != 0
+                    && player.translation[0] >= 5_100_000
+                    && player.translation[1] >= -6_950_000
+                {
+                    self.c2_transfer_stage = 26;
+                    self.c2_transfer_runup = 0;
+                    self.jump_frames = 0;
+                    return 0;
+                }
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+                let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+                let mut held = if predicted_x < target_x {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+                if predicted_z > target_z.saturating_add(12_000) {
+                    held |= PAD_UP;
+                } else if predicted_z < target_z.saturating_sub(12_000) {
+                    held |= PAD_DOWN;
+                }
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | PAD_SQUARE;
+                }
+                return held | PAD_SQUARE;
+            }
+            if self.c2_transfer_stage == 26 {
+                if self.c2_transfer_runup < 10 {
+                    self.c2_transfer_runup += 1;
+                    return PAD_SQUARE;
+                }
+                if player.translation[0] < 5_350_000 || player.velocity[0] < 450_000 {
+                    return PAD_RIGHT | PAD_SQUARE;
+                }
+                self.c2_transfer_stage = 27;
+                self.jump_frames = 32;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.c2_transfer_stage == 27 {
+                if self.jump_frames <= 28
+                    && player.status_a & 1 != 0
+                    && (5_800_000..=6_080_000).contains(&player.translation[0])
+                    && player.translation[1] >= -6_950_000
+                {
+                    self.c2_transfer_stage = 28;
+                    self.c2_transfer_runup = 0;
+                    self.jump_frames = 0;
+                    return 0;
+                }
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+                let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+                let mut held = if predicted_x < 5_930_000 {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+                if predicted_z > -40_000 {
+                    held |= PAD_UP;
+                } else {
+                    held |= PAD_DOWN;
+                }
+                if self.jump_frames > 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS | PAD_SQUARE;
+                }
+                return held | PAD_SQUARE;
+            }
+            if self.c2_transfer_stage == 28 {
+                return 0;
+            }
+            let target_x = active_lift.map_or(3_170_000, |bound| {
+                bound.min.x.saturating_add(bound.max.x) / 2
+            });
+            let target_z =
+                active_lift.map_or(100_000, |bound| bound.min.z.saturating_add(bound.max.z) / 2);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+            let mut held = if predicted_x > target_x.saturating_add(50_000) {
+                PAD_LEFT
+            } else if predicted_x < target_x.saturating_add(30_000) {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if predicted_z > target_z.saturating_add(20_000) {
+                held |= PAD_UP;
+            } else if predicted_z < target_z.saturating_sub(20_000) {
+                held |= PAD_DOWN;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held;
+        }
+        if name == "d1_yZ"
+            && self.a4_wall_stage == 50
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 5_700_000
+        {
+            self.a4_wall_stage = 51;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if name == "d1_yZ" && self.a4_wall_stage == 51 {
+            let right_platform_top = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 95
+                )
+                .then_some(object.bound?.max.y)
+            });
+            let platform_descending = right_platform_top.is_some_and(|top| {
+                self.d1_platform_last_top
+                    .is_some_and(|previous| top < previous)
+            });
+            self.d1_platform_last_top = right_platform_top;
+            if player.state == 1
+                && player.status_a & 1 != 0
+                && platform_descending
+                && right_platform_top.is_some_and(|top| (-6_780_000..=-6_730_000).contains(&top))
+            {
+                self.a4_wall_stage = 52;
+                self.b2_upper_wait = 0;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if name == "d1_yZ" && self.a4_wall_stage == 52 {
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait >= 12
+                && !matches!(player.state, 22 | 23 | 40)
+                && player.status_a & 1 != 0
+                && player.translation[0] >= 6_200_000
+                && player.translation[1] >= -7_100_000
+            {
+                self.a4_wall_stage = 53;
+                self.b2_upper_wait = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) > 6_450_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return held | PAD_SQUARE;
+        }
+        if name == "d1_yZ" && self.a4_wall_stage == 53 {
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait >= 10
+                && !matches!(player.state, 22 | 23 | 40)
+                && player.status_a & 1 != 0
+                && player.translation[0] >= 6_700_000
+            {
+                self.a4_wall_stage = 54;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+        }
+        if name == "d1_yZ" && self.a4_wall_stage == 54 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if matches!(name, "d2_yZ" | "d3_yZ")
+            && self.a4_wall_stage == 53
+            && !self.d3_phase_complete
+            && self.d3_platform_hops == 0
+            && player.status_a & 1 != 0
+            && (7_650_000..=7_850_000).contains(&player.translation[0])
+        {
+            self.d3_platform_hops = 1;
+            self.d3_platform_runup = 0;
+        }
+        if matches!(name, "d2_yZ" | "d3_yZ")
+            && self.a4_wall_stage == 53
+            && !self.d3_phase_complete
+            && self.d3_platform_hops != 0
+        {
+            if self.d3_platform_runup >= 80 {
+                self.d3_platform_runup = 0;
+                self.d3_platform_hops = 0;
+                self.d3_phase_complete = true;
+            } else {
+                self.d3_platform_runup = self.d3_platform_runup.saturating_add(1);
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+        }
+        if name == "d3_yZ"
+            && self.a4_wall_stage == 53
+            && !self.d3_phase_complete
+            && player.status_a & 1 != 0
+            && route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 100
+                ) && object.bound.is_some_and(|bound| {
+                    (bound.min.x.saturating_sub(32_000)..=bound.max.x.saturating_add(32_000))
+                        .contains(&player.translation[0])
+                        && player.translation[1].abs_diff(bound.max.y) <= 64_000
+                })
+            })
+        {
+            let approach_platform = route_objects
+                .iter()
+                .filter(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 46,
+                            subtype: 14,
+                        }
+                    )
+                })
+                .min_by_key(|object| object.translation[0])
+                .map(|object| object.translation);
+            let platform_rising = approach_platform.is_some_and(|translation| {
+                self.d3_platform_last_y
+                    .is_some_and(|previous| translation[1] > previous)
+            });
+            self.d3_platform_last_y = approach_platform.map(|translation| translation[1]);
+            let approach_stair_extended = route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 100
+                ) && object.state == 14
+                    && object.translation[0] <= 8_950_000
+                    && object.translation[1] >= -7_100_000
+            });
+            let phase_match = approach_stair_extended
+                && platform_rising
+                && approach_platform.is_some_and(|translation| {
+                    (9_405_000..=9_500_000).contains(&translation[0])
+                        && (-7_060_000..=-6_950_000).contains(&translation[1])
+                });
+            if self.d3_platform_hops == 0 && phase_match {
+                self.d3_platform_hops = 1;
+                self.d3_platform_runup = 0;
+            }
+            if self.d3_platform_hops != 0 {
+                if self.d3_platform_runup >= 80 {
+                    self.d3_platform_runup = 0;
+                    self.d3_platform_hops = 0;
+                    self.d3_phase_complete = true;
+                } else {
+                    self.d3_platform_runup = self.d3_platform_runup.saturating_add(1);
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return 0;
+                }
+            } else {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+        }
+        if name == "d3_yZ" && self.a4_wall_stage == 53 && player.translation[0] >= 9_020_000 {
+            if player.status_a & 1 != 0 && player.translation[1] <= -7_000_000 {
+                self.a4_wall_stage = 54;
+                self.b2_upper_wait = 1;
+                self.d3_platform_runup = 0;
+                self.jump_frames = 31;
+                self.release_frames = 0;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player.translation[1] <= -6_950_000 && player.velocity[1] < 0 {
+                return PAD_RIGHT;
+            }
+            return if player.translation[0].saturating_add(player.velocity[0] / 8) < 9_090_000 {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+        }
+        if matches!(name, "d3_yZ" | "d4_yZ") && self.a4_wall_stage == 54 {
+            self.d3_platform_runup = self.d3_platform_runup.saturating_add(1);
+            if self.b2_upper_wait == 0 {
+                self.b2_upper_wait = 1;
+                self.jump_frames = 31;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.b2_upper_wait == 0
+                && !route_objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 46,
+                            subtype: 14,
+                        }
+                    ) && object.bound.is_some_and(|bound| {
+                        bound.max.x.saturating_sub(bound.min.x) >= 150_000
+                            && (9_250_000..=9_340_000).contains(&bound.min.x)
+                            && (-7_320_000..=-7_150_000).contains(&bound.max.y)
+                    })
+                })
+            {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return if player.translation[0].saturating_add(player.velocity[0] / 4) > 9_050_000 {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
+            }
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait == 1 {
+                self.jump_frames = 32;
+            }
+            if self.b2_upper_wait >= 2
+                && player.status_a & 1 != 0
+                && (9_450_000..=9_850_000).contains(&player.translation[0])
+            {
+                self.a4_wall_stage = 55;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                self.d3_target_platform = None;
+                self.d3_platform_hops = 0;
+                self.d3_platform_runup = 0;
+                return 0;
+            }
+            let target_x = route_objects
+                .iter()
+                .filter(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 46,
+                            subtype: 14,
+                        }
+                    ) && object.translation[0] >= 9_300_000
+                })
+                .min_by_key(|object| object.translation[0])
+                .map_or(9_650_000, |object| object.translation[0]);
+            let held = if player.translation[0].saturating_add(player.velocity[0] / 8) < target_x {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held
+                    | PAD_CROSS
+                    | if self.d3_platform_runup == 1 {
+                        PAD_SQUARE
+                    } else {
+                        0
+                    };
+            }
+            return held;
+        }
+        if name == "e1_yZ"
+            && self.a4_wall_stage == 55
+            && player.status_a & 1 != 0
+            && (11_000_000..=11_250_000).contains(&player.translation[0])
+        {
+            self.a4_wall_stage = 56;
+            self.b2_upper_wait = 0;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT | PAD_SQUARE;
+        }
+        if matches!(name, "d3_yZ" | "d4_yZ" | "e1_yZ") && self.a4_wall_stage == 55 {
+            // The first authored bridge child becomes targetable several
+            // ticks after the d4 floor landing. Explicitly preserve that
+            // short phase now that refreshed child bounds are visible
+            // immediately to the survey controller.
+            if self.d3_platform_hops == 0
+                && self.d3_target_platform.is_none()
+                && self.d3_platform_runup < 4
+            {
+                self.d3_platform_runup = self.d3_platform_runup.saturating_add(1);
+                return 0;
+            }
+            let support_platform = route_objects.iter().find_map(|object| {
+                if !matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 46,
+                        subtype: 1 | 14,
+                    }
+                ) {
+                    return None;
+                }
+                let bound = object.bound?;
+                (bound.max.x.saturating_sub(bound.min.x) >= 150_000
+                    && (bound.min.x.saturating_sub(40_000)..=bound.max.x.saturating_add(40_000))
+                        .contains(&player.translation[0])
+                    && player.translation[1].abs_diff(bound.max.y) <= 100_000)
+                    .then_some((
+                        object.object,
+                        bound
+                            .min
+                            .x
+                            .saturating_add(bound.max.x.saturating_sub(bound.min.x) / 2),
+                    ))
+            });
+            let support_center_x = support_platform.map(|(_, center_x)| center_x);
+            let next_platform = route_objects
+                .iter()
+                .filter_map(|object| {
+                    let subtype_matches_hop = if self.d3_platform_hops < 2 {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 46,
+                                subtype: 14,
+                            }
+                        )
+                    } else {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 46,
+                                subtype: 1,
+                            }
+                        )
+                    };
+                    if !subtype_matches_hop {
+                        return None;
+                    }
+                    let bound = object.bound?;
+                    (bound.max.x.saturating_sub(bound.min.x) >= 150_000
+                        && bound.min.x > player.translation[0].saturating_add(30_000)
+                        && (self.d3_platform_hops != 1
+                            || bound.max.y <= player.translation[1].saturating_add(100_000))
+                        && bound.max.y >= player.translation[1].saturating_sub(750_000)
+                        && bound.max.y <= player.translation[1].saturating_add(500_000))
+                    .then_some((
+                        object.object,
+                        bound
+                            .min
+                            .x
+                            .saturating_add(bound.max.x.saturating_sub(bound.min.x) / 2),
+                        bound.max.y,
+                    ))
+                })
+                .min_by_key(|(_, center_x, _)| *center_x);
+            let tracked_platform = self.d3_target_platform.and_then(|target| {
+                route_objects.iter().find_map(|object| {
+                    if object.object != target {
+                        return None;
+                    }
+                    let bound = object.bound?;
+                    Some((
+                        bound
+                            .min
+                            .x
+                            .saturating_add(bound.max.x.saturating_sub(bound.min.x) / 2),
+                        bound,
+                    ))
+                })
+            });
+            let next_platform_x = next_platform.map(|(_, center_x, _)| center_x);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let held = tracked_platform.map_or_else(
+                || {
+                    next_platform_x
+                        .or(support_center_x)
+                        .map_or(PAD_RIGHT, |target_x| {
+                            if predicted_x < target_x.saturating_sub(20_000) {
+                                PAD_RIGHT
+                            } else if predicted_x > target_x.saturating_add(20_000) {
+                                PAD_LEFT
+                            } else {
+                                0
+                            }
+                        })
+                },
+                |(center_x, bound)| {
+                    if self.d3_platform_hops <= 1 {
+                        let right_edge_lead = if self.d3_platform_hops == 0 {
+                            160_000
+                        } else {
+                            110_000
+                        };
+                        if predicted_x < bound.min.x.saturating_sub(20_000) {
+                            PAD_RIGHT
+                        } else if predicted_x > bound.max.x.saturating_sub(right_edge_lead) {
+                            PAD_LEFT
+                        } else {
+                            0
+                        }
+                    } else if predicted_x < center_x.saturating_sub(20_000) {
+                        PAD_RIGHT
+                    } else if predicted_x > center_x.saturating_add(20_000) {
+                        PAD_LEFT
+                    } else {
+                        0
+                    }
+                },
+            );
+            if player.status_a & 1 != 0 {
+                self.jump_frames = 0;
+                let landed_target = self.d3_target_platform.is_some()
+                    && self.d3_target_platform == support_platform.map(|(object, _)| object);
+                if landed_target {
+                    self.d3_target_platform = None;
+                    self.d3_platform_hops = self.d3_platform_hops.saturating_add(1);
+                    self.d3_platform_runup = 0;
+                } else if self.d3_target_platform.is_some() {
+                    if self.release_frames > 0 {
+                        self.release_frames -= 1;
+                    }
+                    return if self.d3_platform_hops == 0 {
+                        PAD_LEFT | PAD_SQUARE
+                    } else {
+                        PAD_RIGHT | PAD_SQUARE
+                    };
+                }
+                if self.release_frames > 0 {
+                    self.release_frames -= 1;
+                    return held | PAD_SQUARE;
+                }
+                if self.d3_platform_hops >= 3 {
+                    return 0;
+                }
+                if next_platform_x.is_none() {
+                    return 0;
+                }
+                let platform_wait = match self.d3_platform_hops {
+                    1 => 28,
+                    2 => 62,
+                    _ => 0,
+                };
+                if self.d3_platform_runup < platform_wait {
+                    self.d3_platform_runup = self.d3_platform_runup.saturating_add(1);
+                    return 0;
+                }
+                self.d3_target_platform = next_platform.map(|(object, _, _)| object);
+                self.jump_frames = next_platform.map_or(32, |(_, _, top_y)| {
+                    if self.d3_platform_hops == 0
+                        && top_y < player.translation[1].saturating_sub(250_000)
+                    {
+                        17
+                    } else {
+                        32
+                    }
+                });
+                self.release_frames = 2;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            return held | PAD_SQUARE;
+        }
+        if matches!(name, "e1_yZ" | "e2_yZ") && self.a4_wall_stage == 56 {
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait >= 3 {
+                self.a4_wall_stage = 57;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT | PAD_SQUARE;
+        }
+        if matches!(name, "e1_yZ" | "e2_yZ")
+            && self.a4_wall_stage == 57
+            && player.status_a & 1 != 0
+            && (11_200_000..=11_550_000).contains(&player.translation[0])
+        {
+            self.a4_wall_stage = 58;
+            self.b2_upper_wait = 0;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT | PAD_SQUARE;
+        }
+        if matches!(name, "e1_yZ" | "e2_yZ") && self.a4_wall_stage == 58 {
+            let support_center_x = route_objects.iter().find_map(|object| {
+                if !matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 46,
+                        subtype: 1,
+                    }
+                ) {
+                    return None;
+                }
+                let bound = object.bound?;
+                ((bound.min.x.saturating_sub(40_000)..=bound.max.x.saturating_add(40_000))
+                    .contains(&player.translation[0])
+                    && player.translation[1].abs_diff(bound.max.y) <= 100_000)
+                    .then_some(
+                        bound
+                            .min
+                            .x
+                            .saturating_add(bound.max.x.saturating_sub(bound.min.x) / 2),
+                    )
+            });
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let held = support_center_x.map_or(0, |center_x| {
+                if predicted_x < center_x.saturating_sub(20_000) {
+                    PAD_RIGHT
+                } else if predicted_x > center_x.saturating_add(20_000) {
+                    PAD_LEFT
+                } else {
+                    0
+                }
+            });
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait >= 4 {
+                self.a4_wall_stage = 59;
+                self.b2_upper_wait = 0;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            return held | PAD_SQUARE;
+        }
+        if matches!(name, "e1_yZ" | "e2_yZ")
+            && self.a4_wall_stage == 59
+            && player.status_a & 1 != 0
+            && (11_500_000..12_350_000).contains(&player.translation[0])
+        {
+            let support_center_x = route_objects.iter().find_map(|object| {
+                if !matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 46,
+                        subtype: 1,
+                    }
+                ) {
+                    return None;
+                }
+                let bound = object.bound?;
+                ((bound.min.x.saturating_sub(40_000)..=bound.max.x.saturating_add(40_000))
+                    .contains(&player.translation[0])
+                    && player.translation[1].abs_diff(bound.max.y) <= 100_000)
+                    .then_some(
+                        bound
+                            .min
+                            .x
+                            .saturating_add(bound.max.x.saturating_sub(bound.min.x) / 2),
+                    )
+            });
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let held = support_center_x.map_or(0, |center_x| {
+                if predicted_x < center_x.saturating_sub(20_000) {
+                    PAD_RIGHT
+                } else if predicted_x > center_x.saturating_add(20_000) {
+                    PAD_LEFT
+                } else {
+                    0
+                }
+            });
+            self.jump_frames = 0;
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait >= 12 {
+                self.b2_upper_wait = 0;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return if player.translation[0] >= 11_700_000 {
+                PAD_RIGHT | PAD_SQUARE
+            } else {
+                held | PAD_SQUARE
+            };
+        }
+        if name == "e2_yZ"
+            && self.a4_wall_stage == 59
+            && player.status_a & 1 != 0
+            && (12_350_000..=12_650_000).contains(&player.translation[0])
+        {
+            self.a4_wall_stage = 60;
+            self.b2_upper_wait = 0;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if name == "e2_yZ" && self.a4_wall_stage == 60 {
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait >= 2 {
+                self.a4_wall_stage = 61;
+                self.jump_frames = 17;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "e3_yZ"
+            && self.a4_wall_stage == 61
+            && player.status_a & 1 != 0
+            && (12_800_000..=13_100_000).contains(&player.translation[0])
+        {
+            self.a4_wall_stage = 62;
+            self.b2_upper_wait = 0;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if name == "e3_yZ" && self.a4_wall_stage == 62 {
+            self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
+            if self.b2_upper_wait >= 20 {
+                self.a4_wall_stage = 63;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_DOWN;
+        }
+        if name == "e3_yZ" && self.a4_wall_stage == 63 && player_collider_entity == Some(99) {
+            self.a4_wall_stage = 64;
+            self.jump_frames = 32;
+            self.release_frames = 3;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if matches!(name, "e3_yZ" | "e4_yZ")
+            && self.a4_wall_stage == 64
+            && player.status_a & 1 != 0
+            && player_collider_entity == Some(104)
+            && route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 104
+                ) && object.bound.is_some_and(|bound| {
+                    (bound.min.x.saturating_sub(20_000)..=bound.max.x.saturating_add(20_000))
+                        .contains(&player.translation[0])
+                        && player.translation[1].abs_diff(bound.max.y) <= 80_000
+                })
+            })
+        {
+            self.a4_wall_stage = 65;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if matches!(name, "e3_yZ" | "e4_yZ") && self.a4_wall_stage == 65 {
+            let support = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 104
+                )
+                .then_some(object.bound?)
+            });
+            let target = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 107
+                )
+                .then_some(object.bound?)
+            });
+            let support_offset = std::env::var("C1_STORMY_E4_OFFSET")
+                .ok()
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or(0);
+            let support_center = support.map(|bound| {
+                bound
+                    .min
+                    .x
+                    .saturating_add(bound.max.x.saturating_sub(bound.min.x) / 2)
+                    .saturating_add(support_offset)
+            });
+            let platform_gap = support
+                .zip(target)
+                .map(|(support, target)| target.min.x.saturating_sub(support.max.x));
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 4);
+            let horizontal = if support_center.is_some_and(|center| predicted_x > center + 30_000) {
+                PAD_LEFT
+            } else if support_center.is_some_and(|center| predicted_x < center - 30_000) {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            let target_z = std::env::var("C1_STORMY_E4_Z")
+                .ok()
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or(200_000);
+            let predicted_z = player.translation[2] + player.velocity[2] / 4;
+            if predicted_z > target_z {
+                return horizontal | PAD_UP;
+            }
+            let launch_gap = std::env::var("C1_STORMY_E4_GAP")
+                .ok()
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or(500_000);
+            if player_collider_entity == Some(104)
+                && platform_gap.is_some_and(|gap| gap <= launch_gap)
+            {
+                self.a4_wall_stage = 66;
+                self.jump_frames = std::env::var("C1_STORMY_E4_JUMP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(17);
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            let runup_gap = std::env::var("C1_STORMY_E4_RUNUP_GAP")
+                .ok()
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or(700_000);
+            if platform_gap.is_some_and(|gap| gap <= runup_gap) {
+                return PAD_RIGHT;
+            }
+            return horizontal;
+        }
+        if matches!(name, "e4_yZ" | "f1_yZ")
+            && self.a4_wall_stage == 66
+            && player_collider_entity == Some(107)
+        {
+            self.a4_wall_stage = 67;
+            self.jump_frames = 32;
+            self.release_frames = 3;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if name == "f1_yZ"
+            && self.a4_wall_stage == 67
+            && player_collider_entity == Some(107)
+            && player.status_a & 1 != 0
+        {
+            self.a4_wall_stage = 68;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.f1_platform_wait = 0;
+            return PAD_RIGHT;
+        }
+        if matches!(name, "e4_yZ" | "f1_yZ") && self.a4_wall_stage == 68 {
+            let support = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 107
+                )
+                .then_some(object.bound?)
+            });
+            let target = route_objects
+                .iter()
+                .filter(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 46,
+                            subtype: 1,
+                        }
+                    ) && object.translation[0] > player.translation[0]
+                        && object.translation[1] <= -6_800_000
+                })
+                .min_by_key(|object| object.translation[0])
+                .map(|object| object.translation);
+            let at_takeoff_edge = support
+                .is_some_and(|bound| player.translation[0] >= bound.max.x.saturating_sub(45_000));
+            if player_collider_entity == Some(107)
+                && at_takeoff_edge
+                && target.is_some_and(|translation| translation[0] <= 16_200_000)
+            {
+                self.a4_wall_stage = 69;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 4);
+            return support.map_or(0, |bound| {
+                let takeoff_x = bound.max.x.saturating_sub(40_000);
+                if predicted_x < takeoff_x.saturating_sub(5_000) {
+                    PAD_RIGHT
+                } else if predicted_x > takeoff_x.saturating_add(5_000) {
+                    PAD_LEFT
+                } else {
+                    0
+                }
+            });
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ")
+            && self.a4_wall_stage == 69
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 16_000_000
+        {
+            self.a4_wall_stage = 70;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.f1_platform_wait = 2;
+            return PAD_RIGHT;
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ") && self.a4_wall_stage == 70 {
+            if self.f1_platform_wait != 0 {
+                self.f1_platform_wait -= 1;
+                return PAD_RIGHT;
+            }
+            self.a4_wall_stage = 71;
+            self.jump_frames = 17;
+            self.release_frames = 3;
+            return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ")
+            && self.a4_wall_stage == 71
+            && player.status_a & 1 != 0
+            && player.translation[1] >= -7_400_000
+        {
+            self.a4_wall_stage = 72;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.f1_platform_wait = 0;
+            return 0;
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ") && self.a4_wall_stage == 72 {
+            self.f1_platform_wait = self.f1_platform_wait.saturating_add(1);
+            let wait = std::env::var("C1_STORMY_F1_SECOND_WAIT")
+                .ok()
+                .and_then(|value| value.parse::<u8>().ok())
+                .unwrap_or(50);
+            if self.f1_platform_wait >= wait {
+                self.a4_wall_stage = 73;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                self.f1_platform_wait = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return 0;
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ") && self.a4_wall_stage == 73 {
+            if self.f1_platform_wait != 0 {
+                self.f1_platform_wait -= 1;
+            } else if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 74;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                self.f1_platform_wait = 0;
+                return 0;
+            }
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ") && self.a4_wall_stage == 74 {
+            self.f1_platform_wait = self.f1_platform_wait.saturating_add(1);
+            let wait = std::env::var("C1_STORMY_F1_THIRD_WAIT")
+                .ok()
+                .and_then(|value| value.parse::<u8>().ok())
+                .unwrap_or(3);
+            if self.f1_platform_wait >= wait {
+                self.a4_wall_stage = 75;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                self.f1_platform_wait = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ") && self.a4_wall_stage == 75 {
+            if self.f1_platform_wait != 0 {
+                self.f1_platform_wait -= 1;
+            } else if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 76;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+        }
+        if name == "f2_yZ" && self.a4_wall_stage == 76 {
+            let landing_platform = route_objects.iter().find_map(|object| {
+                let ObjectOrigin::Runtime {
+                    executable: 46,
+                    subtype: 1,
+                } = object.origin
+                else {
+                    return None;
+                };
+                let bound = object.bound?;
+                (player.status_a & 1 != 0
+                    && bound.max.y <= -7_000_000
+                    && (bound.min.x.saturating_sub(40_000)..=bound.max.x.saturating_add(40_000))
+                        .contains(&player.translation[0])
+                    && player.translation[1].abs_diff(bound.max.y) <= 80_000)
+                    .then_some(object.object)
+            });
+            if let Some(platform) = landing_platform {
+                self.a4_wall_stage = 77;
+                self.d3_target_platform = Some(platform);
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+        }
+        if name == "f2_yZ" && self.a4_wall_stage == 77 {
+            let platform = self.d3_target_platform.and_then(|target| {
+                route_objects
+                    .iter()
+                    .find(|object| object.object == target)
+                    .and_then(|object| object.bound)
+            });
+            let Some(platform) = platform else {
+                return 0;
+            };
+            let center_x = platform
+                .min
+                .x
+                .saturating_add(platform.max.x.saturating_sub(platform.min.x) / 2);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x < center_x.saturating_sub(20_000) {
+                PAD_RIGHT
+            } else if predicted_x > center_x.saturating_add(20_000) {
+                PAD_LEFT
+            } else {
+                0
+            };
+            if player.status_a & 1 != 0 && platform.max.y >= -6_900_000 {
+                self.a4_wall_stage = 78;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return horizontal;
+        }
+        if matches!(name, "f2_yZ" | "f3_yZ") && self.a4_wall_stage == 78 {
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 79;
+                self.d3_platform_last_y = None;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "f2_yZ" | "f3_yZ") && self.a4_wall_stage == 79 {
+            let target_platform = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 114
+                )
+                .then_some(object.bound?)
+            });
+            let target_y = target_platform.map(|bound| bound.max.y);
+            let target_descending = target_y
+                .is_some_and(|y| self.d3_platform_last_y.is_some_and(|previous| y < previous));
+            self.d3_platform_last_y = target_y;
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x < 17_680_000 {
+                PAD_RIGHT
+            } else if predicted_x > 17_720_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+            if player.status_a & 1 != 0
+                && (17_650_000..=17_750_000).contains(&player.translation[0])
+                && target_descending
+                && target_y.is_some_and(|y| y <= -6_800_000)
+            {
+                self.a4_wall_stage = 80;
+                self.f1_platform_wait = 13;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            return horizontal;
+        }
+        if matches!(name, "f3_yZ" | "f4_yZ") && self.a4_wall_stage == 80 {
+            if self.f1_platform_wait != u8::MAX {
+                if self.f1_platform_wait > 0 {
+                    self.f1_platform_wait -= 1;
+                    return PAD_RIGHT;
+                }
+                self.f1_platform_wait = u8::MAX;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            if player.status_a & 1 != 0 && player_collider_entity == Some(114) {
+                self.a4_wall_stage = 81;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 81;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "f5_yZ"
+            && self.a4_wall_stage == 81
+            && player.status_a & 1 != 0
+            && (20_000_000..=20_250_000).contains(&player.translation[0])
+        {
+            self.a4_wall_stage = 82;
+            self.d3_platform_hops = 0;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if name == "f5_yZ" && self.a4_wall_stage == 82 {
+            let platform_z_max = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 125
+                )
+                .then_some(object.bound?.max.z)
+            });
+            if self.d3_platform_hops == 0 {
+                if player.translation[0] >= 20_400_000 {
+                    self.d3_platform_hops = 1;
+                    return PAD_LEFT;
+                }
+                return PAD_RIGHT;
+            }
+            if self.d3_platform_hops == 1 {
+                if platform_z_max.is_some_and(|z| z <= 0) {
+                    self.d3_platform_hops = 2;
+                }
+                return PAD_LEFT;
+            }
+            if self.d3_platform_hops == 2
+                && player.status_a & 1 != 0
+                && platform_z_max.is_some_and(|z| z >= 50_000)
+            {
+                self.d3_platform_hops = 3;
+                return PAD_RIGHT;
+            }
+            if self.d3_platform_hops == 3 {
+                if player.status_a & 1 != 0
+                    && player.velocity[0] >= 250_000
+                    && platform_z_max.is_some_and(|z| z >= 50_000)
+                {
+                    self.a4_wall_stage = 83;
+                    self.jump_frames = 32;
+                    self.release_frames = 3;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_RIGHT;
+            }
+            return PAD_LEFT;
+        }
+        if matches!(name, "f5_yZ" | "g1_yZ") && self.a4_wall_stage == 83 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(125) {
+                self.a4_wall_stage = 84;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "f5_yZ" | "g1_yZ") && self.a4_wall_stage == 84 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(125) {
+                self.a4_wall_stage = 85;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "f5_yZ" | "g1_yZ") && self.a4_wall_stage == 85 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 21_400_000 {
+                self.a4_wall_stage = 86;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let predicted_z = player.translation[2].saturating_add(player.velocity[2] / 4);
+            let depth = if predicted_z > -134_000 {
+                PAD_UP
+            } else if predicted_z < -174_000 {
+                PAD_DOWN
+            } else {
+                0
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | depth | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT | depth;
+            }
+            return PAD_RIGHT | depth;
+        }
+        if name == "g2_yZ"
+            && self.a4_wall_stage == 86
+            && player.status_a & 1 != 0
+            && player_collider_entity == Some(111)
+        {
+            self.a4_wall_stage = 87;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if name == "g2_yZ" && self.a4_wall_stage == 87 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(111) {
+                self.a4_wall_stage = 88;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "g2_yZ" && self.a4_wall_stage == 88 {
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(112)
+                && player.translation[1] >= -7_100_000
+            {
+                self.a4_wall_stage = 89;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "g2_yZ" && self.a4_wall_stage == 89 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(112) {
+                self.a4_wall_stage = 90;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "g2_yZ" && self.a4_wall_stage == 90 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(113) {
+                self.a4_wall_stage = 91;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x > 23_370_000 {
+                PAD_LEFT
+            } else if predicted_x < 23_330_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return horizontal | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return horizontal;
+            }
+            return horizontal;
+        }
+        if name == "g3_yZ"
+            && self.a4_wall_stage == 91
+            && player.status_a & 1 != 0
+            && (23_700_000..=23_850_000).contains(&player.translation[0])
+        {
+            self.a4_wall_stage = 92;
+            self.d3_platform_hops = 0;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_LEFT;
+        }
+        if name == "g3_yZ" && self.a4_wall_stage == 92 {
+            let platform = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 115
+                )
+                .then_some((object.state, object.bound?.max.z, object.state_stamp))
+            });
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x > 23_780_000 {
+                PAD_LEFT
+            } else if predicted_x < 23_720_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if player.status_a & 1 != 0
+                && platform.is_some_and(|(state, z_max, state_stamp)| {
+                    state == 12
+                        && z_max <= 0
+                        && player.animation_stamp.saturating_sub(state_stamp) >= 23
+                })
+            {
+                self.a4_wall_stage = 93;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return horizontal;
+        }
+        if matches!(name, "g3_yZ" | "g4_yZ") && self.a4_wall_stage == 93 {
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(115)
+                && player.translation[1] >= -7_100_000
+            {
+                self.a4_wall_stage = 94;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x > 24_190_000 {
+                PAD_LEFT
+            } else if predicted_x < 24_140_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return horizontal | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return horizontal;
+            }
+            return horizontal;
+        }
+        if matches!(name, "g3_yZ" | "g4_yZ") && self.a4_wall_stage == 94 {
+            let platform = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 116
+                )
+                .then_some((object.state, object.bound?.max.z, object.state_stamp))
+            });
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x > 24_190_000 {
+                PAD_LEFT
+            } else if predicted_x < 24_140_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(115)
+                && platform.is_some_and(|(state, z_max, state_stamp)| {
+                    state == 12
+                        && z_max <= 0
+                        && player.animation_stamp.saturating_sub(state_stamp) >= 22
+                })
+            {
+                self.a4_wall_stage = 95;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return horizontal;
+        }
+        if name == "g4_yZ" && self.a4_wall_stage == 95 {
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(116)
+                && player.translation[1] >= -7_100_000
+            {
+                self.a4_wall_stage = 96;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x > 24_600_000 {
+                PAD_LEFT
+            } else if predicted_x < 24_550_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return horizontal | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return horizontal;
+            }
+            return horizontal;
+        }
+        if name == "g4_yZ" && self.a4_wall_stage == 96 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(116) {
+                self.a4_wall_stage = 97;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "g4_yZ" && self.a4_wall_stage == 97 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 25_150_000 {
+                self.a4_wall_stage = 98;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "g5_yZ" && self.a4_wall_stage == 98 {
+            if player.status_a & 1 != 0
+                && player.translation[0] >= 25_360_000
+                && player.translation[1] <= -8_350_000
+            {
+                self.a4_wall_stage = 99;
+                self.d3_platform_hops = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            return if player.velocity[0] > 0 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+        }
+        if name == "g5_yZ" && self.a4_wall_stage == 99 {
+            if self.d3_platform_hops == 0 {
+                if player.status_a & 1 != 0
+                    && player.translation[0] <= 25_345_000
+                    && player.velocity[0].unsigned_abs() <= 100_000
+                {
+                    self.d3_platform_hops = 1;
+                    return PAD_RIGHT;
+                }
+                return if player.translation[0] <= 25_345_000 {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+            }
+            if player.status_a & 1 != 0
+                && (player.velocity[0] >= 300_000 || player.translation[0] >= 25_360_000)
+            {
+                self.a4_wall_stage = 100;
+                self.jump_frames = 8;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "g5_yZ" | "h1_yZ") && self.a4_wall_stage == 100 {
+            if player.status_a & 1 != 0
+                && player.translation[0] >= 25_850_000
+                && player.translation[1] <= -8_700_000
+            {
+                self.a4_wall_stage = 101;
+                self.a4_wall_wait = 0;
+                self.d3_platform_hops = 0;
+                self.d3_platform_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "g5_yZ" | "h1_yZ") && self.a4_wall_stage == 101 {
+            if self.a4_wall_wait < 5 && player.translation[1] >= -9_050_000 {
+                self.a4_wall_wait += 1;
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+                return if predicted_x < 25_820_000 {
+                    PAD_RIGHT
+                } else if predicted_x > 25_850_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+            if name == "h1_yZ" && player.status_a & 1 != 0 && player.translation[1] <= -9_050_000 {
+                if self.d3_platform_hops == 0 && player.translation[0] <= 25_750_000 {
+                    self.d3_platform_hops = 1;
+                    return PAD_LEFT;
+                }
+                if self.d3_platform_hops == 1 && player.velocity[0] <= -255_000 {
+                    self.a4_wall_stage = 102;
+                    self.jump_frames = 0;
+                    self.d3_platform_runup = 0;
+                    self.release_frames = 3;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                if self.d3_platform_hops == 1 {
+                    return PAD_LEFT;
+                }
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return if player.velocity[0] < 0 {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+        }
+        if matches!(name, "g5_yZ" | "h1_yZ") && self.a4_wall_stage == 102 {
+            if player.status_a & 1 != 0
+                && player.translation[0] <= 25_400_000
+                && player.translation[1] <= -9_500_000
+            {
+                self.a4_wall_stage = 103;
+                self.d3_platform_hops = 0;
+                self.jump_frames = 1;
+                self.release_frames = 3;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x < 25_000_000 {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return horizontal | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return horizontal;
+        }
+        if name == "h1_yZ" && self.a4_wall_stage == 103 {
+            if player.status_a & 1 != 0
+                && player.translation[0] <= 25_150_000
+                && player.translation[1] <= -9_750_000
+            {
+                if self.d3_platform_hops == 0 {
+                    self.d3_platform_hops = 1;
+                    return PAD_RIGHT;
+                }
+                if player.velocity[0] >= 300_000 {
+                    self.a4_wall_stage = 104;
+                    self.jump_frames = 8;
+                    self.release_frames = 3;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_RIGHT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x < 25_080_000 {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return horizontal | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return horizontal;
+        }
+        if matches!(name, "h1_yZ" | "h2_yZ") && self.a4_wall_stage == 104 {
+            if player.status_a & 1 != 0
+                && player.translation[0] >= 25_300_000
+                && player.translation[1] <= -10_100_000
+            {
+                self.a4_wall_stage = 105;
+                self.jump_frames = 8;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x < 25_900_000 {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return horizontal | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return horizontal;
+        }
+        if matches!(name, "h1_yZ" | "h2_yZ") && self.a4_wall_stage == 105 {
+            if name == "h2_yZ"
+                && player.status_a & 1 != 0
+                && player.translation[0] >= 25_850_000
+                && player.translation[1] <= -10_400_000
+            {
+                self.a4_wall_stage = 106;
+                self.horizontal = PAD_RIGHT;
+                self.jump_frames = 31;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x < 26_000_000 {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return horizontal | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return horizontal;
+        }
+        if name == "h2_yZ"
+            && camera.path.index == 1
+            && self.a4_wall_stage == 106
+            && player.status_a & 1 != 0
+            && (25_180_000..=25_360_000).contains(&player.translation[0])
+            && player.translation[1] <= -11_200_000
+        {
+            self.a4_wall_stage = 107;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if name == "h2_yZ" && self.a4_wall_stage == 107 {
+            // Stay grounded beneath the lethal staircase. Jumping here clips
+            // entity 131 while its CasOC children are extended.
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let predicted_z = player.translation[2] + player.velocity[2] / 16;
+            let target_z = 130_000_i32;
+            let mut held = if predicted_x < 25_450_000 {
+                PAD_RIGHT
+            } else {
+                self.a4_wall_stage = 108;
+                PAD_RIGHT
+            };
+            if predicted_z > target_z.saturating_add(20_000) {
+                held |= PAD_UP;
+            } else if predicted_z < target_z.saturating_sub(20_000) {
+                held |= PAD_DOWN;
+            }
+            return held;
+        }
+        if name == "h2_yZ" && self.a4_wall_stage == 108 {
+            // Entity 142 alternates between a shallow/retracted bound and an
+            // extended solid bridge. Stage at the edge until the live bound
+            // and state agree that it will remain under the landing arc.
+            let platform_extended = route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 142
+                ) && object.state == 11
+                    && object.bound.is_some_and(|bound| bound.max.z >= 100_000)
+            });
+            if !platform_extended {
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+                return if predicted_x > 25_520_000 {
+                    PAD_LEFT
+                } else if predicted_x < 25_490_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+            }
+            if player.status_a & 1 != 0 && player.translation[0] >= 25_590_000 {
+                self.a4_wall_stage = 109;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            let predicted_z = player.translation[2] + player.velocity[2] / 16;
+            let target_z = 130_000_i32;
+            let mut held = PAD_RIGHT;
+            if predicted_z > target_z.saturating_add(20_000) {
+                held |= PAD_UP;
+            } else if predicted_z < target_z.saturating_sub(20_000) {
+                held |= PAD_DOWN;
+            }
+            return held;
+        }
+        if matches!(name, "h2_yZ" | "h3_yZ") && self.a4_wall_stage == 109 {
+            let predicted_z = player.translation[2] + player.velocity[2] / 16;
+            let target_z = 130_000_i32;
+            let mut held = PAD_RIGHT;
+            if predicted_z > target_z.saturating_add(20_000) {
+                held |= PAD_UP;
+            } else if predicted_z < target_z.saturating_sub(20_000) {
+                held |= PAD_DOWN;
+            }
+            if name == "h3_yZ" && player.status_a & 1 != 0 && player_collider_entity == Some(142) {
+                self.a4_wall_stage = 110;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return held;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return held;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 106;
+                self.jump_frames = 8;
+                self.release_frames = 3;
+                return held | PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "h2_yZ" | "h3_yZ") && self.a4_wall_stage == 110 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(142) {
+                self.a4_wall_stage = 111;
+                self.jump_frames = 8;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "h2_yZ" | "h3_yZ") && self.a4_wall_stage == 111 {
+            if player.status_a & 1 != 0
+                && player_collider_entity != Some(142)
+                && player.translation[0] >= 26_280_000
+            {
+                self.a4_wall_stage = 112;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "h3_yZ" | "i1_yZ")
+            && self.a4_wall_stage == 112
+            && player.status_a & 1 != 0
+            && player_collider_entity == Some(118)
+        {
+            self.a4_wall_stage = 113;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if matches!(name, "h3_yZ" | "i1_yZ") && self.a4_wall_stage == 113 {
+            // The first two PoPlC platforms move in phase. Ride entity 118
+            // toward its right extreme so entity 119 travels back into the
+            // ordinary long-jump arc instead of receding from it.
+            let second_platform_x = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 119
+                )
+                .then_some(object.translation[0])
+            });
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(118)
+                && second_platform_x.is_some_and(|x| x >= 27_900_000)
+            {
+                self.a4_wall_stage = 114;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return 0;
+        }
+        if matches!(name, "h3_yZ" | "i1_yZ") && self.a4_wall_stage == 114 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(119) {
+                self.a4_wall_stage = 115;
+                self.i1_third_last_x = None;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "i1_yZ" && self.a4_wall_stage == 115 {
+            // Entity 134 has the opposite phase from entity 119. Wait until
+            // their live positions converge before leaving the second
+            // platform; at the other half-cycle the same jump cannot reach.
+            let second_platform = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 119
+                )
+                .then_some(object.bound?)
+            });
+            let third_platform = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 134
+                )
+                .then_some((object.translation[0], object.bound?))
+            });
+            let live_gap = second_platform
+                .zip(third_platform)
+                .map(|(second, (_, third))| third.min.x.saturating_sub(second.max.x));
+            let third_platform_x = third_platform.map(|(x, _)| x);
+            let third_moving_left = self
+                .i1_third_last_x
+                .zip(third_platform_x)
+                .is_some_and(|(last, current)| current < last);
+            self.i1_third_last_x = third_platform_x;
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(119)
+                && third_moving_left
+                && live_gap.is_some_and(|gap| gap <= 860_000)
+            {
+                self.a4_wall_stage = 116;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(119)
+                && third_moving_left
+                && live_gap.is_some_and(|gap| gap <= 1_300_000)
+            {
+                return PAD_RIGHT;
+            }
+            return 0;
+        }
+        if name == "i1_yZ" && self.a4_wall_stage == 116 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(134) {
+                self.a4_wall_stage = 117;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "i1_yZ" | "i2_yZ") && self.a4_wall_stage == 117 {
+            let third_platform = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 134
+                )
+                .then_some((object.translation[0], object.bound?))
+            });
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(134)
+                && third_platform.is_some_and(|(x, _)| x >= 28_780_000)
+            {
+                self.a4_wall_stage = 118;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            let Some((platform_x, platform_bound)) = third_platform else {
+                return PAD_RIGHT;
+            };
+            if platform_x >= 28_620_000 {
+                return PAD_RIGHT;
+            }
+            let target_x = platform_bound.min.x.saturating_add(platform_bound.max.x) / 2;
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            return if predicted_x < target_x.saturating_sub(15_000) {
+                PAD_RIGHT
+            } else if predicted_x > target_x.saturating_add(15_000) {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if matches!(name, "i1_yZ" | "i2_yZ") && self.a4_wall_stage == 118 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 29_250_000 {
+                self.a4_wall_stage = 119;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "i2_yZ" | "i3_yZ") && self.a4_wall_stage == 119 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(148) {
+                self.a4_wall_stage = 121;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if player.status_a & 1 != 0 && player.translation[0] >= 29_500_000 {
+                self.a4_wall_stage = 120;
+                self.jump_frames = 17;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "i2_yZ" | "i3_yZ") && self.a4_wall_stage == 120 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(148) {
+                self.a4_wall_stage = 121;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "i3_yZ" && self.a4_wall_stage == 121 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(149) {
+                self.a4_wall_stage = 122;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "i3_yZ" | "i4_yZ") && self.a4_wall_stage == 122 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(150) {
+                self.a4_wall_stage = 123;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            // The collapsing platform supplies the vertical bounce. A single
+            // spin edge two frames later supplies the first horizontal boost.
+            // Pulse it again early enough for the spin to finish at touchdown:
+            // the extra runout centers Crash on entity 150 while preserving
+            // that platform's automatic bounce.
+            return PAD_RIGHT
+                | if matches!(self.i3_runup, 3 | 18) {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+        }
+        if matches!(name, "i3_yZ" | "i4_yZ") && self.a4_wall_stage == 123 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 31_490_000 {
+                self.a4_wall_stage = 124;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            let mut held = PAD_RIGHT;
+            if self.i3_runup == 0 {
+                self.i3_runup = 1;
+                held |= PAD_SQUARE;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "i4_yZ" | "i5_yZ") && self.a4_wall_stage == 124 {
+            // Use the front floor for a deterministic run-up into the rotating
+            // RWaOC wheel instead of committing from its left edge.
+            if player.status_a & 1 != 0 && player.translation[0] >= 31_700_000 {
+                self.a4_wall_stage = 125;
+                self.i3_runup = 1;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "i4_yZ" | "i5_yZ") && self.a4_wall_stage == 125 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 32_200_000 {
+                self.a4_wall_stage = 126;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let mut held = PAD_RIGHT;
+            // Renew horizontal spin speed while holding the long jump; the
+            // rising lower-left runtime child is not represented by entity
+            // 154 in the collider trace, so the grounded x gate is the
+            // observable landing contract.
+            if self.i3_runup.is_multiple_of(8) {
+                held |= PAD_SQUARE;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if name == "i5_yZ"
+            && self.a4_wall_stage == 126
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 32_700_000
+        {
+            self.a4_wall_stage = 127;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if name == "i5_yZ" && self.a4_wall_stage == 127 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 32_900_000 {
+                self.a4_wall_stage = 128;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "i5_yZ" | "j1_yZ") && self.a4_wall_stage == 128 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 33_200_000 {
+                self.a4_wall_stage = 129;
+                self.a4_wall_wait = 0;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                return PAD_RIGHT | PAD_DOWN;
+            }
+            let predicted_z = player.translation[2] + player.velocity[2] / 4;
+            let depth = if player.translation[0] >= 33_100_000 && predicted_z < 190_000 {
+                PAD_DOWN
+            } else {
+                0
+            };
+            let horizontal = if depth == 0 { PAD_RIGHT } else { 0 };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return horizontal | PAD_CROSS | depth;
+            }
+            return horizontal | depth;
+        }
+        if matches!(name, "i5_yZ" | "j1_yZ") && self.a4_wall_stage == 129 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 33_700_000 {
+                self.a4_wall_stage = 130;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT | PAD_DOWN;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_z = player.translation[2] + player.velocity[2] / 4;
+            let depth = if predicted_z < 200_000 {
+                PAD_DOWN
+            } else if predicted_z > 220_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            let mut held = PAD_RIGHT | depth;
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            if self.i3_runup.is_multiple_of(8) {
+                held |= PAD_SQUARE;
+            }
+            return held;
+        }
+        if name == "j1_yZ" && self.a4_wall_stage == 130 {
+            // The assistant occupies the rear half of the authored floor.
+            // Brake and sidestep into the front/platform lane before jumping.
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x > 33_930_000 {
+                PAD_LEFT
+            } else if predicted_x < 33_880_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if player.status_a & 1 != 0
+                && player.translation[2] <= 45_000
+                && player.velocity[0].unsigned_abs() <= 100_000
+            {
+                self.a4_wall_stage = 131;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                return PAD_CROSS | PAD_SQUARE;
+            }
+            return horizontal | PAD_UP;
+        }
+        if name == "j1_yZ" && self.a4_wall_stage == 131 {
+            let assistant_defeated = !route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 135
+                ) && object.state < 10
+            });
+            if assistant_defeated {
+                self.a4_wall_stage = 132;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_z = player.translation[2] + player.velocity[2] / 4;
+            let depth = if predicted_z > 40_000 {
+                PAD_UP
+            } else if predicted_z < -20_000 {
+                PAD_DOWN
+            } else {
+                0
+            };
+            let mut held = depth;
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            if self.i3_runup.is_multiple_of(8) {
+                held |= PAD_SQUARE;
+            }
+            return held;
+        }
+        if name == "j1_yZ" && self.a4_wall_stage == 132 {
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x > 33_930_000 {
+                PAD_LEFT
+            } else if predicted_x < 33_880_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 133;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            return horizontal;
+        }
+        if name == "j1_yZ" && self.a4_wall_stage == 133 {
+            if self.i3_runup == 0 {
+                if player.translation[0] <= 33_820_000 {
+                    self.i3_runup = 1;
+                    return PAD_RIGHT | PAD_SQUARE;
+                }
+                return PAD_LEFT;
+            }
+            if player.translation[0] >= 34_400_000 {
+                self.a4_wall_stage = 134;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "j1_yZ" && self.a4_wall_stage == 134 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(137) {
+                self.a4_wall_stage = 135;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let mut held = if predicted_x > 34_650_000 {
+                PAD_LEFT
+            } else if predicted_x < 34_570_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 135 {
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            if player_collider_entity == Some(137)
+                && player.translation[1] >= -10_640_000
+                && predicted_x <= 34_570_000
+            {
+                self.a4_wall_stage = 136;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT | PAD_SQUARE;
+            }
+            return if predicted_x > 34_560_000 {
+                PAD_LEFT
+            } else if predicted_x < 34_535_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 136 {
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            if player_collider_entity == Some(137)
+                && predicted_x >= 34_665_000
+                && player.velocity[0] >= 350_000
+            {
+                self.a4_wall_stage = 137;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT
+                | if self.i3_runup.is_multiple_of(8) {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 137 {
+            if player.status_a & 1 != 0
+                && player_collider_entity != Some(137)
+                && player.translation[0] >= 34_940_000
+                && player.translation[1] >= -10_360_000
+            {
+                self.a4_wall_stage = 138;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let mut held = if predicted_x > 35_030_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            if self.i3_runup.is_multiple_of(8) {
+                held |= PAD_SQUARE;
+            }
+            return held;
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 138 {
+            if player.status_a & 1 != 0 {
+                if player.translation[0] >= 35_230_000 && player.translation[1] >= -10_080_000 {
+                    self.a4_wall_stage = 139;
+                    self.i3_runup = 0;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return 0;
+                }
+                if self.release_frames > 0 {
+                    self.release_frames -= 1;
+                    return PAD_RIGHT;
+                }
+                self.jump_frames = 17;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x > 35_270_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return horizontal | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return horizontal;
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 139 {
+            let rotating_target = route_objects.iter().find_map(|object| {
+                let bound = object.bound?;
+                (matches!(object.origin, ObjectOrigin::Runtime { .. })
+                    && object.program.name().as_deref() == Some("RWaOC")
+                    && bound.max.x.saturating_sub(bound.min.x) >= 150_000
+                    && bound.max.y.saturating_sub(bound.min.y) >= 40_000
+                    && bound.min.x >= 34_700_000
+                    && bound.max.x <= 35_350_000
+                    && (-9_850_000..=-9_700_000).contains(&bound.max.y))
+                .then_some((object.object, bound))
+            });
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            if player.status_a & 1 != 0
+                && predicted_x >= 35_220_000
+                && rotating_target.is_some_and(|(_, bound)| bound.max.x >= 35_100_000)
+            {
+                self.a4_wall_stage = 140;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                self.j2_rotating_target = rotating_target.map(|(object, _)| object);
+                return PAD_LEFT;
+            }
+            return if predicted_x < 35_225_000 {
+                PAD_RIGHT
+            } else if predicted_x > 35_250_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 140 {
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            if player.status_a & 1 != 0
+                && predicted_x <= 35_180_000
+                && player.velocity[0] <= -300_000
+            {
+                self.a4_wall_stage = 141;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_LEFT;
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 141 {
+            let rotating_target = route_objects.iter().find_map(|object| {
+                (Some(object.object) == self.j2_rotating_target)
+                    .then_some(object.bound)
+                    .flatten()
+            });
+            if player.status_a & 1 != 0
+                && rotating_target.is_some_and(|bound| {
+                    (bound.min.x..=bound.max.x).contains(&player.translation[0])
+                        && player.translation[1].abs_diff(bound.max.y) <= 80_000
+                })
+            {
+                self.a4_wall_stage = 142;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = rotating_target.map_or(34_600_000, |bound| {
+                (bound.min.x.saturating_add(bound.max.x) / 2).saturating_sub(60_000)
+            });
+            let mut held = if predicted_x < target_x {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            if self.i3_runup.is_multiple_of(8) {
+                held |= PAD_SQUARE;
+            }
+            return held;
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ" | "j3_yZ") && self.a4_wall_stage == 142 {
+            let current_bound = route_objects.iter().find_map(|object| {
+                (Some(object.object) == self.j2_rotating_target)
+                    .then_some(object.bound)
+                    .flatten()
+            });
+            let next_target = current_bound.and_then(|current| {
+                route_objects
+                    .iter()
+                    .filter_map(|object| {
+                        let bound = object.bound?;
+                        (matches!(object.origin, ObjectOrigin::Runtime { .. })
+                            && object.program.name().as_deref() == Some("RWaOC")
+                            && bound.max.x.saturating_sub(bound.min.x) >= 150_000
+                            && bound.max.y.saturating_sub(bound.min.y) >= 40_000
+                            && bound.min.x > current.max.x
+                            && bound.max.y > current.max.y)
+                            .then_some((object.object, bound))
+                    })
+                    .min_by_key(|(_, bound)| bound.min.x)
+            });
+            if player.status_a & 1 != 0
+                && current_bound.is_some_and(|bound| bound.max.y >= -9_500_000)
+                && next_target.is_some_and(|(_, bound)| {
+                    bound.min.x.saturating_sub(player.translation[0]) <= 300_000
+                        && bound.max.y.saturating_sub(player.translation[1]) <= 350_000
+                })
+            {
+                self.a4_wall_stage = 143;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                self.j2_rotating_target = next_target.map(|(object, _)| object);
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return 0;
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ" | "j3_yZ") && self.a4_wall_stage == 143 {
+            let rotating_target = route_objects.iter().find_map(|object| {
+                (Some(object.object) == self.j2_rotating_target)
+                    .then_some(object.bound)
+                    .flatten()
+            });
+            if player.status_a & 1 != 0
+                && rotating_target.is_some_and(|bound| {
+                    (bound.min.x..=bound.max.x).contains(&player.translation[0])
+                        && player.translation[1].abs_diff(bound.max.y) <= 80_000
+                })
+            {
+                self.a4_wall_stage = 144;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = rotating_target.map_or(34_300_000, |bound| {
+                bound.min.x.saturating_add(bound.max.x) / 2
+            });
+            let mut held = if predicted_x > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            if self.i3_runup.is_multiple_of(8) {
+                held |= PAD_SQUARE;
+            }
+            return held;
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ" | "j3_yZ") && self.a4_wall_stage == 144 {
+            let current_bound = route_objects.iter().find_map(|object| {
+                (Some(object.object) == self.j2_rotating_target)
+                    .then_some(object.bound)
+                    .flatten()
+            });
+            let next_target = current_bound.and_then(|current| {
+                route_objects
+                    .iter()
+                    .filter_map(|object| {
+                        let bound = object.bound?;
+                        (matches!(object.origin, ObjectOrigin::Runtime { .. })
+                            && object.program.name().as_deref() == Some("RWaOC")
+                            && Some(object.object) != self.j2_rotating_target
+                            && bound.max.x.saturating_sub(bound.min.x) >= 150_000
+                            && bound.max.y.saturating_sub(bound.min.y) >= 40_000
+                            && bound.max.y > current.max.y)
+                            .then_some((object.object, bound))
+                    })
+                    .max_by_key(|(_, bound)| bound.max.y)
+            });
+            if player.status_a & 1 != 0
+                && current_bound.is_some_and(|bound| bound.max.y >= -9_200_000)
+                && next_target.is_some_and(|(_, bound)| {
+                    let target_x = bound.min.x.saturating_add(bound.max.x) / 2;
+                    player.translation[0].abs_diff(target_x) <= 320_000
+                        && bound.max.y.saturating_sub(player.translation[1]) <= 165_000
+                })
+            {
+                self.a4_wall_stage = 145;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                self.j2_rotating_target = next_target.map(|(object, _)| object);
+                return if next_target.is_some_and(|(_, bound)| player.translation[0] < bound.max.x)
+                {
+                    PAD_RIGHT | PAD_CROSS
+                } else {
+                    PAD_LEFT | PAD_CROSS
+                };
+            }
+            return if next_target.is_some_and(|(_, bound)| {
+                (166_000..=220_000).contains(&bound.max.y.saturating_sub(player.translation[1]))
+                    && player.translation[0] < bound.max.x
+            }) {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if matches!(name, "j2_yZ" | "j3_yZ") && self.a4_wall_stage == 145 {
+            let rotating_target = route_objects.iter().find_map(|object| {
+                (Some(object.object) == self.j2_rotating_target)
+                    .then_some(object.bound)
+                    .flatten()
+            });
+            if player.status_a & 1 != 0
+                && rotating_target.is_some_and(|bound| {
+                    (bound.min.x..=bound.max.x).contains(&player.translation[0])
+                        && player.translation[1].abs_diff(bound.max.y) <= 80_000
+                })
+            {
+                self.a4_wall_stage = 146;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = rotating_target.map_or(34_450_000, |bound| {
+                (bound.min.x.saturating_add(bound.max.x) / 2).saturating_add(80_000)
+            });
+            let mut held = if predicted_x > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "j2_yZ" | "j3_yZ") && self.a4_wall_stage == 146 {
+            let current_bound = route_objects.iter().find_map(|object| {
+                (Some(object.object) == self.j2_rotating_target)
+                    .then_some(object.bound)
+                    .flatten()
+            });
+            if player.status_a & 1 != 0
+                && current_bound.is_some_and(|bound| bound.max.y >= -8_835_000)
+            {
+                self.a4_wall_stage = 147;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return 0;
+        }
+        if name == "j3_yZ" && self.a4_wall_stage == 147 {
+            if player.status_a & 1 != 0
+                && (34_483_200..=34_739_200).contains(&player.translation[0])
+                && player.translation[1].abs_diff(-8_685_824) <= 80_000
+            {
+                self.a4_wall_stage = 148;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return PAD_LEFT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = 34_590_000;
+            let mut held = if predicted_x > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if name == "j3_yZ" && self.a4_wall_stage == 148 {
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_LEFT;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 149;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            return PAD_LEFT;
+        }
+        if name == "j3_yZ" && self.a4_wall_stage == 149 {
+            let exit_step = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 84
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            if player.status_a & 1 != 0
+                && (player_collider_entity == Some(84)
+                    || exit_step.is_some_and(|bound| {
+                        (bound.min.x..=bound.max.x).contains(&player.translation[0])
+                            && player.translation[1].abs_diff(bound.max.y) <= 80_000
+                    }))
+            {
+                self.a4_wall_stage = 150;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                self.horizontal = PAD_RIGHT;
+                return PAD_RIGHT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = exit_step.map_or(34_300_000, |bound| {
+                bound.min.x.saturating_add(bound.max.x) / 2
+            });
+            let mut held = if predicted_x > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "j3_yZ" | "k1_yZ") && self.a4_wall_stage == 150 {
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            if player.status_a & 1 != 0
+                && predicted_x >= 34_340_000
+                && player.velocity[0] >= 300_000
+            {
+                self.a4_wall_stage = 151;
+                self.jump_frames = 32;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "j3_yZ" | "k1_yZ") && self.a4_wall_stage == 151 {
+            let target = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 85
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            if player.status_a & 1 != 0 && player_collider_entity == Some(85) {
+                self.a4_wall_stage = 152;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return PAD_LEFT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = target.map_or(34_680_000, |bound| {
+                (bound.min.x.saturating_add(bound.max.x) / 2).saturating_sub(30_000)
+            });
+            let mut held = if predicted_x > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "j3_yZ" | "k1_yZ") && self.a4_wall_stage == 152 {
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 153;
+                self.jump_frames = 32;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "j3_yZ" | "k1_yZ") && self.a4_wall_stage == 153 {
+            let target = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 86
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            if player.status_a & 1 != 0 && player_collider_entity == Some(86) {
+                self.a4_wall_stage = 154;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return PAD_LEFT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = target.map_or(34_990_000, |bound| {
+                (bound.min.x.saturating_add(bound.max.x) / 2).saturating_sub(30_000)
+            });
+            let mut held = if predicted_x > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "j3_yZ" | "k1_yZ") && self.a4_wall_stage == 154 {
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 155;
+                self.jump_frames = 24;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "j3_yZ" | "k1_yZ") && self.a4_wall_stage == 155 {
+            let target = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 87
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            if player.status_a & 1 != 0 && player_collider_entity == Some(87) {
+                self.a4_wall_stage = 156;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                self.horizontal = PAD_RIGHT;
+                return PAD_LEFT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = target.map_or(35_200_000, |bound| {
+                bound.min.x.saturating_add(bound.max.x) / 2
+            });
+            let mut held = if predicted_x > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "j3_yZ" | "k1_yZ") && self.a4_wall_stage == 156 {
+            let lift = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 87
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(87)
+                && lift.is_some_and(|bound| bound.max.y >= -7_590_000)
+            {
+                self.a4_wall_stage = 157;
+                self.jump_frames = 24;
+                self.release_frames = 0;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if matches!(name, "j3_yZ" | "k1_yZ") && self.a4_wall_stage == 157 {
+            if player.status_a & 1 != 0
+                && player_collider_entity != Some(87)
+                && (35_030_000..=35_170_000).contains(&player.translation[0])
+                && player.translation[1] >= -7_680_000
+            {
+                self.a4_wall_stage = 158;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                self.horizontal = PAD_LEFT;
+                return PAD_LEFT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let mut held = if predicted_x > 35_120_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "k1_yZ" | "k2_yZ")
+            && self.a4_wall_stage == 158
+            && player.status_a & 1 != 0
+            && (34_400_000..=34_520_000).contains(&player.translation[0])
+            && player.translation[1].abs_diff(-7_169_792) <= 80_000
+        {
+            self.a4_wall_stage = 159;
+            self.jump_frames = 0;
+            self.release_frames = 3;
+            return PAD_RIGHT;
+        }
+        if matches!(name, "k1_yZ" | "k2_yZ") && self.a4_wall_stage == 159 {
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 160;
+                self.jump_frames = 12;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "k1_yZ" | "k2_yZ" | "k3_yZ") && self.a4_wall_stage == 160 {
+            let handoff_surface = route_objects.iter().find(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 53,
+                        subtype: 10
+                    }
+                ) && object.frame_bound.is_some_and(|bound| {
+                    (34_250_000..=34_460_000)
+                        .contains(&(bound.min.x.saturating_add(bound.max.x) / 2))
+                        && (bound.min.x.saturating_sub(40_000)..=bound.max.x.saturating_add(40_000))
+                            .contains(&player.translation[0])
+                        && player.translation[1].abs_diff(bound.max.y) <= 80_000
+                })
+            });
+            if player.status_a & 1 != 0 && handoff_surface.is_some() {
+                self.a4_wall_stage = 181;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let mut held = if predicted_x < 34_380_000 {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "k1_yZ" | "k2_yZ" | "k3_yZ") && self.a4_wall_stage == 181 {
+            if player.status_a & 1 != 0
+                && (33_990_000..=34_140_000).contains(&player.translation[0])
+                && player.translation[1].abs_diff(-6_849_024) <= 80_000
+            {
+                self.a4_wall_stage = 182;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return PAD_LEFT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let mut held = if predicted_x < 34_080_000 {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "k1_yZ" | "k2_yZ" | "k3_yZ") && self.a4_wall_stage == 182 {
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_LEFT;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 183;
+                self.jump_frames = 17;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            return PAD_LEFT;
+        }
+        if matches!(name, "k1_yZ" | "k2_yZ" | "k3_yZ") && self.a4_wall_stage == 183 {
+            if player.status_a & 1 != 0
+                && (33_850_000..=34_030_000).contains(&player.translation[0])
+                && player.translation[1].abs_diff(-6_757_024) <= 80_000
+            {
+                self.a4_wall_stage = 184;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return PAD_RIGHT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let mut held = if predicted_x < 33_950_000 {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "k1_yZ" | "k2_yZ" | "k3_yZ") && self.a4_wall_stage == 184 {
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT;
+            }
+            if player.status_a & 1 != 0 && player.velocity[0] >= 300_000 {
+                self.a4_wall_stage = 162;
+                self.jump_frames = 32;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "k1_yZ" | "k2_yZ" | "k3_yZ") && self.a4_wall_stage == 162 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(72) {
+                self.a4_wall_stage = 163;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return PAD_RIGHT;
+            }
+            let target = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 72
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = target.map_or(34_304_000, |bound| {
+                bound.min.x.saturating_add(bound.max.x) / 2
+            });
+            let mut held = if predicted_x > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS | PAD_SQUARE;
+            }
+            return held;
+        }
+        if matches!(name, "k1_yZ" | "k2_yZ" | "k3_yZ")
+            && matches!(self.a4_wall_stage, 163 | 165 | 167 | 169 | 171)
+        {
+            let direction = match self.a4_wall_stage {
+                163 | 165 => PAD_RIGHT,
+                167 | 169 | 171 => PAD_LEFT,
+                _ => unreachable!(),
+            };
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return direction;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = self.a4_wall_stage.saturating_add(1);
+                self.jump_frames = 32;
+                return direction | PAD_CROSS;
+            }
+            return direction;
+        }
+        if matches!(name, "k1_yZ" | "k2_yZ" | "k3_yZ")
+            && matches!(self.a4_wall_stage, 164 | 166 | 168 | 170 | 172)
+        {
+            let target_id = match self.a4_wall_stage {
+                164 => 74,
+                166 => 76,
+                168 => 75,
+                170 => 73,
+                172 => 71,
+                _ => unreachable!(),
+            };
+            if player.status_a & 1 != 0 && player_collider_entity == Some(target_id) {
+                self.a4_wall_stage = self.a4_wall_stage.saturating_add(1);
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return if matches!(target_id, 74 | 76) {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+            }
+            let target = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == target_id
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let fallback_x = match target_id {
+                71 => 33_996_800,
+                72 | 73 => 34_304_000,
+                74 | 75 => 34_713_600,
+                76 => 35_123_200,
+                _ => unreachable!(),
+            };
+            let target_x = target.map_or(fallback_x, |bound| {
+                bound.min.x.saturating_add(bound.max.x) / 2
+            });
+            let mut held = if predicted_x > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "k2_yZ" | "k3_yZ") && self.a4_wall_stage == 173 {
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT;
+            }
+            if player.status_a & 1 != 0 && player_collider_entity == Some(71) {
+                self.a4_wall_stage = 174;
+                self.jump_frames = 32;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "k2_yZ" | "k3_yZ") && self.a4_wall_stage == 174 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(88) {
+                self.a4_wall_stage = 175;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_RIGHT;
+            }
+            let target = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 88
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = target.map_or(34_406_400, |bound| {
+                bound.min.x.saturating_add(bound.max.x) / 2
+            });
+            let mut held = if predicted_x > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if name == "k3_yZ" && self.a4_wall_stage == 175 {
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 176;
+                self.jump_frames = 32;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "k3_yZ" && self.a4_wall_stage == 176 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(89) {
+                self.a4_wall_stage = 185;
+                self.jump_frames = 0;
+                self.release_frames = 1;
+                return PAD_RIGHT;
+            }
+            let target = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 89
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = target.map_or(34_816_000, |bound| {
+                bound.min.x.saturating_add(bound.max.x) / 2
+            });
+            let mut held = if predicted_x > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if name == "k3_yZ" && self.a4_wall_stage == 185 {
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT;
+            }
+            if player.status_a & 1 != 0 && player_collider_entity == Some(89) {
+                self.a4_wall_stage = 186;
+                self.jump_frames = 17;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "k3_yZ" | "k4_yZ") && self.a4_wall_stage == 186 {
+            if player.status_a & 1 != 0
+                && (34_970_000..=35_130_000).contains(&player.translation[0])
+                && player.translation[1].abs_diff(-5_003_024) <= 80_000
+            {
+                self.a4_wall_stage = 187;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_LEFT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let mut held = if predicted_x > 35_045_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "k3_yZ" | "k4_yZ") && self.a4_wall_stage == 187 {
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_LEFT;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 188;
+                self.jump_frames = 17;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "k3_yZ" | "k4_yZ") && self.a4_wall_stage == 188 {
+            if player.status_a & 1 != 0
+                && (35_060_000..=35_330_000).contains(&player.translation[0])
+                && player.translation[1].abs_diff(-4_796_224) <= 80_000
+            {
+                self.a4_wall_stage = 189;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return PAD_LEFT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let mut held = if predicted_x > 35_190_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "k3_yZ" | "k4_yZ") && self.a4_wall_stage == 189 {
+            let lift = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 90
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_LEFT;
+            }
+            if player.status_a & 1 != 0
+                && lift.is_some_and(|bound| {
+                    let rise = bound.max.y.saturating_sub(player.translation[1]);
+                    (150_000..=270_000).contains(&rise)
+                })
+            {
+                self.a4_wall_stage = 190;
+                self.jump_frames = 17;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            return if predicted_x > 35_220_000 {
+                PAD_LEFT
+            } else if predicted_x < 35_150_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if matches!(name, "k3_yZ" | "k4_yZ") && self.a4_wall_stage == 190 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(90) {
+                self.a4_wall_stage = 179;
+                self.jump_frames = 0;
+                return 0;
+            }
+            let target = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 90
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = target.map_or(34_918_400, |bound| {
+                bound.min.x.saturating_add(bound.max.x) / 2
+            });
+            let mut held = if predicted_x > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "k3_yZ" | "k4_yZ") && self.a4_wall_stage == 179 {
+            let lift = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 90
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(90)
+                && lift.is_some_and(|bound| bound.max.y >= -3_930_000)
+            {
+                self.a4_wall_stage = 191;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            return 0;
+        }
+        if matches!(name, "k3_yZ" | "k4_yZ") && self.a4_wall_stage == 191 {
+            if player.status_a & 1 != 0
+                && player_collider_entity != Some(90)
+                && (34_500_000..=34_680_000).contains(&player.translation[0])
+                && (-4_010_000..=-3_850_000).contains(&player.translation[1])
+            {
+                self.a4_wall_stage = 192;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_LEFT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let mut held = if predicted_x < 34_590_000 {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "k3_yZ" | "k4_yZ") && self.a4_wall_stage == 192 {
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_LEFT;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 193;
+                self.jump_frames = 32;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            return PAD_LEFT;
+        }
+        if matches!(name, "k3_yZ" | "k4_yZ") && self.a4_wall_stage == 193 {
+            if player.status_a & 1 != 0
+                && (34_250_000..=34_460_000).contains(&player.translation[0])
+                && (-3_820_000..=-3_550_000).contains(&player.translation[1])
+            {
+                self.a4_wall_stage = 194;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_LEFT;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let mut held = if predicted_x < 34_355_200 {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "k3_yZ" | "k4_yZ") && self.a4_wall_stage == 194 {
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return PAD_LEFT;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 195;
+                self.jump_frames = 17;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            return PAD_LEFT;
+        }
+        if matches!(name, "k3_yZ" | "k4_yZ") && self.a4_wall_stage == 195 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(91) {
+                self.a4_wall_stage = 196;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return PAD_LEFT;
+            }
+            let target = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 91
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = target.map_or(34_099_200, |bound| {
+                bound.min.x.saturating_add(bound.max.x) / 2
+            });
+            let mut held = if predicted_x < target_x {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if (name == "k4_yZ" || (name == "l1_yZ" && camera.path.index == 0))
+            && self.a4_wall_stage == 196
+        {
+            return 0;
+        }
+        let opening_vertical = matches!(
+            name,
+            "a1_yZ" | "a2_yZ" | "a3_yZ" | "a4_yZ" | "b1_yZ" | "b2_yZ" | "b3_yZ" | "b4_yZ" | "c1_yZ"
+        ) || (name == "c2_yZ" && camera.path.index == 0);
+        let middle_vertical = (name == "g4_yZ" && camera.path.index == 1)
+            || matches!(name, "g5_yZ" | "h1_yZ")
+            || (name == "h2_yZ" && camera.path.index == 0);
+        let late_vertical = (name == "j1_yZ" && camera.path.index == 1)
+            || matches!(
+                name,
+                "j2_yZ" | "j3_yZ" | "k1_yZ" | "k2_yZ" | "k3_yZ" | "k4_yZ"
+            )
+            || (name == "l1_yZ" && camera.path.index == 0);
+        let final_leftward = (name == "l1_yZ" && camera.path.index == 1)
+            || matches!(
+                name,
+                "l2_yZ"
+                    | "l3_yZ"
+                    | "l4_yZ"
+                    | "m1_yZ"
+                    | "m2_yZ"
+                    | "m3_yZ"
+                    | "m4_yZ"
+                    | "n1_yZ"
+                    | "n2_yZ"
+                    | "n3_yZ"
+                    | "n4_yZ"
+                    | "n5_yZ"
+                    | "o1_yZ"
+            );
+
+        if opening_vertical || middle_vertical || late_vertical {
+            let (left_turn_x, right_turn_x) = if middle_vertical {
+                (
+                    26_000_000,
+                    if self.a4_wall_stage == 106 {
+                        25_050_000
+                    } else {
+                        25_000_000
+                    },
+                )
+            } else if late_vertical {
+                (35_100_000, 34_100_000)
+            } else {
+                (
+                    3_100_000,
+                    if matches!(name, "a3_yZ" | "a4_yZ") {
+                        if self.first_retracting_stair_stage >= 2 {
+                            1_500_000
+                        } else {
+                            2_350_000
+                        }
+                    } else {
+                        1_950_000
+                    },
+                )
+            };
+            if player.translation[0] >= left_turn_x {
+                self.horizontal = PAD_LEFT;
+            } else if player.translation[0] <= right_turn_x {
+                self.horizontal = PAD_RIGHT;
+            }
+        } else if final_leftward {
+            self.horizontal = PAD_LEFT;
+        } else {
+            self.horizontal = PAD_RIGHT;
+        }
+
+        let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+        let mut held = if name == "f2_yZ" && self.a4_wall_stage == 76 {
+            if predicted_x > 17_020_000 {
+                PAD_LEFT
+            } else if predicted_x < 16_980_000 {
+                PAD_RIGHT
+            } else {
+                0
+            }
+        } else if matches!(name, "b1_yZ" | "b2_yZ") && matches!(self.a4_wall_stage, 11 | 16) {
+            let brake_x = if self.a4_wall_stage == 11 {
+                2_660_000
+            } else {
+                route_objects
+                    .iter()
+                    .find_map(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 36
+                        )
+                        .then_some(object.bound?.max.x.saturating_sub(20_000))
+                    })
+                    .unwrap_or(2_437_600)
+            };
+            if predicted_x > brake_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            }
+        } else {
+            self.horizontal
+        };
+        let predicted_z = player.translation[2] + player.velocity[2] / 4;
+        if name == "a4_yZ" && self.a4_wall_stage == 6 {
+            held |= a4_box_lane;
+        } else if matches!(name, "b1_yZ" | "b2_yZ") && matches!(self.a4_wall_stage, 11 | 16) {
+            let target_z = std::env::var(if self.a4_wall_stage == 11 {
+                "C1_STORMY_B2_TARGET_Z"
+            } else {
+                "C1_STORMY_B2_LOWER_TARGET_Z"
+            })
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(0);
+            if predicted_z > target_z + 20_000 {
+                held |= PAD_UP;
+            } else if predicted_z < target_z - 20_000 {
+                held |= PAD_DOWN;
+            }
+        } else if self.a4_wall_stage == 106 {
+            if predicted_z > 170_000 {
+                held |= PAD_UP;
+            } else if predicted_z < 130_000 {
+                held |= PAD_DOWN;
+            }
+        } else if predicted_z > 150_000 {
+            held |= PAD_UP;
+        } else if predicted_z < 40_000 {
+            held |= PAD_DOWN;
+        }
+        if self.tick.is_multiple_of(20)
+            && !(self.a4_wall_stage == 106 && player.translation[1] <= -10_800_000)
+            && !(name == "a4_yZ" && matches!(self.a4_wall_stage, 3 | 6 | 7 | 77 | 78 | 79 | 80))
+        {
+            held |= PAD_SQUARE;
+        }
+        if name == "a4_yZ" && self.a4_wall_stage == 2 {
+            held |= PAD_SQUARE;
+        }
+        if self.jump_frames > 0 {
+            self.jump_frames -= 1;
+            return held | PAD_CROSS;
+        }
+        if self.release_frames > 0 {
+            self.release_frames -= 1;
+            return held;
+        }
+        if player.status_a & 1 != 0 {
+            let short_h2_step = self.a4_wall_stage == 106;
+            let h2_right_riser = short_h2_step
+                && self.horizontal == PAD_RIGHT
+                && player.translation[0] <= 25_100_000
+                && (player.translation[1] <= -11_200_000
+                    || matches!(player_collider_entity, Some(139 | 140)));
+            let long_stormy_jump =
+                !short_h2_step && self.a4_wall_stage >= 55 && player.translation[0] >= 9_400_000;
+            self.jump_frames = if h2_right_riser {
+                17
+            } else if short_h2_step {
+                8
+            } else if long_stormy_jump {
+                32
+            } else {
+                17
+            };
+            self.release_frames = 3;
+            return held
+                | PAD_CROSS
+                | if long_stormy_jump && player.translation[0] >= 11_000_000 {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+        }
+        held
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 struct SlipperyClimbCompletionRouteController {
@@ -50636,6 +56296,7 @@ struct SurveyInputController {
     castle_machinery: CastleMachineryCompletionRouteController,
     lights_out: LightsOutCompletionRouteController,
     slippery_climb: SlipperyClimbCompletionRouteController,
+    stormy_ascent: StormyAscentCompletionRouteController,
     upstream: UpstreamRecoveryRouteController,
     rolling_stones: RollingStonesRouteController,
     rolling_stones_brio: RollingStonesBrioBonusRouteController,
@@ -51171,6 +56832,7 @@ impl SurveyInputController {
                 upper_h3_second_jump_armed: false,
                 upper_i2_waited: false,
             },
+            stormy_ascent: StormyAscentCompletionRouteController::default(),
             upstream: UpstreamRecoveryRouteController {
                 stage: UpstreamRecoveryStage::SettleAtSpawn,
                 // With Crash settled at the ordinary post-Map spawn, the
@@ -51863,6 +57525,13 @@ impl SurveyInputController {
             SurveyInputProfile::SlipperyClimbCompletionRoute => {
                 self.slippery_climb.held(camera, player, route_objects)
             }
+            SurveyInputProfile::StormyAscentCompletionRoute => self.stormy_ascent.held(
+                camera,
+                player,
+                player_collider_entity,
+                checkpoint_id,
+                route_objects,
+            ),
             SurveyInputProfile::UpstreamPhaseRobust => {
                 self.upstream
                     .held(camera, player, upstream_platforms, checkpoint_id)
@@ -56134,6 +61803,7 @@ fn survey_pair_with_runtime_impl(
                     | SurveyInputProfile::JawsOfDarknessExactCampaignPhase
                     | SurveyInputProfile::CastleMachineryCompletionRoute
                     | SurveyInputProfile::CastleMachineryExactCampaignPhase
+                    | SurveyInputProfile::StormyAscentCompletionRoute
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
                     | SurveyInputProfile::LabCompletionRoute
                     | SurveyInputProfile::SunsetVistaCortexBonusRoute
@@ -56264,6 +61934,7 @@ fn survey_pair_with_runtime_impl(
             | SurveyInputProfile::ToxicWasteCompletionRoute
             | SurveyInputProfile::CastleMachineryCompletionRoute
             | SurveyInputProfile::CastleMachineryExactCampaignPhase
+            | SurveyInputProfile::StormyAscentCompletionRoute
             | SurveyInputProfile::SlipperyClimbCompletionRoute
             | SurveyInputProfile::LightsOutCompletionRoute
             | SurveyInputProfile::LabCompletionRoute
@@ -56653,6 +62324,56 @@ fn survey_pair_with_runtime_impl(
                 "LOST_RETURN frame={frame} profile={} held={held:#06x} camera={:?} checkpoint={checkpoint_id_before_frame} collider={player_collider_before_frame:?} opening-stage={opening_stage} pbak-cursor={pbak_cursor:?} return-stage={return_stage} return-tick={return_tick} player={player_before_frame:?} return-entities={return_entities:?}",
                 input_profile.label(),
                 camera.location(),
+            );
+        }
+        if input_profile == SurveyInputProfile::StormyAscentCompletionRoute
+            && std::env::var_os("C1_SURVEY_STORMY_TRACE").is_some()
+        {
+            let nearby = player_before_frame.map_or_else(Vec::new, |player| {
+                route_objects
+                    .iter()
+                    .filter(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor)
+                                if matches!(
+                                    descriptor.id,
+                                    15 | 16 | 23 | 24 | 25 | 27 | 28 | 35 | 36 | 37 | 38
+                                        | 39 | 40 | 69 | 70 | 95 | 97 | 100 | 135
+                                )
+                        ) || (object.translation[0].abs_diff(player.translation[0]) <= 2_500_000
+                            && object.translation[1].abs_diff(player.translation[1]) <= 2_500_000)
+                    })
+                    .map(|object| {
+                        (
+                            object.origin,
+                            object.program.name(),
+                            object.state,
+                            object.translation,
+                            object.bound,
+                            object.frame_bound,
+                            object.state_stamp,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let stair_28 = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 28
+                )
+                .then_some((
+                    object.state,
+                    object.translation,
+                    object.bound,
+                    object.state_stamp,
+                ))
+            });
+            eprintln!(
+                "STORMY_TRACE frame={frame} camera={:?} stage={} horizontal={:#06x} held={held:#06x} player={player_before_frame:?} collider={player_collider_before_frame:?} stair28={stair_28:?} nearby={nearby:?}",
+                camera.location(),
+                input_controller.stormy_ascent.a4_wall_stage,
+                input_controller.stormy_ascent.horizontal,
             );
         }
         if input_profile == SurveyInputProfile::RollingStonesBrioBonus
@@ -57095,6 +62816,7 @@ fn survey_pair_with_runtime_impl(
                     | SurveyInputProfile::SunsetVistaCompletionRoute
                     | SurveyInputProfile::SunsetVistaCortexBonusRoute
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
+                    | SurveyInputProfile::StormyAscentCompletionRoute
                     | SurveyInputProfile::RoadToNowhereCompletionRoute
                     | SurveyInputProfile::HeavyMachineryCompletionRoute
                     | SurveyInputProfile::ToxicWasteCompletionRoute
@@ -57351,6 +63073,16 @@ fn survey_pair_with_runtime_impl(
                 )
             {
                 eprintln!("SLIPPERY_EFFECT frame={frame} effect={effect:?}");
+            }
+            if input_profile == SurveyInputProfile::StormyAscentCompletionRoute
+                && std::env::var_os("C1_SURVEY_STORMY_TRACE").is_some()
+                && frame >= 6_200
+                && matches!(
+                    effect,
+                    VmEffect::SendEvent(_) | VmEffect::Solid { .. } | VmEffect::StateChanged { .. }
+                )
+            {
+                eprintln!("STORMY_EFFECT frame={frame} effect={effect:?}");
             }
             if input_profile == SurveyInputProfile::CortexPowerCompletionRoute
                 && std::env::var_os("C1_SURVEY_CORTEX_TRACE").is_some()

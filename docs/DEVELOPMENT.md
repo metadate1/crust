@@ -113,10 +113,14 @@ controller oracle. The browser hook intentionally cannot force a transition or m
 so the missing trace cannot be replaced by test-only game-state shortcuts.
 
 Opt-in survey exports can be assembled into one ignored campaign replay without copying their
-input into repository source. Keep the ordered manifest and every exported fragment under an
-ignored/local path, then run:
+input into repository source. Keep one route's exported fragments under an ignored/local path,
+discover their unique exact order, then compose and run:
 
 ```bash
+npm run discover:browser-campaign-replay -- \
+  --fragments target/local-campaign/fragments \
+  --output target/local-campaign/manifest.json
+
 npm run compose:browser-campaign-replay -- \
   --manifest target/local-campaign/manifest.json \
   --output target/local-campaign/campaign.replay.json
@@ -126,12 +130,13 @@ npm run verify:browser-harness:smoke -- \
   --replay target/local-campaign/campaign.replay.json
 ```
 
-The composer inserts separately supplied authored Level Complete/Island Map handoff fragments,
-adds current/mounted-LID guards to every run, and asserts an exact carry checkpoint after every
-phase. It rejects missing RNG/draw/restart continuity, mismatched fragment metadata, nonlocal
-exports, and handoffs that bypass the retail Title / Island Map mount. See
-[Local browser campaign replay composition](BROWSER_CAMPAIGN_REPLAY.md) for the manifest contract
-and safety rules.
+Discovery fails if exporter-named captures are disconnected or admit multiple equally long exact
+orders; it never generates controller input or bridges a missing edge. The composer adds
+current/mounted-LID guards to every run and asserts an exact carry checkpoint after every phase.
+It rejects missing RNG/draw/restart continuity, mismatched fragment metadata, nonlocal exports,
+and handoffs that bypass the retail Title / Island Map mount. See
+[Local browser campaign replay discovery and composition](BROWSER_CAMPAIGN_REPLAY.md) for the
+manifest contract and safety rules.
 
 ## Local-data verification
 

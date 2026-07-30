@@ -1,11 +1,12 @@
-# Local browser campaign replay composition
+# Local browser campaign replay discovery and composition
 
-The browser campaign composer joins legally local replay fragments into the schema consumed by
-`scripts/browser-harness-smoke.mjs`. It is deliberately a composition and validation tool, not a
-second game controller:
+The browser campaign discovery and composition tools join legally local replay fragments into the
+schema consumed by `scripts/browser-harness-smoke.mjs`. They are deliberately ordering,
+composition, and validation tools, not a second game controller:
 
-- it reads only an ordered local manifest and opt-in local fragment JSON files;
-- it copies fragment input runs without generating, predicting, or changing pad input;
+- discovery orders an unordered directory of opt-in local fragment JSON files by exact state;
+- composition reads only the resulting ordered local manifest and its fragment JSON files;
+- composition copies fragment input runs without generating, predicting, or changing pad input;
 - it inserts only handoff fragments named by the manifest;
 - it adds a current/mounted-LID guard to every segment;
 - it requires exact deterministic state continuity across every phase; and
@@ -17,7 +18,37 @@ profile belongs in Git. Put them under `target/`, `local-data/`, `artifacts/`, `
 `recordings/`, all of which are local artifact boundaries. The CLI refuses a repository-local
 output anywhere else and also refuses to overwrite its manifest or a fragment.
 
-## Compose and run
+## Discover, compose, and run
+
+Export one campaign route into its own ignored/local fragment directory. Validate that every
+export in the directory belongs to one unique exact path without writing a manifest:
+
+```bash
+npm run discover:browser-campaign-replay -- \
+  --fragments target/local-campaign/fragments \
+  --check
+```
+
+Write the ordered manifest, optionally choosing the captured input profile where browser tracing
+should begin:
+
+```bash
+npm run discover:browser-campaign-replay -- \
+  --fragments target/local-campaign/fragments \
+  --trace-input-profile jungle-rollers-completion-route \
+  --output target/local-campaign/manifest.json
+```
+
+Discovery reads only exporter-named `lid-*-draw-*-*-to-*.json` files. It requires a path beginning
+with the browser's zeroed physical pad and matches every adjacent checkpoint, progression
+snapshot, and post-mount five-word pad history exactly. It fails if any capture is disconnected or
+if equally long exact orderings are ambiguous. Keep alternate branches in separate directories;
+the tool will not choose a preferred branch, skip a capture, fill a missing edge, or emit
+controller segments. Fragment references in the manifest are relative to the manifest output.
+
+Both the fragment directory and output must be outside the repository or beneath an ignored local
+artifact root. Use `--force` only to replace an existing ignored manifest intentionally. The
+discovery CLI will not overwrite one of its input fragments.
 
 Validate an ignored manifest without producing another file:
 
@@ -39,9 +70,9 @@ npm run verify:browser-harness:smoke -- \
   --replay target/local-campaign/campaign.replay.json
 ```
 
-Use `--force` only to replace an existing ignored replay intentionally. The output has
-`localDiagnosticOnly: true` and `canonicalCampaign: false`; it is local evidence from one exact
-data/runtime phase, not a distributable controller oracle.
+Use the composer's `--force` only to replace an existing ignored replay intentionally. The output
+has `localDiagnosticOnly: true` and `canonicalCampaign: false`; it is local evidence from one
+exact data/runtime phase, not a distributable controller oracle.
 
 ## Manifest
 
@@ -205,11 +236,12 @@ an isolated destination session-import snapshot solely for boundary metadata. It
 the source runtime, request a transition, load destination assets, spawn pair objects, or execute
 a destination frame.
 
-`discoverLongestCampaignManifest` can build a manifest from an unordered set of those local
-capture documents. It chooses only a path that begins with the browser's zeroed physical pad and
-matches checkpoint, progression, and post-mount pad history exactly. It never fills a missing
-edge. Tests cover a hybrid PBAK/physical fragment and prove that a one-word pad-history mismatch
-terminates discovery rather than being bridged.
+The discovery CLI exposes `discoverLongestCampaignManifest` for those local capture documents in
+strict mode: all exporter-named files must belong to one unambiguous path. The underlying ordering
+still begins with the browser's zeroed physical pad and matches checkpoint, progression, and
+post-mount pad history exactly. It never fills a missing edge or generates an input run. Tests
+cover unordered input, hybrid PBAK/physical fragments, ambiguous graphs, disconnected captures,
+and one-word checkpoint and pad-history mismatches.
 
 The current legally-local full-campaign export proves an 18-phase, 16,369-frame exact chain from
 the authored Title map through N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders,

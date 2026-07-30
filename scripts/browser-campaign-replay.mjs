@@ -437,7 +437,11 @@ function discoveredPathOrder(left, right) {
 // `composeCampaignReplay`.
 export function discoverLongestCampaignManifest(
   fragmentEntries,
-  { traceInputProfile } = {},
+  {
+    traceInputProfile,
+    requireComplete = false,
+    rejectAmbiguous = false,
+  } = {},
 ) {
   if (!Array.isArray(fragmentEntries) || fragmentEntries.length === 0) {
     throw new Error("fragmentEntries must be a non-empty array");
@@ -528,18 +532,41 @@ export function discoverLongestCampaignManifest(
         : advancePadSnapshot(left.finalPad, left.finalPad.held);
     return exactMetadataMatch(expectedPad, right.initialPad);
   };
+  const samePath = (left, right) =>
+    left.length === right.length
+    && left.every(
+      (node, index) => node.fragment === right[index]?.fragment,
+    );
+  const pathRank = (left, right) => {
+    if (left.length !== right.length) return left.length - right.length;
+    const leftFrames = left.reduce((sum, node) => sum + node.frames, 0);
+    const rightFrames = right.reduce((sum, node) => sum + node.frames, 0);
+    return leftFrames - rightFrames;
+  };
   const longestFrom = (node, seen) => {
-    let best = [node];
+    let best = { path: [node], ambiguous: false };
     for (const candidate of nodes) {
       if (seen.has(candidate.fragment) || !follows(node, candidate)) continue;
+      const tail = longestFrom(
+        candidate,
+        new Set([...seen, candidate.fragment]),
+      );
       const path = [
         node,
-        ...longestFrom(
-          candidate,
-          new Set([...seen, candidate.fragment]),
-        ),
+        ...tail.path,
       ];
-      if (discoveredPathOrder(path, best) > 0) best = path;
+      const rank = pathRank(path, best.path);
+      if (rank > 0) {
+        best = { path, ambiguous: tail.ambiguous };
+      } else if (rank === 0) {
+        const ambiguous =
+          best.ambiguous || tail.ambiguous || !samePath(path, best.path);
+        if (discoveredPathOrder(path, best.path) > 0) {
+          best = { path, ambiguous };
+        } else {
+          best.ambiguous = ambiguous;
+        }
+      }
     }
     return best;
   };
@@ -549,10 +576,41 @@ export function discoverLongestCampaignManifest(
   if (roots.length === 0) {
     throw new Error("no fragment begins with the browser's physical boot pad");
   }
-  let longest = [];
+  let best = { path: [], ambiguous: false };
   for (const root of roots) {
-    const path = longestFrom(root, new Set([root.fragment]));
-    if (discoveredPathOrder(path, longest) > 0) longest = path;
+    const candidate = longestFrom(root, new Set([root.fragment]));
+    const rank = pathRank(candidate.path, best.path);
+    if (rank > 0) {
+      best = candidate;
+    } else if (rank === 0) {
+      const ambiguous =
+        best.ambiguous
+        || candidate.ambiguous
+        || !samePath(candidate.path, best.path);
+      if (discoveredPathOrder(candidate.path, best.path) > 0) {
+        best = { path: candidate.path, ambiguous };
+      } else {
+        best.ambiguous = ambiguous;
+      }
+    }
+  }
+  const longest = best.path;
+  if (rejectAmbiguous && best.ambiguous) {
+    throw new Error(
+      "campaign fragment graph is ambiguous: more than one equally long " +
+        "exact path begins with the browser's physical boot pad",
+    );
+  }
+  if (requireComplete && longest.length !== nodes.length) {
+    const used = new Set(longest.map(({ fragment }) => fragment));
+    const unused = nodes
+      .filter(({ fragment }) => !used.has(fragment))
+      .map(({ fragment }) => JSON.stringify(fragment));
+    throw new Error(
+      `campaign fragment graph is disconnected: the longest exact path uses ` +
+        `${longest.length} of ${nodes.length} fragments; unused: ` +
+        unused.join(", "),
+    );
   }
   const phases = longest.map((node, index) => ({
     id:
@@ -1006,23 +1064,47 @@ export async function writeComposedReplay(
   replay,
   { force = false, protectedPaths = [] } = {},
 ) {
+  return writeLocalJsonArtifact(outputPath, replay, {
+    force,
+    protectedPaths,
+    label: "composed replay output",
+  });
+}
+
+export async function writeDiscoveredCampaignManifest(
+  outputPath,
+  manifest,
+  { force = false, protectedPaths = [] } = {},
+) {
+  return writeLocalJsonArtifact(outputPath, manifest, {
+    force,
+    protectedPaths,
+    label: "discovered campaign manifest output",
+  });
+}
+
+async function writeLocalJsonArtifact(
+  outputPath,
+  document,
+  { force, protectedPaths, label },
+) {
   const absoluteOutputPath = resolve(outputPath);
   if (!isLocalArtifactPath(absoluteOutputPath)) {
     throw new Error(
-      "composed replay output must be outside the repository or under an " +
+      `${label} must be outside the repository or under an ` +
         "ignored local artifact directory",
     );
   }
   for (const protectedPath of protectedPaths) {
     if (absoluteOutputPath === resolve(protectedPath)) {
-      throw new Error("composed replay output must not overwrite an input file");
+      throw new Error(`${label} must not overwrite an input file`);
     }
   }
   if (!force) {
     try {
       await access(absoluteOutputPath);
       throw new Error(
-        `composed replay output already exists: ${absoluteOutputPath}; use --force to replace it`,
+        `${label} already exists: ${absoluteOutputPath}; use --force to replace it`,
       );
     } catch (error) {
       if (!String(error?.message).includes("ENOENT")) throw error;
@@ -1033,7 +1115,7 @@ export async function writeComposedReplay(
   try {
     await writeFile(
       temporaryPath,
-      `${JSON.stringify(replay, null, 2)}\n`,
+      `${JSON.stringify(document, null, 2)}\n`,
       { encoding: "utf8", mode: 0o600, flag: "wx" },
     );
     await rename(temporaryPath, absoluteOutputPath);

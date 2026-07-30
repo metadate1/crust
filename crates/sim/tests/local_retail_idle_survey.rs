@@ -285,7 +285,7 @@ fn stormy_ascent_direct_boot_reaches_authored_end_warp() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::StormyAscentCompletionRoute,
-        6_400,
+        6_800,
     )
     .expect("Stormy Ascent's ordinary-pad completion route must execute");
 
@@ -26132,6 +26132,7 @@ struct StormyAscentCompletionRouteController {
     f1_platform_wait: u8,
     i1_third_last_x: Option<i32>,
     i3_runup: u8,
+    j2_rotating_target: Option<VmObjectHandle>,
 }
 
 impl Default for StormyAscentCompletionRouteController {
@@ -26164,6 +26165,7 @@ impl Default for StormyAscentCompletionRouteController {
             f1_platform_wait: 0,
             i1_third_last_x: None,
             i3_runup: 0,
+            j2_rotating_target: None,
         }
     }
 }
@@ -30373,9 +30375,265 @@ impl StormyAscentCompletionRouteController {
             }
             return held;
         }
-        if name == "j1_yZ" && self.a4_wall_stage == 135 {
-            // Hold the lower elevator after the clean landing. The next route
-            // slice can choose its departure from the observed raised phase.
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 135 {
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            if player_collider_entity == Some(137)
+                && player.translation[1] >= -10_640_000
+                && predicted_x <= 34_570_000
+            {
+                self.a4_wall_stage = 136;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT | PAD_SQUARE;
+            }
+            return if predicted_x > 34_560_000 {
+                PAD_LEFT
+            } else if predicted_x < 34_535_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 136 {
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            if player_collider_entity == Some(137)
+                && predicted_x >= 34_665_000
+                && player.velocity[0] >= 350_000
+            {
+                self.a4_wall_stage = 137;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT
+                | if self.i3_runup.is_multiple_of(8) {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 137 {
+            if player.status_a & 1 != 0
+                && player_collider_entity != Some(137)
+                && player.translation[0] >= 34_940_000
+                && player.translation[1] >= -10_360_000
+            {
+                self.a4_wall_stage = 138;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let mut held = if predicted_x > 35_030_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            if self.i3_runup.is_multiple_of(8) {
+                held |= PAD_SQUARE;
+            }
+            return held;
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 138 {
+            if player.status_a & 1 != 0 {
+                if player.translation[0] >= 35_230_000 && player.translation[1] >= -10_080_000 {
+                    self.a4_wall_stage = 139;
+                    self.i3_runup = 0;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return 0;
+                }
+                if self.release_frames > 0 {
+                    self.release_frames -= 1;
+                    return PAD_RIGHT;
+                }
+                self.jump_frames = 17;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x > 35_270_000 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return horizontal | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return horizontal;
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 139 {
+            let rotating_target = route_objects.iter().find_map(|object| {
+                let bound = object.bound?;
+                (matches!(object.origin, ObjectOrigin::Runtime { .. })
+                    && object.program.name().as_deref() == Some("RWaOC")
+                    && bound.max.x.saturating_sub(bound.min.x) >= 150_000
+                    && bound.max.y.saturating_sub(bound.min.y) >= 40_000
+                    && bound.min.x >= 34_700_000
+                    && bound.max.x <= 35_350_000
+                    && (-9_850_000..=-9_700_000).contains(&bound.max.y))
+                .then_some((object.object, bound))
+            });
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            if player.status_a & 1 != 0
+                && predicted_x >= 35_220_000
+                && rotating_target.is_some_and(|(_, bound)| bound.max.x >= 35_100_000)
+            {
+                self.a4_wall_stage = 140;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                self.j2_rotating_target = rotating_target.map(|(object, _)| object);
+                return PAD_LEFT;
+            }
+            return if predicted_x < 35_225_000 {
+                PAD_RIGHT
+            } else if predicted_x > 35_250_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 140 {
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            if player.status_a & 1 != 0
+                && predicted_x <= 35_180_000
+                && player.velocity[0] <= -300_000
+            {
+                self.a4_wall_stage = 141;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_LEFT;
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ") && self.a4_wall_stage == 141 {
+            let rotating_target = route_objects.iter().find_map(|object| {
+                (Some(object.object) == self.j2_rotating_target)
+                    .then_some(object.bound)
+                    .flatten()
+            });
+            if player.status_a & 1 != 0
+                && rotating_target.is_some_and(|bound| {
+                    (bound.min.x..=bound.max.x).contains(&player.translation[0])
+                        && player.translation[1].abs_diff(bound.max.y) <= 80_000
+                })
+            {
+                self.a4_wall_stage = 142;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = rotating_target.map_or(34_600_000, |bound| {
+                (bound.min.x.saturating_add(bound.max.x) / 2).saturating_sub(60_000)
+            });
+            let mut held = if predicted_x < target_x {
+                PAD_RIGHT
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            if self.i3_runup.is_multiple_of(8) {
+                held |= PAD_SQUARE;
+            }
+            return held;
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ" | "j3_yZ") && self.a4_wall_stage == 142 {
+            let current_bound = route_objects.iter().find_map(|object| {
+                (Some(object.object) == self.j2_rotating_target)
+                    .then_some(object.bound)
+                    .flatten()
+            });
+            let next_target = current_bound.and_then(|current| {
+                route_objects
+                    .iter()
+                    .filter_map(|object| {
+                        let bound = object.bound?;
+                        (matches!(object.origin, ObjectOrigin::Runtime { .. })
+                            && object.program.name().as_deref() == Some("RWaOC")
+                            && bound.max.x.saturating_sub(bound.min.x) >= 150_000
+                            && bound.max.y.saturating_sub(bound.min.y) >= 40_000
+                            && bound.min.x > current.max.x
+                            && bound.max.y > current.max.y)
+                            .then_some((object.object, bound))
+                    })
+                    .min_by_key(|(_, bound)| bound.min.x)
+            });
+            if player.status_a & 1 != 0
+                && current_bound.is_some_and(|bound| bound.max.y >= -9_500_000)
+                && next_target.is_some_and(|(_, bound)| {
+                    bound.min.x.saturating_sub(player.translation[0]) <= 300_000
+                        && bound.max.y.saturating_sub(player.translation[1]) <= 350_000
+                })
+            {
+                self.a4_wall_stage = 143;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                self.j2_rotating_target = next_target.map(|(object, _)| object);
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return 0;
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ" | "j3_yZ") && self.a4_wall_stage == 143 {
+            let rotating_target = route_objects.iter().find_map(|object| {
+                (Some(object.object) == self.j2_rotating_target)
+                    .then_some(object.bound)
+                    .flatten()
+            });
+            if player.status_a & 1 != 0
+                && rotating_target.is_some_and(|bound| {
+                    (bound.min.x..=bound.max.x).contains(&player.translation[0])
+                        && player.translation[1].abs_diff(bound.max.y) <= 80_000
+                })
+            {
+                self.a4_wall_stage = 144;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let target_x = rotating_target.map_or(34_300_000, |bound| {
+                bound.min.x.saturating_add(bound.max.x) / 2
+            });
+            let mut held = if predicted_x > target_x {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            if self.i3_runup.is_multiple_of(8) {
+                held |= PAD_SQUARE;
+            }
+            return held;
+        }
+        if matches!(name, "j1_yZ" | "j2_yZ" | "j3_yZ") && self.a4_wall_stage == 144 {
             return 0;
         }
         let opening_vertical = matches!(

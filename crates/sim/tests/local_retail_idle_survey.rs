@@ -276,7 +276,7 @@ fn stormy_ascent_direct_boot_reaches_late_authored_lift() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::StormyAscentCompletionRoute,
-        8_250,
+        7_774,
     )
     .expect("Stormy Ascent's ordinary-pad completion route must execute");
 

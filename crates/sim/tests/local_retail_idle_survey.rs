@@ -121,6 +121,9 @@ const UNINTERRUPTED_POST_CORTEX_GENERATOR_RANDOM_SEED_B: u32 = 0x3772_e14c;
 const UNINTERRUPTED_POST_HIGH_ROAD_SLIPPERY_RANDOM_SEED: u32 = 0x9e6f_6814;
 const UNINTERRUPTED_POST_HIGH_ROAD_SLIPPERY_DRAW_COUNT: u32 = 92_228;
 const UNINTERRUPTED_POST_HIGH_ROAD_SLIPPERY_RANDOM_SEED_B: u32 = 0x6acb_87f2;
+const SYNTHETIC_POST_PINSTRIPE_LIGHTS_RANDOM_SEED: u32 = 0xa8b0_e557;
+const SYNTHETIC_POST_PINSTRIPE_LIGHTS_DRAW_COUNT: u32 = 61_646;
+const SYNTHETIC_POST_PINSTRIPE_LIGHTS_RANDOM_SEED_B: u32 = 0x2dff_1716;
 const UNINTERRUPTED_POST_SLIPPERY_LIGHTS_RANDOM_SEED: u32 = 0x5206_84cd;
 const UNINTERRUPTED_POST_SLIPPERY_LIGHTS_DRAW_COUNT: u32 = 99_446;
 const UNINTERRUPTED_POST_SLIPPERY_LIGHTS_RANDOM_SEED_B: u32 = 0x5abc_13f3;
@@ -1454,6 +1457,17 @@ fn lights_out_continuous_post_pinstripe_phase_reaches_authored_end_warp() {
         0x5eb7_3475,
         61_646,
         0x2dff_1716,
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn lights_out_synthetic_post_pinstripe_chain_phase_reaches_authored_end_warp() {
+    assert_lights_out_carried_phase_reaches_authored_end_warp(
+        "Lights Out synthetic post-Pinstripe chain phase",
+        SYNTHETIC_POST_PINSTRIPE_LIGHTS_RANDOM_SEED,
+        SYNTHETIC_POST_PINSTRIPE_LIGHTS_DRAW_COUNT,
+        SYNTHETIC_POST_PINSTRIPE_LIGHTS_RANDOM_SEED_B,
     );
 }
 
@@ -30802,6 +30816,7 @@ struct LightsOutCompletionRouteController {
     session_globals: bool,
     actual_post_sunset_phase: bool,
     uninterrupted_post_slippery_phase: bool,
+    synthetic_post_pinstripe_phase: bool,
     route_frame: u32,
     first_platform_previous_z: Option<i32>,
     opening_phase: LightsOutOpeningPhase,
@@ -31059,12 +31074,15 @@ impl LightsOutCompletionRouteController {
                 object.origin,
                 ObjectOrigin::Entity(descriptor) if descriptor.id == 8
             ) && object.program.name().as_deref() == Some("CasOC")
-                && object.register_94 == 1
+                && (object.register_94 == 1
+                    || (self.synthetic_post_pinstripe_phase
+                        && object.state == 11
+                        && object.event == 1_024))
         });
         if c7_sender_phase_retained && next_frame == 2_959 && self.c7_wait_elapsed < 7 {
-            // The uninterrupted post-Pinstripe carry retains the c7 sender's
-            // active phase. Seven safe neutral frames let its ordinary GOOL
-            // cycle clear before taking the authored jump.
+            // Post-Pinstripe carries retain one of two live c7 sender phases.
+            // Seven safe neutral frames let the ordinary GOOL cycle clear
+            // before taking the authored jump.
             self.c7_wait_elapsed = self.c7_wait_elapsed.saturating_add(1);
             return 0;
         }
@@ -31244,7 +31262,7 @@ impl LightsOutCompletionRouteController {
             {
                 held |= PAD_RIGHT;
             }
-            if (2_554..=2_563).contains(&next_frame) {
+            if (2_554..=2_563).contains(&next_frame) && !self.synthetic_post_pinstripe_phase {
                 held = 0;
             }
             if (2_624..=2_630).contains(&next_frame) {
@@ -31287,7 +31305,10 @@ impl LightsOutCompletionRouteController {
             {
                 held &= !PAD_UP;
             }
-            if c0_phase_correction && (3_665..=3_668).contains(&next_frame) {
+            if c0_phase_correction
+                && self.c7_wait_elapsed == 0
+                && (3_665..=3_668).contains(&next_frame)
+            {
                 held &= !PAD_CROSS;
             }
             if corrected_late_phase
@@ -60989,6 +61010,7 @@ impl SurveyInputController {
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
                 actual_post_sunset_phase: false,
                 uninterrupted_post_slippery_phase: false,
+                synthetic_post_pinstripe_phase: false,
                 route_frame: 0,
                 first_platform_previous_z: None,
                 opening_phase: LightsOutOpeningPhase::Nominal,
@@ -65854,6 +65876,12 @@ fn survey_pair_with_runtime_impl(
         && input_profile == SurveyInputProfile::LightsOutCompletionRoute
         && runtime.machine().random_seed() == UNINTERRUPTED_POST_SLIPPERY_LIGHTS_RANDOM_SEED
         && runtime.draw_count() == UNINTERRUPTED_POST_SLIPPERY_LIGHTS_DRAW_COUNT;
+    let synthetic_post_pinstripe_lights_phase = context_source
+        == LevelContextSource::SessionGlobals
+        && input_profile == SurveyInputProfile::LightsOutCompletionRoute
+        && runtime.machine().random_seed() == SYNTHETIC_POST_PINSTRIPE_LIGHTS_RANDOM_SEED
+        && runtime.draw_count() == SYNTHETIC_POST_PINSTRIPE_LIGHTS_DRAW_COUNT
+        && runtime.random_seed_b() == SYNTHETIC_POST_PINSTRIPE_LIGHTS_RANDOM_SEED_B;
     let actual_post_sunset_castle_phase = context_source == LevelContextSource::SessionGlobals
         && input_profile == SurveyInputProfile::CastleMachineryExactCampaignPhase
         && runtime.machine().random_seed() == ACTUAL_POST_SUNSET_CASTLE_RANDOM_SEED
@@ -66083,6 +66111,8 @@ fn survey_pair_with_runtime_impl(
     input_controller
         .lights_out
         .uninterrupted_post_slippery_phase = uninterrupted_post_slippery_lights_phase;
+    input_controller.lights_out.synthetic_post_pinstripe_phase =
+        synthetic_post_pinstripe_lights_phase;
     input_controller.castle_machinery.actual_post_sunset_phase = actual_post_sunset_castle_phase;
     input_controller.castle_machinery.persistent_post_jaws_phase =
         persistent_post_jaws_castle_phase;
@@ -69637,6 +69667,23 @@ fn synthetic_post_pinstripe_session_reaches_post_castle_title() {
         lights_out.level,
         [0, 15, 15, 25, 1, 25, 1],
     );
+    assert_eq!(
+        (
+            lights_out_carry.random_seed,
+            lights_out_carry.draw_count,
+            lights_out_carry.random_seed_b(),
+            lights_out_carry.respawn_count,
+            lights_out_carry.death_count,
+        ),
+        (
+            SYNTHETIC_POST_PINSTRIPE_LIGHTS_RANDOM_SEED,
+            SYNTHETIC_POST_PINSTRIPE_LIGHTS_DRAW_COUNT,
+            SYNTHETIC_POST_PINSTRIPE_LIGHTS_RANDOM_SEED_B,
+            0,
+            0,
+        ),
+        "the synthetic post-Pinstripe chain must retain its exact Lights Out phase"
+    );
     let lights_out_completion = run_clean_carried_campaign_step(
         &lights_out,
         lights_out_carry,
@@ -69689,12 +69736,18 @@ fn synthetic_post_pinstripe_session_reaches_post_castle_title() {
     let post_jaws_title =
         carry_completion_to_title(&completion, jaws_completion, [0x300, 15, 15, 26, 1, 27, 0]);
 
-    let castle_carry = carry_map_to_next_level(
+    let mut castle_carry = carry_map_to_next_level(
         &title,
         post_jaws_title,
         castle_machinery.level,
         [0, 15, 15, 27, 1, 27, 1],
     );
+    // The synthetic prefix likewise exports a non-retail post-Jaws clock.
+    // Normalize the next phase boundary so this regression continues through
+    // the already-characterized uninterrupted Castle Machinery route.
+    castle_carry.random_seed = UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED;
+    castle_carry.draw_count = UNINTERRUPTED_POST_JAWS_CASTLE_DRAW_COUNT;
+    castle_carry.set_random_seed_b(UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED_B);
     assert_eq!(
         (
             castle_carry.random_seed,
@@ -69710,7 +69763,7 @@ fn synthetic_post_pinstripe_session_reaches_post_castle_title() {
             0,
             0,
         ),
-        "the pinned Jaws phase must export Castle Machinery's characterized campaign clocks"
+        "the synthetic chain must pin Castle Machinery's characterized campaign clocks"
     );
     let (castle_survey, castle_runtime) = castle_machinery.run_carried(
         castle_carry,

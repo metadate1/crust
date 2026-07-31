@@ -8980,7 +8980,7 @@ impl LostCityExactCarryRouteController {
                 } else {
                     0
                 };
-                let defend = if stage_enemy_active && self.tick % 6 != 0 {
+                let defend = if stage_enemy_active && !self.tick.is_multiple_of(6) {
                     // Entity 85 can cycle back into a live attack while the
                     // bridge is extended. Keep producing released Square
                     // edges during the wait so it cannot kill a stationary
@@ -19258,7 +19258,9 @@ impl GreatGateRouteController {
 
     // Keep equal actions as separate numbered stages so the deterministic
     // route remains auditable against its frame-by-frame pad trace.
-    #[allow(clippy::match_same_arms)]
+    // The collider identity is intentionally forwarded through tail-recursive
+    // route-stage transitions even though those transitions do not inspect it.
+    #[allow(clippy::match_same_arms, clippy::only_used_in_recursion)]
     fn held(
         &mut self,
         camera: RetailCameraLocation,
@@ -28548,14 +28550,13 @@ impl HeavyMachineryCompletionRouteController {
                 }
                 let staged = camera.progress.raw() >= 22_000
                     || player.is_some_and(|player| player.translation[1] <= -3_450_000);
-                if staged {
-                    if self.h3_active_seen
-                        && hazard.is_some_and(|hazard| hazard.state == 7 && hazard.status_b == 0)
-                    {
-                        self.h3_crossing_tick = 2;
-                        self.h3_crossing_frame = Some(frame);
-                        return PAD_RIGHT | PAD_CROSS;
-                    }
+                if staged
+                    && self.h3_active_seen
+                    && hazard.is_some_and(|hazard| hazard.state == 7 && hazard.status_b == 0)
+                {
+                    self.h3_crossing_tick = 2;
+                    self.h3_crossing_frame = Some(frame);
+                    return PAD_RIGHT | PAD_CROSS;
                 }
                 return 0;
             }
@@ -30475,7 +30476,7 @@ impl LabCompletionRouteController {
         {
             self.route_delay = self.route_delay.saturating_add(1);
             if !self.c5_door_landing_complete {
-                if !player.is_some_and(|player| player.state == 2) {
+                if player.is_none_or(|player| player.state != 2) {
                     // Brake the defensive frog jump before it crosses c5's
                     // proximity plane in the air. Crash can then approach the
                     // plane on the floor while the paired rods are retracted.
@@ -36469,6 +36470,9 @@ fn stormy_player_is_standing_on(
 ///
 /// Moving-platform handoffs use observed position and direction rather than a
 /// frame schedule so small changes in earlier landing timing do not compound.
+// These booleans model independent, one-way authored route milestones; folding
+// them into a compact bitset or enum would obscure the characterization trace.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct StormyAscentCompletionRouteController {
     horizontal: u32,
@@ -42251,7 +42255,7 @@ impl StormyAscentCompletionRouteController {
                     ObjectOrigin::Entity(descriptor) if descriptor.id == 66
                 )
             });
-            if !lower.is_some_and(|object| object.state == 12) {
+            if lower.is_none_or(|object| object.state != 12) {
                 return PAD_UP | PAD_SQUARE;
             }
             if self.i3_runup == 0 {
@@ -43293,8 +43297,9 @@ impl StormyAscentCompletionRouteController {
         }
         if matches!(name, "n4_yZ" | "n5_yZ") && self.a4_wall_stage == 248 {
             let support_anchor = stormy_casoc_entity(route_objects, None, 19)
-                .map(|support| support.translation)
-                .unwrap_or([19_353_600, -1_946_368, -103_168]);
+                .map_or([19_353_600, -1_946_368, -103_168], |support| {
+                    support.translation
+                });
             // The retail n5 octree marks the elevated green ledge around
             // entity 19 as solid. Require two stable grounded samples there;
             // the collider-free death boundary at y=-2,375,xxx must never
@@ -46715,7 +46720,8 @@ impl HighRoadCompletionRouteController {
                     if !projectile_volley_clear
                         || !(7_300_000..=7_340_000).contains(&player.translation[0])
                         || player.velocity[0].unsigned_abs() > 80_000
-                        || player.translation[2].abs_diff(lane_target) > lane_tolerance as u32
+                        || player.translation[2].abs_diff(lane_target)
+                            > lane_tolerance.cast_unsigned()
                         || player.velocity[2].unsigned_abs() > 80_000
                         || player.status_a & 1 == 0
                     {

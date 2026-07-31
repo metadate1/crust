@@ -12,11 +12,13 @@ use web_sys::Storage;
 
 use crate::card_persistence::{CardPersistIntent, merge_card_record};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct StorageState {
     storage: Storage,
     card_record: VirtualCardRecord,
     writes_enabled: bool,
+    card_writes_deferred: bool,
+    deferred_card_dirty: bool,
 }
 
 impl StorageState {
@@ -36,7 +38,34 @@ impl StorageState {
             storage,
             card_record,
             writes_enabled: true,
+            card_writes_deferred: false,
+            deferred_card_dirty: false,
         })
+    }
+
+    /// Forks the card persistence state for a checked runtime transaction.
+    /// Mutations update only the fork until [`Self::commit_card_transaction`]
+    /// succeeds, so a rejected GOOL/restart transaction cannot leak a partial
+    /// localStorage write.
+    #[must_use]
+    pub fn begin_card_transaction(&self) -> Self {
+        let mut transaction = self.clone();
+        transaction.card_writes_deferred = true;
+        transaction.deferred_card_dirty = false;
+        transaction
+    }
+
+    /// Publishes a previously deferred card record atomically at the host
+    /// boundary and converts this fork back into ordinary storage state.
+    pub fn commit_card_transaction(&mut self) -> Result<(), JsValue> {
+        if self.card_writes_deferred && self.deferred_card_dirty && self.writes_enabled {
+            let json = encode_virtual_card(&self.card_record)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            self.storage.set_item(CARD_STORAGE_KEY, &json)?;
+        }
+        self.card_writes_deferred = false;
+        self.deferred_card_dirty = false;
+        Ok(())
     }
 
     /// Keeps the mounted browser card readable while making every subsequent
@@ -76,8 +105,11 @@ impl StorageState {
         let next_record = merge_card_record(&self.card_record, card, timestamp, intent);
         let json = encode_virtual_card(&next_record)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        self.storage.set_item(CARD_STORAGE_KEY, &json)?;
+        if !self.card_writes_deferred {
+            self.storage.set_item(CARD_STORAGE_KEY, &json)?;
+        }
         self.card_record = next_record;
+        self.deferred_card_dirty |= self.card_writes_deferred;
         Ok(())
     }
 

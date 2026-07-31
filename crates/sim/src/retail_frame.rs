@@ -276,6 +276,28 @@ impl RetailFrameState {
         self.draw_count
     }
 
+    /// Retargets the same mounted presentation clock after synchronous
+    /// `LevelRestart`.
+    ///
+    /// Native resets `draw_count` and the camera path but leaves
+    /// `draw_skip_counter` and the current loading-image latch untouched.
+    /// `PbakPlay` is the sole restart caller that explicitly clears the skip
+    /// counter immediately before `PbakStart`.
+    pub fn apply_level_restart(
+        &mut self,
+        point_count: NonZeroU16,
+        initial_progress: i32,
+        pbak_play: bool,
+    ) {
+        self.point_count = point_count;
+        self.progress = PathProgress::clamped(initial_progress, point_count);
+        self.draw_count = 0;
+        if pbak_play {
+            self.draw_skip = 0;
+            self.direct_loading_image_written = false;
+        }
+    }
+
     /// Advances one cooperative 30 Hz gameplay tick and returns its event trace.
     pub fn tick(&mut self) -> FrameTrace {
         self.tick_with_draw_count_enabled(true)
@@ -496,6 +518,37 @@ mod tests {
                 draw_count: 0,
             }
         );
+    }
+
+    #[test]
+    fn ordinary_restart_preserves_loading_skip_but_resets_draw_count() {
+        let mut state =
+            RetailFrameState::after_loading_image_with_draw_count(point_count(72), 0, 41);
+
+        state.apply_level_restart(point_count(12), 0x300, false);
+
+        assert_eq!(state.tick_count(), 0);
+        assert_eq!(state.progress().raw(), 0x300);
+        assert_eq!(state.draw_skip(), 2);
+        assert_eq!(state.draw_count(), 0);
+        let first = state.tick();
+        assert_eq!(first.presented(), PresentedFrame::LoadingImage);
+        assert_eq!(first.draw_skip(), 1);
+        assert_eq!(first.draw_count(), 1);
+    }
+
+    #[test]
+    fn pbak_play_restart_clears_the_pending_loading_skip() {
+        let mut state = RetailFrameState::after_loading_image(point_count(72), 0);
+
+        state.apply_level_restart(point_count(12), 0x300, true);
+
+        assert_eq!(state.draw_skip(), 0);
+        assert_eq!(state.draw_count(), 0);
+        assert!(matches!(
+            state.tick().presented(),
+            PresentedFrame::Gameplay { .. }
+        ));
     }
 
     #[test]

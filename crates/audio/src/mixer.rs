@@ -126,7 +126,7 @@ struct CacheEntry {
     last_used: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Mixer {
     voices: [Voice; VOICE_COUNT],
     master: f64,

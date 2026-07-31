@@ -9001,6 +9001,29 @@ impl Machine {
         Ok(())
     }
 
+    /// Re-arms resident texture PTEs whose VRAM slots are overwritten by
+    /// title-card CLUTs, without consuming their copied-page references.
+    pub fn apply_platform_title_texture_reservations(
+        &mut self,
+        pages: &[PageIndex],
+    ) -> Result<(), VmError> {
+        let mut unique = BTreeSet::new();
+        for &page in pages {
+            if !unique.insert(page)
+                || !self.paging_loaded_pages.contains(&page)
+                || !self.paging_uncounted_pages.contains(&page)
+                || !self.paging_resolved_pages.contains(&page)
+                || self.paging_pending_pages.contains(&page)
+            {
+                return Err(VmError::InvalidPlatformPagingPage(page));
+            }
+        }
+        for page in unique {
+            self.paging_resolved_pages.remove(&page);
+        }
+        Ok(())
+    }
+
     /// Applies one browser lifecycle page close outside a GOOL instruction.
     pub fn apply_platform_paging_close(
         &mut self,
@@ -20516,6 +20539,38 @@ mod tests {
     }
 
     #[test]
+    fn title_texture_reservations_preserve_copied_page_references() {
+        let first = PageIndex::new(1);
+        let second = PageIndex::new(2);
+        let mut machine = Machine::new(0);
+        machine
+            .seed_platform_paging_state_with_uncounted_pages(
+                4,
+                [first, second],
+                [(first, 2), (second, 1)],
+                [first, second],
+            )
+            .unwrap();
+
+        machine
+            .apply_platform_title_texture_reservations(&[first, second])
+            .unwrap();
+
+        assert!(!machine.paging_resolved_pages.contains(&first));
+        assert!(!machine.paging_resolved_pages.contains(&second));
+        assert_eq!(machine.paging_page_references.get(&first), Some(&2));
+        assert_eq!(machine.paging_page_references.get(&second), Some(&1));
+
+        let ordinary = PageIndex::new(3);
+        let before = machine.clone();
+        assert_eq!(
+            machine.apply_platform_title_texture_reservations(&[ordinary]),
+            Err(VmError::InvalidPlatformPagingPage(ordinary))
+        );
+        assert_eq!(machine, before);
+    }
+
+    #[test]
     fn program_materialization_resolves_a_queued_page_without_changing_references() {
         let target = PageIndex::new(2);
         let victim = PageIndex::new(3);
@@ -20559,6 +20614,24 @@ mod tests {
         assert_eq!(machine.paging_page_references.get(&victim), None);
         assert_eq!(machine.close_paging_page(target, false), 1);
         assert_eq!(machine.paging_page_references.get(&target), Some(&1));
+    }
+
+    #[test]
+    fn program_materialization_resolves_a_raw_page_without_acquiring_a_reference() {
+        let target = PageIndex::new(1);
+        let victim = PageIndex::new(2);
+        let mut machine = Machine::new(0);
+        machine.seed_platform_paging_state(3, [victim], []).unwrap();
+
+        machine
+            .apply_platform_program_materialization(target, PageInvalidations::one(victim))
+            .unwrap();
+
+        assert!(machine.paging_resolved_pages.contains(&target));
+        assert!(!machine.paging_pending_pages.contains(&target));
+        assert!(!machine.paging_resolved_pages.contains(&victim));
+        assert_eq!(machine.paging_page_references.get(&target), None);
+        assert_eq!(machine.close_paging_page(target, false), 1);
     }
 
     #[test]

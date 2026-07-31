@@ -4,22 +4,35 @@
 
 - Rust `1.97.0` (pinned by `rust-toolchain.toml`)
 - `wasm-bindgen-cli 0.2.126` (must match the crate exactly)
-- Node.js `>=20`
+- Node.js `22.16.0` (the exact runtime declared by `package.json` and installed in CI)
 
 Important Rust dependencies use exact versions in the workspace manifest and `Cargo.lock` is
 committed. Release builds use fat LTO, one codegen unit, stripped symbols and aborting panics.
 
 ## Checks
 
-Run formatting, Clippy, native tests, native release, and the Wasm build before publishing:
+Run formatting, native and Wasm Clippy, native tests, native release, and both production and
+browser-harness Wasm builds before publishing:
 
 ```bash
 npm run fmt
 npm run lint
+npm run lint:wasm
+npm run lint:wasm:browser-harness
 npm test
-cargo build --workspace --release
+npm run build:wasm
+npm run build:wasm:browser-harness
+cargo build --workspace --release --locked
 npm run build
+npm run verify:dist
+npm run build:browser-harness
+npm run verify:browser-harness
 ```
+
+The two browser-harness commands compile `crust-web` with the explicit, off-by-default
+`browser-test-harness` feature. CI checks both production and harness Wasm with warnings denied,
+then builds and verifies both generated distributions. All Cargo dependency resolution in these
+gates is locked to the committed `Cargo.lock`.
 
 Start `npm run dev`, open `http://127.0.0.1:4174` in a current Chrome-compatible browser, inspect
 the console/network panel, and exercise both raw-disc and extracted-stream imports. Browser storage
@@ -120,10 +133,12 @@ Segments default to `"inputKind": "physical"` and accept only the console's 16-b
 mask. A legally local diagnostic reconstructed from PBAK may instead mark a segment
 `"inputKind": "recorded"`; only the feature-gated harness then supplies its complete 32-bit `held`
 word through the existing demo override while physical input remains zero. Never commit such local
-recordings. A complete campaign proof still needs a captured, reviewed pad-mask timeline plus
-level/checkpoint expectations for the whole retail route; the repository does not yet contain that
-controller oracle. The browser hook intentionally cannot force a transition or mutate GOOL state,
-so the missing trace cannot be replaced by test-only game-state shortcuts.
+recordings. The completed ordinary-route browser proof uses a captured and reviewed pad-mask
+timeline plus exact level/checkpoint expectations for all 89 phases from publisher/title through
+Cortex, Ending, and the return to Title. It executes 141,776 replay frames without a skipped frame
+or synthetic handoff. The browser hook intentionally cannot force a transition or mutate GOOL
+state, so future secret, alternate-completion, or fault-recovery traces must meet the same standard
+rather than using test-only game-state shortcuts.
 
 Opt-in survey exports can be assembled into one ignored campaign replay without copying their
 input into repository source. Keep one route's exported fragments under an ignored/local path,
@@ -173,3 +188,6 @@ commit their input, extracted streams, output captures, or locally derived golde
 
 Before every commit, inspect `git status --short` and `git ls-files` for `.bin`, `.iso`, `.nsd`,
 `.nsf`, `.wasm`, storage exports, secrets, browser profiles, screenshots, caches, and build output.
+CI repeats this boundary check across the current index and every commit tree newly reachable from
+the pushed or pull-request tip. Its full-history checkout catches files added and deleted within a
+single update; it never prints matching file contents or pathnames.

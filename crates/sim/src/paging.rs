@@ -86,6 +86,12 @@ pub enum TextureSlotState {
     Resident,
     /// A page retained across a stream mount but preferred for replacement.
     Stale,
+    /// Native texture-page state 30: VRAM is owned by title-card CLUT data.
+    ///
+    /// The last copied page identity remains available to frame diagnostics,
+    /// but neither the free/stale passes nor the ordinary replacement pass may
+    /// allocate this slot until the title runtime explicitly releases it.
+    Reserved,
 }
 
 /// Immutable identity of one physical texture slot generation.
@@ -95,6 +101,105 @@ pub struct TextureSlotBinding {
     pub eid: Eid,
     pub generation: u32,
     pub state: TextureSlotState,
+}
+
+/// Pointer-free texture identity retained while native changes NSF streams.
+///
+/// A destination stream has its own page table, so a carried texture must not
+/// retain the source stream's [`PageIndex`]. The destination pager resolves
+/// this EID again and either binds the same VRAM slot to its local page or
+/// keeps the identity stale until that slot is replaced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TextureSlotCarryBinding {
+    pub eid: Eid,
+    pub generation: u32,
+    pub state: TextureSlotState,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TextureSlotCarryRecord {
+    eid: Option<Eid>,
+    generation: u32,
+    state: TextureSlotState,
+}
+
+/// Exact eight-slot state passed from `NSKill` to `NSInitTexturePages`.
+///
+/// The representation deliberately contains no page indices, offsets, or
+/// borrowed stream data. It is therefore safe to carry between independently
+/// parsed streams without recreating native's cross-NSF pointers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TextureSlotCarrySnapshot {
+    slots: [TextureSlotCarryRecord; TEXTURE_SLOT_COUNT],
+}
+
+impl TextureSlotCarrySnapshot {
+    /// Constructs a validated carry snapshot for tests and non-stream hosts.
+    /// Empty slots start as native state 1 (`Free`) at generation zero.
+    pub fn try_from_bindings(
+        slots: [Option<TextureSlotCarryBinding>; TEXTURE_SLOT_COUNT],
+    ) -> Result<Self, PagingError> {
+        let snapshot = Self {
+            slots: std::array::from_fn(|slot| match slots[slot] {
+                Some(binding) => TextureSlotCarryRecord {
+                    eid: Some(binding.eid),
+                    generation: binding.generation,
+                    state: binding.state,
+                },
+                None => TextureSlotCarryRecord::default(),
+            }),
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    /// Resident/stale identity retained in one native slot.
+    #[must_use]
+    pub fn binding(&self, slot: usize) -> Option<TextureSlotCarryBinding> {
+        let record = self.slots.get(slot)?;
+        record.eid.map(|eid| TextureSlotCarryBinding {
+            eid,
+            generation: record.generation,
+            state: record.state,
+        })
+    }
+
+    /// Source slot state before destination initialization resets it.
+    #[must_use]
+    pub fn state(&self, slot: usize) -> Option<TextureSlotState> {
+        self.slots.get(slot).map(|record| record.state)
+    }
+
+    /// Monotonic renderer generation retained for this physical VRAM slot.
+    #[must_use]
+    pub fn generation(&self, slot: usize) -> Option<u32> {
+        self.slots.get(slot).map(|record| record.generation)
+    }
+
+    fn validate(&self) -> Result<(), PagingError> {
+        let mut eids = BTreeSet::new();
+        for (slot, record) in self.slots.iter().copied().enumerate() {
+            match record.state {
+                TextureSlotState::Resident | TextureSlotState::Stale => {
+                    let eid = record
+                        .eid
+                        .ok_or(PagingError::MissingTextureCarryEid(slot))?;
+                    if eid == Eid::NONE || !eid.is_named() {
+                        return Err(PagingError::InvalidTextureCarryEid { slot, eid });
+                    }
+                    if !eids.insert(eid) {
+                        return Err(PagingError::DuplicateTextureCarryEid(eid));
+                    }
+                }
+                TextureSlotState::Free | TextureSlotState::Reserved => {
+                    if record.eid.is_some() {
+                        return Err(PagingError::InvalidTextureCarryState(slot));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Eight-slot identity snapshot consumed by one renderer frame.
@@ -160,6 +265,17 @@ pub struct PagerOpenOutcome {
     pub invalidated: PageInvalidations,
     /// Full texture-slot identity retained for texture-cache diagnostics.
     pub evicted: Option<TextureSlotBinding>,
+}
+
+/// One ordered pager effect performed by native `CoreObjectsCreate`.
+///
+/// Count-zero materialization changes resolution/eviction state without
+/// acquiring ownership. Flag-zero open acquires one reference even when the
+/// page remains queued, so hosts must publish the two cases differently.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetailCorePagePreloadOutcome {
+    Materialize(PagerOpenOutcome),
+    Open(PagerOpenOutcome),
 }
 
 /// One observable frame-boundary change produced by `NSUpdate(-1)`.
@@ -323,6 +439,87 @@ impl LoadList {
     }
 }
 
+/// Whether the initial `LevelUpdate` drains its flag-zero virtual opens.
+///
+/// Native derives this choice from a local activation flag. In particular,
+/// `LdatInit` calls `LevelUpdate(..., flags = 0)` while title/PBAK state is
+/// still active, which clears that flag and skips the PSX `NSUpdate2` drain.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RetailLevelMountPageUpdate {
+    /// Run the initial synchronous `NSUpdate2` before core-object preloads.
+    #[default]
+    Drain,
+    /// Leave the initial load-list pages queued for following `NSUpdate(-1)`s.
+    Defer,
+}
+
+/// Host-selected policy for reconstructing the initial retail level mount.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailLevelMountOptions {
+    physical_slot_count: usize,
+    page_update: RetailLevelMountPageUpdate,
+    initial_visibility_list: Option<Eid>,
+    core_page_preloads: bool,
+    texture_slot_carry: Option<TextureSlotCarrySnapshot>,
+}
+
+impl RetailLevelMountOptions {
+    /// Uses the characterized heap-page count and ordinary synchronous drain.
+    #[must_use]
+    pub const fn new(level: LevelId) -> Self {
+        Self {
+            physical_slot_count: retail_physical_slot_count(level),
+            page_update: RetailLevelMountPageUpdate::Drain,
+            initial_visibility_list: None,
+            core_page_preloads: true,
+            texture_slot_carry: None,
+        }
+    }
+
+    /// Overrides the characterized PS1 heap-page count.
+    #[must_use]
+    pub const fn with_physical_slot_count(mut self, physical_slot_count: usize) -> Self {
+        self.physical_slot_count = physical_slot_count;
+        self
+    }
+
+    /// Selects whether the initial `LevelUpdate` performs `NSUpdate2`.
+    #[must_use]
+    pub const fn with_page_update(mut self, page_update: RetailLevelMountPageUpdate) -> Self {
+        self.page_update = page_update;
+        self
+    }
+
+    /// Supplies the initial camera path's SLST when the spawn zone owns world
+    /// geometry. Native opens and closes this entry physically before it
+    /// installs the zone load list, even when the following `NSUpdate2` is
+    /// suppressed by title/PBAK state.
+    #[must_use]
+    pub const fn with_initial_visibility_list(mut self, visibility_list: Option<Eid>) -> Self {
+        self.initial_visibility_list = visibility_list;
+        self
+    }
+
+    /// Selects whether `CoreObjectsCreate` page opens run inside the mount.
+    ///
+    /// Browser title mounts defer these until `TitleLoadNextState` has loaded
+    /// its MDAT graph, matching the subsystem init2 order before the external
+    /// `CoreObjectsCreate` call.
+    #[must_use]
+    pub const fn with_core_page_preloads(mut self, enabled: bool) -> Self {
+        self.core_page_preloads = enabled;
+        self
+    }
+
+    /// Imports the previous stream's eight lower-VRAM texture identities
+    /// before any destination page is opened.
+    #[must_use]
+    pub const fn with_texture_slot_carry(mut self, carry: TextureSlotCarrySnapshot) -> Self {
+        self.texture_slot_carry = Some(carry);
+        self
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PagingError {
     MissingLdat,
@@ -336,6 +533,13 @@ pub enum PagingError {
     InaccessiblePage(PageIndex),
     ReferenceUnderflow(PageIndex),
     InvalidTextureSlot(usize),
+    ReservedTextureSlot(usize),
+    MissingTextureCarryEid(usize),
+    InvalidTextureCarryEid { slot: usize, eid: Eid },
+    InvalidTextureCarryState(usize),
+    DuplicateTextureCarryEid(Eid),
+    TextureCarryEidIsNotTexture(Eid),
+    TextureCarryDestinationNotFresh(usize),
     UnknownEid(Eid),
     DuplicateEid(Eid),
     DuplicateTexturePageEid(PageIndex),
@@ -360,6 +564,9 @@ pub struct Pager {
     audio_pages: BTreeSet<PageIndex>,
     active: LoadList,
     texture_slots: [Option<PageIndex>; TEXTURE_SLOT_COUNT],
+    /// Slot identity is independent of the current stream's page indices.
+    /// A stale texture absent from the destination has an EID but no page.
+    texture_slot_eids: [Option<Eid>; TEXTURE_SLOT_COUNT],
     texture_slot_states: [TextureSlotState; TEXTURE_SLOT_COUNT],
     texture_generations: [u32; TEXTURE_SLOT_COUNT],
     physical_slots: [Option<PageIndex>; PHYSICAL_SLOT_COUNT],
@@ -457,8 +664,12 @@ impl Pager {
         Ok(pager)
     }
 
-    /// Reconstructs the initial retail mount through `LdatInit`,
+    /// Reconstructs the ordinary initial retail mount through `LdatInit`,
     /// `LevelUpdate`/`NSUpdate2`, and `CoreObjectsCreate` page ownership.
+    ///
+    /// This retains the historical synchronous-drain behavior. Hosts mounting
+    /// title/PBAK attract gameplay should use
+    /// [`Self::mount_retail_level_with_options`] to defer the initial drain.
     pub fn mount_retail_level(
         metadata: &Nsd,
         nsf: &Nsf,
@@ -467,18 +678,19 @@ impl Pager {
         load_entry_eids: impl IntoIterator<Item = Eid>,
         load_pages: impl IntoIterator<Item = PageIndex>,
     ) -> Result<Self, PagingError> {
-        Self::mount_retail_level_with_physical_slot_count(
+        Self::mount_retail_level_with_options(
             metadata,
             nsf,
             level,
             initial_zone,
             load_entry_eids,
             load_pages,
-            retail_physical_slot_count(level),
+            RetailLevelMountOptions::new(level),
         )
     }
 
-    /// Retail mount with an explicitly characterized PS1 heap-page count.
+    /// Retail mount with an explicitly characterized PS1 heap-page count and
+    /// the historical synchronous initial drain.
     pub fn mount_retail_level_with_physical_slot_count(
         metadata: &Nsd,
         nsf: &Nsf,
@@ -488,10 +700,37 @@ impl Pager {
         load_pages: impl IntoIterator<Item = PageIndex>,
         physical_slot_count: usize,
     ) -> Result<Self, PagingError> {
+        Self::mount_retail_level_with_options(
+            metadata,
+            nsf,
+            level,
+            initial_zone,
+            load_entry_eids,
+            load_pages,
+            RetailLevelMountOptions::new(level).with_physical_slot_count(physical_slot_count),
+        )
+    }
+
+    /// Retail mount with host-selected heap and initial `LevelUpdate` policy.
+    ///
+    /// `CoreObjectsCreate` always follows the optional drain, so its flag-zero
+    /// preloads remain queued in either mode unless an explicit count-zero
+    /// materialization resolves their shared page first.
+    pub fn mount_retail_level_with_options(
+        metadata: &Nsd,
+        nsf: &Nsf,
+        level: LevelId,
+        initial_zone: Eid,
+        load_entry_eids: impl IntoIterator<Item = Eid>,
+        load_pages: impl IntoIterator<Item = PageIndex>,
+        options: RetailLevelMountOptions,
+    ) -> Result<Self, PagingError> {
         let mut pager = Self::from_stream(metadata, nsf)?;
-        pager.set_physical_slot_count(physical_slot_count)?;
+        pager.set_physical_slot_count(options.physical_slot_count)?;
+        if let Some(carry) = options.texture_slot_carry {
+            pager.import_texture_slot_carry(carry)?;
+        }
         let load_entry_eids = load_entry_eids.into_iter().collect::<Vec<_>>();
-        pager.set_current_texture_load_eids(load_entry_eids.iter().copied());
 
         // LdatInit physically opens the spawn ZDAT before LevelUpdate. The two
         // hog streams intentionally acquire a second reference and retain one
@@ -500,20 +739,36 @@ impl Pager {
         for _ in 0..spawn_references {
             pager.open_eid(initial_zone)?;
         }
+        // Initial `LevelUpdate` reconstructs the selected path's polygon list
+        // before it unloads/opens any zone load-list owners. The SLST reference
+        // is temporary, but its physical materialization and close affect the
+        // exact eviction order of the PS1 heap.
+        if let Some(visibility_list) = options.initial_visibility_list {
+            pager.open_eid(visibility_list)?;
+            pager.close_eid_retail(visibility_list)?;
+        }
+        // Only the following zone-change branch installs `cur_zone` and its
+        // texture load-list protection. The temporary ZDAT/SLST opens above
+        // run with no current texture zone, just like native's null-origin
+        // `LevelUpdate`.
+        pager.set_current_texture_load_eids(load_entry_eids.iter().copied());
         for eid in load_entry_eids {
             pager.open_eid_virtual_with_outcome(eid)?;
         }
         for page in load_pages {
             pager.open_page_virtual_with_outcome(page)?;
         }
-        // Initial gameplay `LevelUpdate` opens the complete destination load
-        // list virtually, then its nonzero native marker calls `NSUpdate2`.
-        // Drain only that queue here. `CoreObjectsCreate` runs afterward, so
-        // its flag-zero executable preloads remain queued for the ordinary
-        // one-page `NSUpdate(-1)` at the start of following CoreFrames.
-        pager.update_all_pending_virtual_pages()?;
+        // Initial `LevelUpdate` opens the complete destination load list
+        // virtually. Its effective native marker normally calls `NSUpdate2`,
+        // but title/PBAK state can reduce that marker to zero even for a
+        // gameplay stream. Drain only when the host reports that native did.
+        if options.page_update == RetailLevelMountPageUpdate::Drain {
+            pager.update_all_pending_virtual_pages()?;
+        }
         pager.close_eid_retail(initial_zone)?;
-        pager.materialize_core_pages(metadata, level)?;
+        if options.core_page_preloads {
+            pager.stage_retail_core_page_preloads(metadata, level)?;
+        }
         Ok(pager)
     }
 
@@ -554,47 +809,55 @@ impl Pager {
         Self::validate_executable_eid(index, eid).map(Some)
     }
 
-    fn materialize_core_pages(
+    /// Applies `CoreObjectsCreate`'s ordered count-zero materializations and
+    /// flag-zero retained preloads, returning every pager publication for a
+    /// host that deferred this phase past title subsystem init2.
+    pub fn stage_retail_core_page_preloads(
         &mut self,
         metadata: &Nsd,
         level: LevelId,
-    ) -> Result<(), PagingError> {
-        let materialize = |pager: &mut Self, index| {
-            pager.materialize_eid_with_outcome(Self::executable_eid(metadata, index)?)?;
+    ) -> Result<Vec<RetailCorePagePreloadOutcome>, PagingError> {
+        let mut outcomes = Vec::new();
+        let materialize = |pager: &mut Self, outcomes: &mut Vec<_>, index| {
+            outcomes.push(RetailCorePagePreloadOutcome::Materialize(
+                pager.materialize_eid_with_outcome(Self::executable_eid(metadata, index)?)?,
+            ));
             Ok::<(), PagingError>(())
         };
-        let open = |pager: &mut Self, index| {
+        let open = |pager: &mut Self, outcomes: &mut Vec<_>, index| {
             if let Some(eid) = Self::preload_executable_eid(metadata, index)? {
-                pager.open_eid_virtual_with_outcome(eid)?;
+                outcomes.push(RetailCorePagePreloadOutcome::Open(
+                    pager.open_eid_virtual_with_outcome(eid)?,
+                ));
             }
             Ok::<(), PagingError>(())
         };
 
         if level == LevelId::TITLE {
             for index in [4, 52] {
-                open(self, index)?;
+                open(self, &mut outcomes, index)?;
             }
-            return Ok(());
+            return Ok(outcomes);
         }
         if level == LevelId::LEVEL_COMPLETE {
             for index in [29, 30, 3] {
-                open(self, index)?;
+                open(self, &mut outcomes, index)?;
             }
-            return Ok(());
+            return Ok(outcomes);
         }
         if level == LevelId::INTRO || level == LevelId::ENDING {
-            return Ok(());
+            return Ok(outcomes);
         }
 
-        materialize(self, 4)?;
+        materialize(self, &mut outcomes, 4)?;
         for index in [0, 5, 29] {
-            open(self, index)?;
+            open(self, &mut outcomes, index)?;
         }
         if level != LevelId::new_const(0x2c) {
-            open(self, 34)?;
+            open(self, &mut outcomes, 34)?;
         }
         for index in [3, 4] {
-            open(self, index)?;
+            open(self, &mut outcomes, index)?;
         }
         if let Some(index) = match level.get() {
             0x05 => Some(9),
@@ -603,9 +866,9 @@ impl Pager {
             0x22 | 0x2e => Some(53),
             _ => None,
         } {
-            materialize(self, index)?;
+            materialize(self, &mut outcomes, index)?;
         }
-        Ok(())
+        Ok(outcomes)
     }
 
     pub fn register_page(
@@ -1811,6 +2074,96 @@ impl Pager {
         Ok(())
     }
 
+    /// Captures native's global texture-page structs without retaining this
+    /// stream's page-table handles.
+    pub fn texture_slot_carry_snapshot(&self) -> Result<TextureSlotCarrySnapshot, PagingError> {
+        let snapshot = TextureSlotCarrySnapshot {
+            slots: std::array::from_fn(|slot| {
+                let state = self.texture_slot_states[slot];
+                TextureSlotCarryRecord {
+                    eid: matches!(state, TextureSlotState::Resident | TextureSlotState::Stale)
+                        .then_some(self.texture_slot_eids[slot])
+                        .flatten(),
+                    generation: self.texture_generations[slot],
+                    state,
+                }
+            }),
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    /// Recreates native `NSInitTexturePages` for a newly parsed stream.
+    ///
+    /// Resident and stale source EIDs which name a destination TPAG retain
+    /// their exact physical slot and become resident against the destination
+    /// page handle. Missing EIDs remain stale. Native state 1 (`Free`) and
+    /// state 30 (`Reserved`) both initialize as free. Per-slot generations are
+    /// retained so a later overwrite cannot alias the previous renderer cache
+    /// generation even when the two streams reuse the same page index.
+    ///
+    /// Import is transactional and accepts only a fresh destination pager;
+    /// callers must perform it before any destination texture open.
+    pub fn import_texture_slot_carry(
+        &mut self,
+        carry: TextureSlotCarrySnapshot,
+    ) -> Result<(), PagingError> {
+        carry.validate()?;
+        if let Some(slot) = (0..TEXTURE_SLOT_COUNT).find(|slot| {
+            self.texture_slots[*slot].is_some()
+                || self.texture_slot_eids[*slot].is_some()
+                || self.texture_slot_states[*slot] != TextureSlotState::Free
+                || self.texture_generations[*slot] != 0
+        }) {
+            return Err(PagingError::TextureCarryDestinationNotFresh(slot));
+        }
+
+        let mut destination_pages = [None; TEXTURE_SLOT_COUNT];
+        for (slot, record) in carry.slots.iter().copied().enumerate() {
+            let Some(eid) = record.eid else {
+                continue;
+            };
+            if let Some(page) = self.page_eids.get(&eid).copied() {
+                destination_pages[slot] = Some(page);
+            } else if self.eids.contains_key(&eid) {
+                return Err(PagingError::TextureCarryEidIsNotTexture(eid));
+            }
+        }
+
+        let mut preview = self.clone();
+        for (slot, record) in carry.slots.iter().copied().enumerate() {
+            preview.texture_generations[slot] = record.generation;
+            match record.state {
+                TextureSlotState::Free | TextureSlotState::Reserved => {
+                    preview.texture_slots[slot] = None;
+                    preview.texture_slot_eids[slot] = None;
+                    preview.texture_slot_states[slot] = TextureSlotState::Free;
+                }
+                TextureSlotState::Resident | TextureSlotState::Stale => {
+                    let eid = record
+                        .eid
+                        .ok_or(PagingError::MissingTextureCarryEid(slot))?;
+                    preview.texture_slot_eids[slot] = Some(eid);
+                    if let Some(page) = destination_pages[slot] {
+                        preview.texture_slots[slot] = Some(page);
+                        preview.texture_slot_states[slot] = TextureSlotState::Resident;
+                        let page_record = preview
+                            .pages
+                            .get_mut(&page)
+                            .ok_or(PagingError::UnknownPage(page))?;
+                        page_record.state = PageState::Resident;
+                        page_record.generation = record.generation;
+                    } else {
+                        preview.texture_slots[slot] = None;
+                        preview.texture_slot_states[slot] = TextureSlotState::Stale;
+                    }
+                }
+            }
+        }
+        *self = preview;
+        Ok(())
+    }
+
     /// Assigns a named physical page to one of the eight usable texture slots.
     ///
     /// Reinstalling the same resident EID in the same slot is idempotent. A
@@ -1830,6 +2183,9 @@ impl Pager {
             .texture_slots
             .get(slot)
             .ok_or(PagingError::InvalidTextureSlot(slot))?;
+        if self.texture_slot_states[slot] == TextureSlotState::Reserved {
+            return Err(PagingError::ReservedTextureSlot(slot));
+        }
         let state = self
             .pages
             .get(&page)
@@ -1860,6 +2216,7 @@ impl Pager {
         record.state = PageState::Resident;
         record.generation = self.texture_generations[slot];
         self.texture_slots[slot] = Some(page);
+        self.texture_slot_eids[slot] = Some(eid);
         self.texture_slot_states[slot] = TextureSlotState::Resident;
         debug_assert_eq!(self.texture_page_eids.get(&page), Some(&eid));
         Ok(record.generation)
@@ -1878,14 +2235,14 @@ impl Pager {
             .copied()
             .ok_or(PagingError::UnknownEid(eid))?;
 
-        if let Some(slot) = self
-            .texture_slots
-            .iter()
-            .enumerate()
-            .position(|(slot, candidate)| {
-                *candidate == Some(page)
-                    && self.texture_slot_states[slot] == TextureSlotState::Resident
-            })
+        if let Some(slot) =
+            self.texture_slot_eids
+                .iter()
+                .enumerate()
+                .position(|(slot, candidate)| {
+                    *candidate == Some(eid)
+                        && self.texture_slot_states[slot] == TextureSlotState::Resident
+                })
         {
             self.materialize_texture(slot, page)?;
             let binding = self
@@ -1908,10 +2265,13 @@ impl Pager {
         let replaceable = match self.current_texture_load_eids.as_ref() {
             None => Some(TEXTURE_SLOT_COUNT - 1),
             Some(protected) => (0..TEXTURE_SLOT_COUNT).rev().find(|slot| {
-                self.texture_slot_binding(*slot)
-                    .is_some_and(|binding| !protected.contains(&binding.eid))
+                self.texture_slot_states[*slot] == TextureSlotState::Resident
+                    && self
+                        .texture_slot_binding(*slot)
+                        .is_some_and(|binding| !protected.contains(&binding.eid))
             }),
-        };
+        }
+        .filter(|slot| self.texture_slot_states[*slot] != TextureSlotState::Reserved);
         let slot = free
             .or(stale)
             .or(replaceable)
@@ -1949,6 +2309,9 @@ impl Pager {
             .texture_slot_states
             .get_mut(slot)
             .ok_or(PagingError::InvalidTextureSlot(slot))?;
+        if *state == TextureSlotState::Reserved {
+            return Err(PagingError::ReservedTextureSlot(slot));
+        }
         *state = TextureSlotState::Stale;
         if let Some(page) = self.texture_slots[slot]
             && let Some(record) = self.pages.get_mut(&page)
@@ -1958,21 +2321,94 @@ impl Pager {
         Ok(())
     }
 
-    /// Frees a slot for allocation without erasing its last EID/generation.
-    /// Renderer frame snapshots may still address a cached old-generation
-    /// texture until the next frame boundary.
+    /// Applies native `NSTexturePageFree` without erasing diagnostic identity.
+    ///
+    /// State 20 (`Resident`) rearms the source page; state 21 (`Stale`) only
+    /// becomes free. Native leaves state 1 (`Free`) and state 30 (`Reserved`)
+    /// untouched. In particular, that no-op prevents an old reserved binding
+    /// from rearming a page which has since become resident in another slot.
     pub fn free_texture_slot(&mut self, slot: usize) -> Result<(), PagingError> {
         let state = self
             .texture_slot_states
             .get_mut(slot)
             .ok_or(PagingError::InvalidTextureSlot(slot))?;
-        *state = TextureSlotState::Free;
-        if let Some(page) = self.texture_slots[slot]
-            && let Some(record) = self.pages.get_mut(&page)
-        {
-            record.state = PageState::Translated;
+        match *state {
+            TextureSlotState::Resident => {
+                *state = TextureSlotState::Free;
+                if let Some(page) = self.texture_slots[slot]
+                    && let Some(record) = self.pages.get_mut(&page)
+                {
+                    record.state = PageState::Translated;
+                }
+            }
+            TextureSlotState::Stale => *state = TextureSlotState::Free,
+            TextureSlotState::Free | TextureSlotState::Reserved => {}
         }
         Ok(())
+    }
+
+    /// Frees a copied texture identity, then marks its VRAM slot as occupied
+    /// by non-page data.
+    ///
+    /// This is the pointer-free equivalent of `NSTexturePageFree(n)` followed
+    /// by assigning native texture-page state 30. It intentionally preserves
+    /// the old EID and generation for an already captured renderer frame.
+    pub fn reserve_texture_slot(&mut self, slot: usize) -> Result<(), PagingError> {
+        self.free_texture_slot(slot)?;
+        self.texture_slot_states[slot] = TextureSlotState::Reserved;
+        Ok(())
+    }
+
+    /// Changes native state 30 back to state 1 without disturbing any other
+    /// slot state. Returns whether a reservation was released.
+    pub fn release_reserved_texture_slot(&mut self, slot: usize) -> Result<bool, PagingError> {
+        let state = self
+            .texture_slot_states
+            .get_mut(slot)
+            .ok_or(PagingError::InvalidTextureSlot(slot))?;
+        if *state != TextureSlotState::Reserved {
+            return Ok(false);
+        }
+        *state = TextureSlotState::Free;
+        Ok(true)
+    }
+
+    /// Applies the exact PSX `TitleLoadEntries` CLUT reservations.
+    ///
+    /// Native texture pages 8 through 14 map to Rust slots 0 through 6.
+    /// Page 15 (slot 7) is deliberately untouched. Slots 9, 10, and 13 are
+    /// always reserved; slots 8, 12, and 14 depend on the MDAT IPAL/CLUT
+    /// count using the source's strict threshold comparisons.
+    pub fn reserve_title_clut_texture_slots(&mut self, ipal_count: u32) -> Result<(), PagingError> {
+        for slot in [1, 2, 5] {
+            self.reserve_texture_slot(slot)?;
+        }
+        for (slot, needed) in [
+            (0, ipal_count > 160),
+            (4, ipal_count > 288),
+            (6, ipal_count >= 417),
+        ] {
+            if needed {
+                self.reserve_texture_slot(slot)?;
+            } else {
+                self.release_reserved_texture_slot(slot)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Releases state-30 title reservations from native pages 8 through 14.
+    /// Native page 15 / Rust slot 7 remains untouched.
+    pub fn release_title_clut_texture_slots(&mut self) {
+        for slot in 0..7 {
+            // The range is statically inside the eight-slot table.
+            let _ = self.release_reserved_texture_slot(slot);
+        }
+    }
+
+    #[must_use]
+    pub fn texture_slot_state(&self, slot: usize) -> Option<TextureSlotState> {
+        self.texture_slot_states.get(slot).copied()
     }
 
     #[must_use]
@@ -2007,7 +2443,14 @@ impl Pager {
     #[must_use]
     pub fn texture_frame_snapshot(&self) -> TextureFrameSnapshot {
         TextureFrameSnapshot {
-            slots: std::array::from_fn(|slot| self.texture_slot_binding(slot)),
+            // Native free/stale slots retain their old VRAM bytes until a
+            // replacement and therefore remain valid cache identities. State
+            // 30 is different: title CLUTs overwrite that VRAM, so its old
+            // TPAG identity must not reach the renderer.
+            slots: std::array::from_fn(|slot| {
+                self.texture_slot_binding(slot)
+                    .filter(|binding| binding.state != TextureSlotState::Reserved)
+            }),
         }
     }
 }
@@ -2015,6 +2458,290 @@ impl Pager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crust_formats::stream::{NSF_PAGE_SIZE, parse_nsd, parse_nsf};
+
+    const TEST_MODERN_NSD_HEADER_SIZE: usize = 0x520;
+    const TEST_LDAT_PREFIX_SIZE: usize = 0x118;
+
+    fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_test_entry_page(bytes: &mut [u8], page: PageIndex, eid: Eid) {
+        let start = page.get() as usize * NSF_PAGE_SIZE;
+        put_u16(bytes, start, 0x1234);
+        put_u16(bytes, start + 2, 0);
+        put_u32(bytes, start + 4, page.tagged());
+        put_u32(bytes, start + 8, 1);
+        put_u32(bytes, start + 16, 24);
+        put_u32(bytes, start + 20, 44);
+        put_u32(bytes, start + 24, crust_formats::stream::ENTRY_MAGIC);
+        put_u32(bytes, start + 28, eid.raw());
+        put_u32(bytes, start + 32, 2);
+        put_u32(bytes, start + 36, 0);
+        put_u32(bytes, start + 40, 20);
+    }
+
+    fn write_test_empty_page(bytes: &mut [u8], page: PageIndex) {
+        let start = page.get() as usize * NSF_PAGE_SIZE;
+        put_u16(bytes, start, 0x1234);
+        put_u16(bytes, start + 2, 0);
+        put_u32(bytes, start + 4, page.tagged());
+        put_u32(bytes, start + 8, 0);
+        put_u32(bytes, start + 16, 20);
+    }
+
+    fn initial_mount_test_stream() -> (Nsd, Nsf, Eid, Eid) {
+        let level = LevelId::INTRO;
+        let spawn = Eid::from_name("spawn").unwrap();
+        let load_entry = Eid::from_name("loadE").unwrap();
+        let page_count = 3_u32;
+        let table_len = 1_usize;
+        let ldat_offset = TEST_MODERN_NSD_HEADER_SIZE + table_len * 8;
+        let mut nsd_bytes = vec![0_u8; ldat_offset + TEST_LDAT_PREFIX_SIZE];
+        put_u32(&mut nsd_bytes, 0x400, page_count);
+        put_u32(&mut nsd_bytes, 0x404, table_len as u32);
+        put_u32(
+            &mut nsd_bytes,
+            TEST_MODERN_NSD_HEADER_SIZE,
+            PageIndex::new(0).tagged(),
+        );
+        put_u32(&mut nsd_bytes, TEST_MODERN_NSD_HEADER_SIZE + 4, spawn.raw());
+        put_u32(&mut nsd_bytes, ldat_offset, 1);
+        put_u32(&mut nsd_bytes, ldat_offset + 4, level.get());
+        put_u32(&mut nsd_bytes, ldat_offset + 8, spawn.raw());
+        let metadata = parse_nsd(&nsd_bytes, level).unwrap();
+
+        let mut nsf_bytes = vec![0_u8; page_count as usize * NSF_PAGE_SIZE];
+        write_test_entry_page(&mut nsf_bytes, PageIndex::new(0), spawn);
+        write_test_entry_page(&mut nsf_bytes, PageIndex::new(1), load_entry);
+        write_test_empty_page(&mut nsf_bytes, PageIndex::new(2));
+        let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
+        (metadata, nsf, spawn, load_entry)
+    }
+
+    fn initial_mount_visibility_test_stream() -> (Nsd, Nsf, Eid, Eid, Eid) {
+        let level = LevelId::INTRO;
+        let spawn = Eid::from_name("spawn").unwrap();
+        let visibility = Eid::from_name("visib").unwrap();
+        let load_entry = Eid::from_name("loadE").unwrap();
+        let page_count = 3_u32;
+        let table_len = 1_usize;
+        let ldat_offset = TEST_MODERN_NSD_HEADER_SIZE + table_len * 8;
+        let mut nsd_bytes = vec![0_u8; ldat_offset + TEST_LDAT_PREFIX_SIZE];
+        put_u32(&mut nsd_bytes, 0x400, page_count);
+        put_u32(&mut nsd_bytes, 0x404, table_len as u32);
+        put_u32(
+            &mut nsd_bytes,
+            TEST_MODERN_NSD_HEADER_SIZE,
+            PageIndex::new(0).tagged(),
+        );
+        put_u32(&mut nsd_bytes, TEST_MODERN_NSD_HEADER_SIZE + 4, spawn.raw());
+        put_u32(&mut nsd_bytes, ldat_offset, 1);
+        put_u32(&mut nsd_bytes, ldat_offset + 4, level.get());
+        put_u32(&mut nsd_bytes, ldat_offset + 8, spawn.raw());
+        let metadata = parse_nsd(&nsd_bytes, level).unwrap();
+
+        let mut nsf_bytes = vec![0_u8; page_count as usize * NSF_PAGE_SIZE];
+        write_test_entry_page(&mut nsf_bytes, PageIndex::new(0), spawn);
+        write_test_entry_page(&mut nsf_bytes, PageIndex::new(1), visibility);
+        write_test_entry_page(&mut nsf_bytes, PageIndex::new(2), load_entry);
+        let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
+        (metadata, nsf, spawn, visibility, load_entry)
+    }
+
+    fn initial_title_core_preload_test_stream() -> (Nsd, Nsf, Eid) {
+        let level = LevelId::TITLE;
+        let spawn = Eid::from_name("spawn").unwrap();
+        let exec_4 = Eid::from_name("exec4").unwrap();
+        let exec_52 = Eid::from_name("ex052").unwrap();
+        let page_count = 3_u32;
+        let table_len = 1_usize;
+        let ldat_offset = TEST_MODERN_NSD_HEADER_SIZE + table_len * 8;
+        let mut nsd_bytes = vec![0_u8; ldat_offset + TEST_LDAT_PREFIX_SIZE];
+        put_u32(&mut nsd_bytes, 0x400, page_count);
+        put_u32(&mut nsd_bytes, 0x404, table_len as u32);
+        put_u32(
+            &mut nsd_bytes,
+            TEST_MODERN_NSD_HEADER_SIZE,
+            PageIndex::new(0).tagged(),
+        );
+        put_u32(&mut nsd_bytes, TEST_MODERN_NSD_HEADER_SIZE + 4, spawn.raw());
+        put_u32(&mut nsd_bytes, ldat_offset, 1);
+        put_u32(&mut nsd_bytes, ldat_offset + 4, level.get());
+        put_u32(&mut nsd_bytes, ldat_offset + 8, spawn.raw());
+        put_u32(&mut nsd_bytes, ldat_offset + 20 + 4 * 4, exec_4.raw());
+        put_u32(&mut nsd_bytes, ldat_offset + 20 + 4 * 52, exec_52.raw());
+        let metadata = parse_nsd(&nsd_bytes, level).unwrap();
+
+        let mut nsf_bytes = vec![0_u8; page_count as usize * NSF_PAGE_SIZE];
+        write_test_entry_page(&mut nsf_bytes, PageIndex::new(0), spawn);
+        write_test_entry_page(&mut nsf_bytes, PageIndex::new(1), exec_4);
+        write_test_entry_page(&mut nsf_bytes, PageIndex::new(2), exec_52);
+        let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
+        (metadata, nsf, spawn)
+    }
+
+    #[test]
+    fn retail_mount_default_drains_initial_level_update_pages() {
+        let (metadata, nsf, spawn, load_entry) = initial_mount_test_stream();
+        let pager = Pager::mount_retail_level(
+            &metadata,
+            &nsf,
+            LevelId::INTRO,
+            spawn,
+            [load_entry],
+            [PageIndex::new(2)],
+        )
+        .unwrap();
+
+        assert_eq!(pager.pending_virtual_pages().collect::<Vec<_>>(), []);
+        assert_eq!(
+            pager.resolved_pages().collect::<Vec<_>>(),
+            [PageIndex::new(0), PageIndex::new(1), PageIndex::new(2)]
+        );
+        assert_eq!(pager.page(PageIndex::new(0)).unwrap().references, 0);
+        assert_eq!(pager.page(PageIndex::new(1)).unwrap().references, 1);
+        assert_eq!(pager.page(PageIndex::new(2)).unwrap().references, 1);
+    }
+
+    #[test]
+    fn retail_mount_can_defer_exact_initial_level_update_pages() {
+        let (metadata, nsf, spawn, load_entry) = initial_mount_test_stream();
+        let pager = Pager::mount_retail_level_with_options(
+            &metadata,
+            &nsf,
+            LevelId::INTRO,
+            spawn,
+            [load_entry],
+            [PageIndex::new(2)],
+            RetailLevelMountOptions::new(LevelId::INTRO)
+                .with_page_update(RetailLevelMountPageUpdate::Defer),
+        )
+        .unwrap();
+
+        assert_eq!(
+            pager.pending_virtual_pages().collect::<Vec<_>>(),
+            [PageIndex::new(1), PageIndex::new(2)]
+        );
+        assert_eq!(
+            pager.resolved_pages().collect::<Vec<_>>(),
+            [PageIndex::new(0)]
+        );
+        assert_eq!(pager.page(PageIndex::new(0)).unwrap().references, 0);
+        assert_eq!(pager.page(PageIndex::new(1)).unwrap().references, 1);
+        assert_eq!(pager.page(PageIndex::new(2)).unwrap().references, 1);
+    }
+
+    #[test]
+    fn retail_mount_drains_after_temporary_initial_slst_close() {
+        let (metadata, nsf, spawn, visibility, load_entry) = initial_mount_visibility_test_stream();
+        let pager = Pager::mount_retail_level_with_options(
+            &metadata,
+            &nsf,
+            LevelId::INTRO,
+            spawn,
+            [load_entry],
+            [],
+            RetailLevelMountOptions::new(LevelId::INTRO)
+                .with_physical_slot_count(2)
+                .with_initial_visibility_list(Some(visibility)),
+        )
+        .unwrap();
+
+        assert_eq!(pager.pending_virtual_pages().collect::<Vec<_>>(), []);
+        assert_eq!(
+            pager.resolved_pages().collect::<Vec<_>>(),
+            [PageIndex::new(0), PageIndex::new(2)],
+            "the queued load-list page replaces the already-closed SLST"
+        );
+        assert_eq!(pager.page(PageIndex::new(0)).unwrap().references, 0);
+        assert_eq!(
+            pager.page(PageIndex::new(1)).unwrap().state,
+            PageState::Raw,
+            "the closed SLST PTE is re-armed after its slot is reused"
+        );
+        assert_eq!(pager.page(PageIndex::new(1)).unwrap().references, 0);
+        assert_eq!(pager.page(PageIndex::new(2)).unwrap().references, 1);
+    }
+
+    #[test]
+    fn retail_mount_defer_still_materializes_and_closes_initial_slst_first() {
+        let (metadata, nsf, spawn, visibility, load_entry) = initial_mount_visibility_test_stream();
+        let pager = Pager::mount_retail_level_with_options(
+            &metadata,
+            &nsf,
+            LevelId::INTRO,
+            spawn,
+            [load_entry],
+            [],
+            RetailLevelMountOptions::new(LevelId::INTRO)
+                .with_physical_slot_count(2)
+                .with_page_update(RetailLevelMountPageUpdate::Defer)
+                .with_initial_visibility_list(Some(visibility)),
+        )
+        .unwrap();
+
+        assert_eq!(
+            pager.pending_virtual_pages().collect::<Vec<_>>(),
+            [PageIndex::new(2)]
+        );
+        assert_eq!(
+            pager.resolved_pages().collect::<Vec<_>>(),
+            [PageIndex::new(0), PageIndex::new(1)]
+        );
+        assert_eq!(pager.page(PageIndex::new(0)).unwrap().references, 0);
+        assert_eq!(pager.page(PageIndex::new(1)).unwrap().references, 0);
+        assert_eq!(pager.page(PageIndex::new(2)).unwrap().references, 1);
+    }
+
+    #[test]
+    fn title_mount_can_defer_core_preloads_then_reproduce_the_default_state() {
+        let (metadata, nsf, spawn) = initial_title_core_preload_test_stream();
+        let default =
+            Pager::mount_retail_level(&metadata, &nsf, LevelId::TITLE, spawn, [], []).unwrap();
+        let mut deferred = Pager::mount_retail_level_with_options(
+            &metadata,
+            &nsf,
+            LevelId::TITLE,
+            spawn,
+            [],
+            [],
+            RetailLevelMountOptions::new(LevelId::TITLE).with_core_page_preloads(false),
+        )
+        .unwrap();
+
+        assert_eq!(deferred.pending_virtual_pages().collect::<Vec<_>>(), []);
+        assert_eq!(deferred.page(PageIndex::new(1)).unwrap().references, 0);
+        assert_eq!(deferred.page(PageIndex::new(2)).unwrap().references, 0);
+
+        let outcomes = deferred
+            .stage_retail_core_page_preloads(&metadata, LevelId::TITLE)
+            .unwrap();
+
+        assert_eq!(
+            outcomes,
+            [
+                RetailCorePagePreloadOutcome::Open(PagerOpenOutcome {
+                    page: PageIndex::new(1),
+                    resolved: false,
+                    invalidated: PageInvalidations::NONE,
+                    evicted: None,
+                }),
+                RetailCorePagePreloadOutcome::Open(PagerOpenOutcome {
+                    page: PageIndex::new(2),
+                    resolved: false,
+                    invalidated: PageInvalidations::NONE,
+                    evicted: None,
+                }),
+            ]
+        );
+        assert_eq!(deferred, default);
+    }
 
     #[test]
     fn retail_heap_probe_profile_matches_characterized_stream_classes() {
@@ -2083,6 +2810,12 @@ mod tests {
         pager.register_page(page, []).unwrap();
         pager.bind_page_eid(eid, page).unwrap();
         eid
+    }
+
+    fn register_named_texture(pager: &mut Pager, index: u32, eid: Eid) {
+        let page = PageIndex::new(index);
+        pager.register_page(page, []).unwrap();
+        pager.bind_page_eid(eid, page).unwrap();
     }
 
     fn enable_cd_transfer(
@@ -2161,6 +2894,202 @@ mod tests {
             PageState::Stale
         );
         assert_eq!(pager.texture_slot(7), Some((PageIndex::new(1), 2)));
+    }
+
+    #[test]
+    fn texture_carry_remaps_a_resident_eid_to_the_destination_page() {
+        let eid = Eid::from_name("sameT").unwrap();
+        let mut source = Pager::new();
+        register_named_texture(&mut source, 2, eid);
+        assert_eq!(source.materialize_texture(3, PageIndex::new(2)), Ok(1));
+        let carry = source.texture_slot_carry_snapshot().unwrap();
+
+        let mut destination = Pager::new();
+        register_named_texture(&mut destination, 17, eid);
+        destination.import_texture_slot_carry(carry).unwrap();
+
+        assert_eq!(destination.texture_slot(3), Some((PageIndex::new(17), 1)));
+        assert_eq!(
+            destination.texture_slot_binding(3),
+            Some(TextureSlotBinding {
+                page: PageIndex::new(17),
+                eid,
+                generation: 1,
+                state: TextureSlotState::Resident,
+            })
+        );
+        assert_eq!(
+            destination.page(PageIndex::new(17)).unwrap().state,
+            PageState::Resident
+        );
+        assert_eq!(destination.page(PageIndex::new(17)).unwrap().generation, 1);
+    }
+
+    #[test]
+    fn texture_carry_stales_missing_eids_and_resets_free_or_reserved_slots() {
+        let missing = Eid::from_name("goneT").unwrap();
+        let freed = Eid::from_name("freeT").unwrap();
+        let reserved = Eid::from_name("clutT").unwrap();
+        let mut source = Pager::new();
+        for (page, eid) in [(0, missing), (1, freed), (2, reserved)] {
+            register_named_texture(&mut source, page, eid);
+        }
+        source.materialize_texture(7, PageIndex::new(0)).unwrap();
+        source.materialize_texture(6, PageIndex::new(1)).unwrap();
+        source.materialize_texture(5, PageIndex::new(2)).unwrap();
+        source.free_texture_slot(6).unwrap();
+        source.reserve_texture_slot(5).unwrap();
+        let carry = source.texture_slot_carry_snapshot().unwrap();
+        assert_eq!(carry.state(7), Some(TextureSlotState::Resident));
+        assert_eq!(carry.state(6), Some(TextureSlotState::Free));
+        assert_eq!(carry.state(5), Some(TextureSlotState::Reserved));
+
+        let mut destination = Pager::new();
+        // Even if these ignored state-1/state-30 EIDs happen to exist in the
+        // new page table, native does not remap them.
+        register_named_texture(&mut destination, 9, freed);
+        register_named_texture(&mut destination, 10, reserved);
+        destination.import_texture_slot_carry(carry).unwrap();
+
+        assert_eq!(
+            destination.texture_slot_state(7),
+            Some(TextureSlotState::Stale)
+        );
+        assert_eq!(destination.texture_slot(7), None);
+        assert_eq!(
+            destination
+                .texture_slot_carry_snapshot()
+                .unwrap()
+                .binding(7),
+            Some(TextureSlotCarryBinding {
+                eid: missing,
+                generation: 1,
+                state: TextureSlotState::Stale,
+            })
+        );
+        for slot in [5, 6] {
+            assert_eq!(
+                destination.texture_slot_state(slot),
+                Some(TextureSlotState::Free)
+            );
+            assert_eq!(destination.texture_slot(slot), None);
+            assert_eq!(destination.texture_generations[slot], 1);
+        }
+    }
+
+    #[test]
+    fn texture_carry_rejects_duplicate_and_invalid_eids() {
+        let duplicate = Eid::from_name("dupeT").unwrap();
+        let binding = |eid, state| {
+            Some(TextureSlotCarryBinding {
+                eid,
+                generation: 7,
+                state,
+            })
+        };
+        let mut slots = [None; TEXTURE_SLOT_COUNT];
+        slots[7] = binding(duplicate, TextureSlotState::Resident);
+        slots[6] = binding(duplicate, TextureSlotState::Stale);
+        assert_eq!(
+            TextureSlotCarrySnapshot::try_from_bindings(slots),
+            Err(PagingError::DuplicateTextureCarryEid(duplicate))
+        );
+
+        let invalid = Eid::from_raw(2);
+        let mut slots = [None; TEXTURE_SLOT_COUNT];
+        slots[4] = binding(invalid, TextureSlotState::Resident);
+        assert_eq!(
+            TextureSlotCarrySnapshot::try_from_bindings(slots),
+            Err(PagingError::InvalidTextureCarryEid {
+                slot: 4,
+                eid: invalid,
+            })
+        );
+
+        let mut slots = [None; TEXTURE_SLOT_COUNT];
+        slots[2] = binding(duplicate, TextureSlotState::Free);
+        assert_eq!(
+            TextureSlotCarrySnapshot::try_from_bindings(slots),
+            Err(PagingError::InvalidTextureCarryState(2))
+        );
+    }
+
+    #[test]
+    fn texture_carry_rejects_an_ordinary_destination_eid_transactionally() {
+        let eid = Eid::from_name("kindT").unwrap();
+        let carry = TextureSlotCarrySnapshot::try_from_bindings(std::array::from_fn(|slot| {
+            (slot == 7).then_some(TextureSlotCarryBinding {
+                eid,
+                generation: 3,
+                state: TextureSlotState::Resident,
+            })
+        }))
+        .unwrap();
+        let mut destination = Pager::new();
+        let ordinary = entry(4, 0);
+        destination
+            .register_page(PageIndex::new(4), [ordinary])
+            .unwrap();
+        destination.bind_eid(eid, ordinary).unwrap();
+        let before = destination.clone();
+
+        assert_eq!(
+            destination.import_texture_slot_carry(carry),
+            Err(PagingError::TextureCarryEidIsNotTexture(eid))
+        );
+        assert_eq!(destination, before);
+    }
+
+    #[test]
+    fn texture_carry_preserves_high_to_low_stale_allocation_order() {
+        let source_eids = (0..8).map(texture_eid).collect::<Vec<_>>();
+        let mut source = Pager::new();
+        for (page, eid) in source_eids.iter().copied().enumerate() {
+            register_named_texture(&mut source, page as u32, eid);
+            source.materialize_texture_eid(eid).unwrap();
+        }
+        let carry = source.texture_slot_carry_snapshot().unwrap();
+
+        let mut destination = Pager::new();
+        for (offset, eid) in source_eids.iter().copied().enumerate().skip(2) {
+            register_named_texture(&mut destination, 20 + offset as u32, eid);
+        }
+        let ninth = texture_eid(8);
+        let tenth = texture_eid(9);
+        register_named_texture(&mut destination, 28, ninth);
+        register_named_texture(&mut destination, 29, tenth);
+        destination.import_texture_slot_carry(carry).unwrap();
+        assert_eq!(
+            destination.texture_slot_state(7),
+            Some(TextureSlotState::Stale)
+        );
+        assert_eq!(
+            destination.texture_slot_state(6),
+            Some(TextureSlotState::Stale)
+        );
+        assert_eq!(
+            destination.texture_slot_state(5),
+            Some(TextureSlotState::Resident)
+        );
+        destination.set_current_texture_load_eids(
+            source_eids.iter().skip(2).copied().chain([ninth, tenth]),
+        );
+
+        let first = destination.materialize_texture_eid(ninth).unwrap();
+        let second = destination.materialize_texture_eid(tenth).unwrap();
+
+        assert_eq!(first.slot, 7);
+        assert_eq!(second.slot, 6);
+        assert_eq!(first.binding.generation, 2);
+        assert_eq!(second.binding.generation, 2);
+        assert_eq!(
+            first.replaced, None,
+            "missing stale EID has no destination page handle"
+        );
+        assert_eq!(
+            second.replaced, None,
+            "missing stale EID has no destination page handle"
+        );
     }
 
     #[test]
@@ -2324,16 +3253,19 @@ mod tests {
         let mut pager = Pager::new();
         let eid = register_texture(&mut pager, 0);
         let assignment = pager.materialize_texture_eid(eid).unwrap();
+        let captured = pager.texture_frame_snapshot();
 
         pager.free_texture_slot(assignment.slot).unwrap();
 
-        let binding = pager
-            .texture_frame_snapshot()
-            .slot(assignment.slot)
-            .unwrap();
+        let binding = pager.texture_slot_binding(assignment.slot).unwrap();
         assert_eq!(binding.eid, eid);
         assert_eq!(binding.state, TextureSlotState::Free);
         assert_eq!(binding.generation, assignment.binding.generation);
+        assert_eq!(captured.slot(assignment.slot), Some(assignment.binding));
+        assert_eq!(
+            pager.texture_frame_snapshot().slot(assignment.slot),
+            Some(binding)
+        );
     }
 
     #[test]
@@ -2378,6 +3310,152 @@ mod tests {
         assert_eq!(reopened.replaced.unwrap().state, TextureSlotState::Stale);
         assert_eq!(reopened.binding.generation, first.binding.generation + 1);
         assert_eq!(reopened.binding.state, TextureSlotState::Resident);
+    }
+
+    #[test]
+    fn reserved_texture_slot_keeps_identity_but_cannot_be_reallocated() {
+        let mut pager = Pager::new();
+        let eids = (0..=8)
+            .map(|index| register_texture(&mut pager, index))
+            .collect::<Vec<_>>();
+        pager.set_current_texture_load_eids(eids.iter().take(8).copied());
+        for eid in eids.iter().take(8).copied() {
+            pager.materialize_texture_eid(eid).unwrap();
+        }
+        // The first texture owns slot 7 and the second owns slot 6.
+        let retained = pager.texture_slot_binding(6).unwrap();
+        pager.reserve_texture_slot(6).unwrap();
+        pager.set_current_texture_load_eids(
+            eids.iter()
+                .take(8)
+                .copied()
+                .filter(|eid| *eid != eids[1] && *eid != eids[2]),
+        );
+
+        assert_eq!(
+            pager.texture_slot_state(6),
+            Some(TextureSlotState::Reserved)
+        );
+        assert_eq!(
+            pager.texture_slot_binding(6),
+            Some(TextureSlotBinding {
+                state: TextureSlotState::Reserved,
+                ..retained
+            })
+        );
+        assert_eq!(pager.texture_frame_snapshot().slot(6), None);
+        assert_eq!(
+            pager.page(retained.page).unwrap().state,
+            PageState::Translated
+        );
+        assert_eq!(
+            pager.materialize_texture(6, PageIndex::new(8)),
+            Err(PagingError::ReservedTextureSlot(6))
+        );
+        assert_eq!(
+            pager.mark_texture_slot_stale(6),
+            Err(PagingError::ReservedTextureSlot(6))
+        );
+
+        let assignment = pager.materialize_texture_eid(eids[8]).unwrap();
+        assert_eq!(assignment.slot, 5, "allocator must skip reserved slot 6");
+        assert_eq!(pager.texture_slot_binding(6).unwrap().eid, retained.eid);
+
+        assert_eq!(pager.release_reserved_texture_slot(6), Ok(true));
+        assert_eq!(pager.release_reserved_texture_slot(6), Ok(false));
+        assert_eq!(pager.texture_slot_state(6), Some(TextureSlotState::Free));
+    }
+
+    #[test]
+    fn title_clut_reservations_match_native_thresholds_and_leave_slot_fifteen() {
+        for (ipal_count, optional) in [
+            (160, [false, false, false]),
+            (161, [true, false, false]),
+            (288, [true, false, false]),
+            (289, [true, true, false]),
+            (416, [true, true, false]),
+            (417, [true, true, true]),
+        ] {
+            let mut pager = Pager::new();
+            let eids = (0..8)
+                .map(|index| register_texture(&mut pager, index))
+                .collect::<Vec<_>>();
+            for eid in eids {
+                pager.materialize_texture_eid(eid).unwrap();
+            }
+            let slot_fifteen = pager.texture_slot_binding(7).unwrap();
+
+            pager.reserve_title_clut_texture_slots(ipal_count).unwrap();
+            for slot in [1, 2, 5] {
+                assert_eq!(
+                    pager.texture_slot_state(slot),
+                    Some(TextureSlotState::Reserved),
+                    "IPAL count {ipal_count}, native slot {}",
+                    slot + 8
+                );
+                assert_eq!(pager.texture_frame_snapshot().slot(slot), None);
+            }
+            for ((slot, needed), threshold) in
+                [(0, optional[0]), (4, optional[1]), (6, optional[2])]
+                    .into_iter()
+                    .zip([161, 289, 417])
+            {
+                assert_eq!(
+                    pager.texture_slot_state(slot),
+                    Some(if needed {
+                        TextureSlotState::Reserved
+                    } else {
+                        TextureSlotState::Resident
+                    }),
+                    "IPAL count {ipal_count} around threshold {threshold}"
+                );
+            }
+            assert_eq!(
+                pager.texture_slot_state(3),
+                Some(TextureSlotState::Resident)
+            );
+            assert_eq!(pager.texture_slot_binding(7), Some(slot_fifteen));
+
+            pager.release_title_clut_texture_slots();
+            for slot in [0, 1, 2, 4, 5, 6] {
+                assert_ne!(
+                    pager.texture_slot_state(slot),
+                    Some(TextureSlotState::Reserved)
+                );
+            }
+            assert_eq!(pager.texture_slot_binding(7), Some(slot_fifteen));
+        }
+    }
+
+    #[test]
+    fn repeated_reservation_does_not_rearm_a_duplicate_live_page_binding() {
+        let mut pager = Pager::new();
+        let eid = register_texture(&mut pager, 0);
+        let first = pager.materialize_texture_eid(eid).unwrap();
+        pager.reserve_texture_slot(first.slot).unwrap();
+
+        // Reopening A allocates another slot while the old native state-30
+        // struct still retains A's diagnostic identity.
+        let reopened = pager.materialize_texture_eid(eid).unwrap();
+        assert_ne!(reopened.slot, first.slot);
+        assert_eq!(
+            pager.page(reopened.binding.page).unwrap().state,
+            PageState::Resident
+        );
+
+        pager.reserve_texture_slot(first.slot).unwrap();
+        assert_eq!(
+            pager.texture_slot_state(first.slot),
+            Some(TextureSlotState::Reserved)
+        );
+        assert_eq!(
+            pager.texture_slot_binding(reopened.slot),
+            Some(reopened.binding)
+        );
+        assert_eq!(
+            pager.page(reopened.binding.page).unwrap().state,
+            PageState::Resident
+        );
     }
 
     #[test]
@@ -2453,7 +3531,7 @@ mod tests {
             match retained_state {
                 TextureSlotState::Free => pager.free_texture_slot(slot).unwrap(),
                 TextureSlotState::Stale => pager.mark_texture_slot_stale(slot).unwrap(),
-                TextureSlotState::Resident => unreachable!(),
+                TextureSlotState::Resident | TextureSlotState::Reserved => unreachable!(),
             }
 
             let replacement = pager.open_eid_with_outcome(second).unwrap();

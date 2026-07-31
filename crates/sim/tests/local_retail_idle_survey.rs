@@ -59,16 +59,19 @@ use crust_sim::{
     },
     math::{Bounds3, Vec3},
     object_arena::{NeighborZone, ObjectOrigin, SpawnError},
-    paging::{PageInvalidations, Pager, PagerUpdateOutcome, PagingError},
+    paging::{
+        PageInvalidations, Pager, PagerUpdateOutcome, PagingError, RetailLevelMountOptions,
+        RetailLevelMountPageUpdate,
+    },
     player::{PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_START, PAD_UP},
     retail_frame::{PathProgress, RetailFrameState},
     retail_runtime::{
         CURRENT_ZONE_FLAGS_GLOBAL, CardHostResponse, ISLAND_CAMERA_ROTATION_GLOBAL,
         ISLAND_CAMERA_STATE_GLOBAL, NsfProgramError, NsfProgramHost, PagedNsfProgramHost,
         ProgramBinding, ProgramHost, RetailLevelSnapshot, RetailLevelStateContext,
-        RetailRestartOutcome, RetailRuntime, RetailSessionCarry, RetailTitleAction,
-        RetailTraversalBoundary, RuntimeError, RuntimeObjectHandle, StateProgramBinding,
-        ZoneTerminationMode,
+        RetailRestartOutcome, RetailRestartTransactionError, RetailRuntime, RetailSessionCarry,
+        RetailTitleAction, RetailTraversalBoundary, RuntimeError, RuntimeObjectHandle,
+        StateProgramBinding, ZoneTerminationMode,
     },
     zone_lifecycle::{OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction},
 };
@@ -2153,7 +2156,15 @@ fn sunset_vista_direct_boot_reaches_authored_end_warp() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn sunset_vista_authentic_campaign_phase_reaches_authored_end_warp() {
+fn sunset_vista_legacy_synthetic_campaign_phase_reaches_authored_end_warp() {
+    if std::env::var_os("C1_LEGACY_SUNSET_CARRY").is_none() {
+        return;
+    }
+
+    // This hand-authored carry predates the executable uninterrupted
+    // post-Boulder Dash fixture. Keep it available for historical route
+    // characterization without treating its obsolete process clocks as a
+    // supported campaign frontier.
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -15454,6 +15465,8 @@ impl WholeHogCompletionRouteController {
 struct RollingStonesRouteController {
     session_globals: bool,
     exact_campaign_phase: bool,
+    live_pre_checkpoint_walls: bool,
+    live_zero_p_route_reanchored: bool,
     opening_started: bool,
     opening_tick: u16,
     post_tick: u16,
@@ -15665,13 +15678,14 @@ impl RollingStonesRouteController {
                 Eid::from_name("0C_lZ").expect("fixed Rolling Stones ledge-zone EID is valid");
             let zero_upper_e =
                 Eid::from_name("0E_lZ").expect("fixed Rolling Stones wall-zone EID is valid");
-            let exact_zero_c_live_hazard_phase = self.checkpoint_phase_wait == 2
-                && (self.exact_zero_u_right_platform_phase
-                    && self.exact_zero_x_late_platform_phase
-                    || !self.exact_zero_u_right_platform_phase
-                        && !self.exact_zero_x_late_platform_phase);
-            if self.exact_campaign_phase
-                && exact_zero_c_live_hazard_phase
+            let zero_c_live_hazard_phase = self.live_pre_checkpoint_walls && !self.session_globals
+                || self.exact_campaign_phase
+                    && self.checkpoint_phase_wait == 2
+                    && (self.exact_zero_u_right_platform_phase
+                        && self.exact_zero_x_late_platform_phase
+                        || !self.exact_zero_u_right_platform_phase
+                            && !self.exact_zero_x_late_platform_phase);
+            if zero_c_live_hazard_phase
                 && camera.path.zone == zero_upper_c
                 && let Some(player) = player
                 && let Some(plant_bound) = objects.iter().find_map(|object| {
@@ -15707,8 +15721,7 @@ impl RollingStonesRouteController {
                     }
                 }
             }
-            if self.exact_campaign_phase
-                && exact_zero_c_live_hazard_phase
+            if zero_c_live_hazard_phase
                 && self.exact_zero_c_plant_jump_done
                 && camera.path.zone == zero_upper_c
                 && camera.path.index == 0
@@ -16238,7 +16251,8 @@ impl RollingStonesRouteController {
                     return PAD_UP | lateral | jump;
                 }
             }
-            if self.exact_campaign_phase
+            if (self.exact_campaign_phase
+                || self.live_pre_checkpoint_walls && !self.session_globals)
                 && camera.path.zone == zero_upper_a
                 && camera.path.index == 1
                 && (tick >= 422
@@ -16653,7 +16667,8 @@ impl RollingStonesRouteController {
                 return (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
             }
 
-            if self.exact_campaign_phase
+            if (self.exact_campaign_phase
+                || self.live_pre_checkpoint_walls && !self.session_globals)
                 && tick >= 423
                 && (camera.path.zone == zero_upper_a && camera.path.index == 1
                     || camera.path.zone == zero_upper_b && camera.path.index == 0)
@@ -16764,7 +16779,8 @@ impl RollingStonesRouteController {
                 }
                 return PAD_UP | lateral;
             }
-            if self.exact_campaign_phase
+            if (self.exact_campaign_phase
+                || self.live_pre_checkpoint_walls && !self.session_globals)
                 && camera.path.zone == zero_upper_b
                 && camera.path.index == 0
                 && let Some(player) = player
@@ -16857,8 +16873,8 @@ impl RollingStonesRouteController {
                 }
             }
 
-            if self.session_globals
-                && self.checkpoint_phase_recovered
+            if (self.session_globals && self.checkpoint_phase_recovered
+                || self.live_pre_checkpoint_walls && !self.session_globals)
                 && camera.path.zone == zero_upper_c
             {
                 if camera.path.index == 0 && camera.progress.raw() >= 24_000 {
@@ -16877,7 +16893,8 @@ impl RollingStonesRouteController {
                     return Self::direct_checkpoint_pad(576);
                 }
             }
-            if self.exact_campaign_phase
+            if (self.exact_campaign_phase
+                || self.live_pre_checkpoint_walls && !self.session_globals)
                 && (camera.path.zone == zero_upper_c && camera.path.index == 1
                     || camera.path.zone == zero_upper_e && camera.path.index == 0)
                 && let Some(player) = player
@@ -16923,7 +16940,9 @@ impl RollingStonesRouteController {
                 let walls_crossing = wall_center_separation <= 100_000;
                 let walls_takeoff = wall_center_separation <= 260_000;
                 let walls_runup = wall_center_separation
-                    <= if self.exact_zero_x_late_platform_phase {
+                    <= if self.exact_zero_x_late_platform_phase
+                        || self.live_pre_checkpoint_walls && !self.session_globals
+                    {
                         420_000
                     } else {
                         260_000
@@ -17043,13 +17062,18 @@ impl RollingStonesRouteController {
                 } else {
                     self.exact_zero_x_late_platform_phase && walls_takeoff
                 };
+                let direct_live_platform_takeoff =
+                    self.live_pre_checkpoint_walls && !self.session_globals && walls_takeoff;
                 let carried_left_wall_phase = self.checkpoint_phase_wait == 2
                     && !self.exact_zero_u_right_platform_phase
                     && !self.exact_zero_x_late_platform_phase;
                 let carried_left_has_runup =
                     !carried_left_wall_phase || player.velocity[2] <= -300_000;
                 if near_platform
-                    && (walls_crossing || reversed_gap.is_some() || carried_platform_takeoff)
+                    && (walls_crossing
+                        || reversed_gap.is_some()
+                        || carried_platform_takeoff
+                        || direct_live_platform_takeoff)
                     && carried_left_has_runup
                     && player.status_a & 1 != 0
                 {
@@ -17288,7 +17312,7 @@ impl RollingStonesRouteController {
         // The route uses only ordinary directional, jump, and spin inputs: the
         // pauses at 672 and the following jumps time authored moving platforms.
         let tick = self.post_tick;
-        let mut held = if self.exact_campaign_phase && (32..=63).contains(&tick) {
+        let mut held = if self.live_pre_checkpoint_walls && (32..=63).contains(&tick) {
             // The uninterrupted no-pause campaign reaches 0b while entity
             // 45's live JunOC wall is sweeping left across the historical
             // forward line. Brake on the safe side until the sweep clears
@@ -17312,7 +17336,7 @@ impl RollingStonesRouteController {
                 300..=303 => PAD_UP | PAD_RIGHT,
                 // A fresh one-frame spin edge opens checkpoint crate 8 after the
                 // turtle immediately before it has been defeated at offset 842.
-                344..=355 | 416..=427 | 540..=551 | 560..=571 | 842..=849 | 876 => {
+                344..=355 | 416..=427 | 540..=551 | 560..=570 | 842..=849 | 876 => {
                     PAD_UP | PAD_SQUARE
                 }
                 // The timed pager leaves 0d's subtype-six JunOC wall one sweep
@@ -17322,13 +17346,42 @@ impl RollingStonesRouteController {
                 _ => PAD_UP,
             }
         };
+        if self.live_pre_checkpoint_walls
+            && !self.session_globals
+            && let Some(player) = player
+            && let Some(_plant_bound) = objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if matches!(descriptor.id, 49 | 57)
+                            && descriptor.executable == 25
+                            && descriptor.subtype == 0
+                            && object.state == 3
+                )
+                .then_some(object.bound)
+                .flatten()
+                .filter(|bound| {
+                    player.translation[0] >= bound.min.x.saturating_sub(160_000)
+                        && player.translation[0] <= bound.max.x.saturating_add(160_000)
+                        && player.translation[2] >= bound.min.z.saturating_sub(160_000)
+                        && player.translation[2] <= bound.max.z.saturating_add(400_000)
+                        && player.translation[1] >= bound.min.y.saturating_sub(320_000)
+                        && player.translation[1] <= bound.max.y.saturating_add(320_000)
+                })
+            })
+        {
+            // The live-wall waits can carry the 0n approach a few physical
+            // samples past the fixed spin window. Keep the ordinary spin
+            // attack active while the plant is inside Crash's live bound.
+            held |= PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+        }
         let post_zero_e =
             Eid::from_name("0e_lZ").expect("fixed Rolling Stones wall-zone EID is valid");
         let post_zero_f =
             Eid::from_name("0f_lZ").expect("fixed Rolling Stones wall-zone EID is valid");
         let post_zero_g =
             Eid::from_name("0g_lZ").expect("fixed Rolling Stones landing-zone EID is valid");
-        if self.exact_campaign_phase
+        if self.live_pre_checkpoint_walls
             && tick >= 64
             && let Some(player) = player
             && let Some((wall_id, wall_bound)) = objects
@@ -17450,7 +17503,7 @@ impl RollingStonesRouteController {
                     | jump;
             }
         }
-        if self.exact_campaign_phase
+        if self.live_pre_checkpoint_walls
             && self.exact_post_wall_phase_ready
             && let Some(player) = player
             && player.zone == post_zero_e
@@ -17479,7 +17532,7 @@ impl RollingStonesRouteController {
                 self.post_tick = 237;
             }
         }
-        if self.exact_campaign_phase
+        if self.live_pre_checkpoint_walls
             && let Some(player) = player
             && player.zone == post_zero_f
             && let Some(first_wall) = objects.iter().find_map(|object| {
@@ -17595,7 +17648,7 @@ impl RollingStonesRouteController {
                     | jump;
             }
         }
-        if self.exact_campaign_phase
+        if self.live_pre_checkpoint_walls
             && let Some(player) = player
             && let Some(wall) = objects.iter().find_map(|object| {
                 matches!(
@@ -17656,7 +17709,7 @@ impl RollingStonesRouteController {
                 }
             }
         }
-        if self.exact_campaign_phase
+        if self.live_pre_checkpoint_walls
             && self.exact_post_wall_phase_ready
             && (404..=411).contains(&tick)
         {
@@ -17665,7 +17718,7 @@ impl RollingStonesRouteController {
             // the following spin and transverse shelf.
             held = (held & !(PAD_LEFT | PAD_RIGHT | PAD_DOWN | PAD_SQUARE)) | PAD_UP | PAD_RIGHT;
         }
-        if self.exact_campaign_phase
+        if self.live_pre_checkpoint_walls
             && self.exact_post_wall_exit_z.is_some()
             && let Some(player) = player
             && player.zone == post_zero_g
@@ -17678,7 +17731,7 @@ impl RollingStonesRouteController {
             self.exact_post_wall_exit_z = None;
             self.post_tick = 326;
         }
-        if self.exact_campaign_phase
+        if self.live_pre_checkpoint_walls
             && (327..=330).contains(&tick)
             && player.is_some_and(|player| player.zone == post_zero_g)
         {
@@ -17686,6 +17739,32 @@ impl RollingStonesRouteController {
             // curved-track line. Four ordinary right samples restore its
             // lateral approach before the next spin and gap jump.
             held = (held & !(PAD_LEFT | PAD_RIGHT | PAD_DOWN | PAD_SQUARE)) | PAD_UP | PAD_RIGHT;
+        }
+        let post_zero_p =
+            Eid::from_name("0p_lZ").expect("fixed Rolling Stones platform-zone EID is valid");
+        if self.live_pre_checkpoint_walls
+            && !self.session_globals
+            && !self.live_zero_p_route_reanchored
+            && tick == 672
+            && camera.path.zone != post_zero_p
+        {
+            // The live-wall route reaches the authored platform wait while it
+            // is still in 0o. Keep moving without consuming that route sample
+            // until the physical 0p boundary used by the carried phase.
+            self.post_tick = 671;
+            held = PAD_UP;
+        }
+        if self.live_pre_checkpoint_walls
+            && !self.session_globals
+            && !self.live_zero_p_route_reanchored
+            && camera.path.zone == post_zero_p
+        {
+            // Session carry enters 0p at route tick 665, takes seven ordinary
+            // approach samples, then reaches the authored 672--685 platform
+            // wait. FreshBoot enters at tick 672 after the live-wall detours;
+            // replay those missing samples before using the same wait/jumps.
+            self.live_zero_p_route_reanchored = true;
+            self.post_tick = 664;
         }
         self.post_tick = self.post_tick.saturating_add(1);
         held
@@ -17702,12 +17781,20 @@ impl RollingStonesRouteController {
 struct RollingStonesBrioBonusRouteController {
     route: RollingStonesRouteController,
     first_token_tick: Option<u8>,
+    first_wall_reanchored: bool,
+    first_gap_jump_done: bool,
+    first_gap_jump_hold: u8,
+    zero_i_gap_jump_done: bool,
+    zero_i_gap_jump_hold: u8,
+    zero_x_platform_jump_done: bool,
+    zero_x_platform_jump_hold: u8,
     bridge_center_last_x: Option<i32>,
     bridge_phase_ready: bool,
     second_pickup_wait: bool,
     second_exit_tick: Option<u8>,
     zero_y_ledge_jump_done: bool,
     zero_y_ledge_jump_hold: u8,
+    zero_y_platform_approach_jump_done: bool,
     zero_y_platform_jump_armed: bool,
     zero_y_platform_jump_done: bool,
     zero_a_platform_jump_done: bool,
@@ -17755,8 +17842,70 @@ impl RollingStonesBrioBonusRouteController {
         let Some(player) = player else {
             return held;
         };
+        let post_zero_e =
+            Eid::from_name("0e_lZ").expect("fixed Rolling Stones wall-zone EID is valid");
+        let post_zero_f =
+            Eid::from_name("0f_lZ").expect("fixed Rolling Stones wall-zone EID is valid");
+        if player.brio_counter == 0x100
+            && !self.first_wall_reanchored
+            && matches!(player.zone, zone if zone == post_zero_e || zone == post_zero_f)
+            && self
+                .route
+                .exact_post_wall_exit_z
+                .is_some_and(|exit_z| player.translation[2] < exit_z)
+        {
+            // The first-token collection wait intentionally rolls the base
+            // controller back each frame. Recenter after the retained wall's
+            // physical exit, then restore the characterized 0f approach
+            // sample without rearming that wall phase. Keep the exit plane so
+            // the base route can still re-anchor at the later 0g boundary.
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 34);
+            let lateral = if predicted_x > 1_350_000 {
+                PAD_LEFT
+            } else if predicted_x < 1_290_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT | PAD_DOWN | PAD_SQUARE)) | PAD_UP | lateral;
+            if lateral == 0 {
+                self.route.post_tick = 237;
+                self.route.exact_post_wall_phase_ready = false;
+                self.first_wall_reanchored = true;
+            }
+        }
+        if player.brio_counter == 0x100
+            && self.first_wall_reanchored
+            && !self.first_gap_jump_done
+            && player.zone == post_zero_f
+            && player.status_a & 1 != 0
+            && (26_400_000..=26_750_000).contains(&player.translation[2])
+        {
+            // The token pickup's airborne collection arc reaches the live 0f
+            // wall-pair phase before its fixed jump sample. Create the edge
+            // from the first grounded shelf instead, after Cross has already
+            // been released, so the following gap is traversed physically.
+            self.first_gap_jump_done = true;
+            self.first_gap_jump_hold = 7;
+        }
+        if self.first_gap_jump_hold > 0 {
+            self.first_gap_jump_hold -= 1;
+            held |= PAD_CROSS;
+        }
 
-        if player.brio_counter >= 0x200 && player.zone == zero_y {
+        let approaching_zero_y_walls = objects.iter().any(|object| {
+            matches!(
+                object.origin,
+                ObjectOrigin::Entity(descriptor)
+                    if matches!(descriptor.id, 74 | 75)
+                        && descriptor.executable == 22
+                        && descriptor.subtype == 6
+                        && object.state == 5
+            ) && object.bound.is_some_and(|bound| {
+                (0..=350_000).contains(&player.translation[2].saturating_sub(bound.max.z))
+            })
+        });
+        if player.brio_counter >= 0x200 && (player.zone == zero_y || approaching_zero_y_walls) {
             let bound_for_wall = |id| {
                 objects.iter().find_map(|object| {
                     matches!(
@@ -17773,11 +17922,13 @@ impl RollingStonesBrioBonusRouteController {
             };
             if (camera.path.zone != zero_y || camera.path.index == 0)
                 && let (Some(left), Some(right)) = (bound_for_wall(74), bound_for_wall(75))
+                && player.translation[2] >= left.min.z.min(right.min.z).saturating_sub(64_000)
             {
                 // The Brio detours meet 0y's first converging JunOC pair
                 // while its left wall occupies the historical running line.
-                // Follow the center of the live opening with ordinary lateral
-                // input while retaining the base route's jump schedule.
+                // Begin following the live center on the adjacent 0x shelf:
+                // waiting for the zone handoff leaves too little run-up to
+                // reach the opening before the wall's collision depth.
                 let target_x = left.max.x + (right.min.x - left.max.x) / 2;
                 let predicted_x =
                     player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
@@ -17810,6 +17961,27 @@ impl RollingStonesBrioBonusRouteController {
                 .flatten()
             });
             if camera.path.zone == zero_y
+                && camera.path.index == 0
+                && let (Some(left), Some(right), Some(platform)) =
+                    (bound_for_wall(74), bound_for_wall(75), landing_platform)
+                && player.translation[2] < left.min.z.min(right.min.z).saturating_sub(64_000)
+                && player.translation[2].saturating_sub(platform.max.z) > 750_000
+            {
+                // The live wall center exits left of 0y's higher run-up
+                // shelf. After clearing both JunOC depths, restore the
+                // authored shelf line before committing the platform jump.
+                let target_x = 2_408_000;
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 34);
+                let lateral = if predicted_x < target_x - 16_000 {
+                    PAD_RIGHT
+                } else if predicted_x > target_x + 16_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                held = (held & !(PAD_LEFT | PAD_RIGHT | PAD_DOWN)) | PAD_UP | lateral;
+            }
+            if camera.path.zone == zero_y
                 && camera.path.index == 1
                 && let Some(platform) = landing_platform
             {
@@ -17828,20 +18000,102 @@ impl RollingStonesBrioBonusRouteController {
                 };
                 held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
             }
-            if !self.zero_y_ledge_jump_done
-                && camera.path.index == 1
-                && camera.progress.raw() <= 4_000
-                && player.status_a & 1 != 0
+            if camera.path.zone == zero_y
+                && let (Some(first), Some(second)) = (bound_for_wall(76), bound_for_wall(77))
+                && player.translation[2] <= first.max.z.max(second.max.z).saturating_add(500_000)
+                && player.translation[2] >= first.min.z.min(second.min.z).saturating_sub(64_000)
+                && let Some((gap_left, gap_right)) = if first.max.x < second.min.x {
+                    Some((first.max.x, second.min.x))
+                } else if second.max.x < first.min.x {
+                    Some((second.max.x, first.min.x))
+                } else {
+                    None
+                }
             {
-                // The Brio carry lands on 0y's intermediate ledge after the
-                // direct phase's Cross window. Anchor a fresh ordinary jump
-                // to that live grounded landing instead of a frame count.
+                // The second Brio detour reaches 0y's next JunOC pair on a
+                // phase where its opening is opposite the direct route's
+                // characterized ordering. Follow whichever live opening is
+                // present after leaving platform 82 instead of continuing to
+                // chase that platform's center into the closing wall.
+                let target_x = gap_left + (gap_right - gap_left) / 2;
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 34);
+                let lateral = if predicted_x < target_x - 16_000 {
+                    PAD_RIGHT
+                } else if predicted_x > target_x + 16_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                held = (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_UP | lateral;
+            }
+            let second_pair_crossed = match (bound_for_wall(76), bound_for_wall(77)) {
+                (Some(far_wall), Some(near_wall)) => {
+                    let far_center = far_wall.min.x + (far_wall.max.x - far_wall.min.x) / 2;
+                    let near_center = near_wall.min.x + (near_wall.max.x - near_wall.min.x) / 2;
+                    near_center < far_center
+                }
+                _ => false,
+            };
+            let waiting_for_second_pair = !self.zero_y_ledge_jump_done
+                && camera.path.zone == zero_y
+                && player.status_a & 1 != 0
+                && !second_pair_crossed
+                && landing_platform.is_some_and(|platform| {
+                    (0..=750_000).contains(&player.translation[2].saturating_sub(platform.max.z))
+                });
+            if waiting_for_second_pair {
+                // The token-adjusted arrival reaches the takeoff shelf while
+                // the following pair is still crossing. Hold this physical
+                // run-up until its near wall has moved left of the far wall;
+                // launching at the first platform-proximity sample reaches
+                // their collision depth before any opening exists.
+                self.route = route_before;
+                let target_x = 2_408_000;
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 34);
+                let lateral = if predicted_x < target_x - 16_000 {
+                    PAD_RIGHT
+                } else if predicted_x > target_x + 16_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                held = (held
+                    & !(PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE))
+                    | lateral;
+            }
+            if !self.zero_y_ledge_jump_done
+                && camera.path.zone == zero_y
+                && player.status_a & 1 != 0
+                && second_pair_crossed
+                && landing_platform.is_some_and(|platform| {
+                    (0..=750_000).contains(&player.translation[2].saturating_sub(platform.max.z))
+                })
+            {
+                // The Brio carry reaches the higher shelf after the direct
+                // phase's Cross window. Anchor a fresh ordinary jump to its
+                // grounded run-up and the live platform distance.
                 self.zero_y_ledge_jump_done = true;
                 self.zero_y_ledge_jump_hold = 7;
-                held |= PAD_CROSS;
+                held = (held & !PAD_DOWN) | PAD_UP | PAD_CROSS;
             } else if self.zero_y_ledge_jump_hold > 0 {
                 self.zero_y_ledge_jump_hold -= 1;
-                held |= PAD_CROSS;
+                held = (held & !PAD_DOWN) | PAD_UP | PAD_CROSS;
+            } else if !self.zero_y_platform_approach_jump_done
+                && player.status_a & 1 != 0
+                && landing_platform.is_some_and(|platform| {
+                    (0..=300_000).contains(&player.translation[2].saturating_sub(platform.max.z))
+                        && (platform.min.x.saturating_sub(64_000)
+                            ..=platform.max.x.saturating_add(64_000))
+                            .contains(&player.translation[0])
+                })
+            {
+                // Waiting for the live JunOC opening makes the base platform
+                // edge expire before Crash reaches the final grounded lip.
+                // Recreate it from that physical approach instead of walking
+                // into entity 82's trailing face.
+                self.zero_y_platform_approach_jump_done = true;
+                self.zero_y_ledge_jump_hold = 7;
+                held = (held & !PAD_DOWN) | PAD_UP | PAD_CROSS;
             } else if !self.zero_y_platform_jump_done {
                 if self.zero_y_platform_jump_armed {
                     // The base route reaches this platform while its previous
@@ -18054,25 +18308,87 @@ impl RollingStonesBrioBonusRouteController {
         if let Some(tick) = self.first_token_tick {
             if player.brio_counter >= 0x100 {
                 self.first_token_tick = None;
+                if let Some(exit_z) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 24
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 6
+                                && object.state == 5
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                    .map(|bound| bound.min.z.saturating_sub(100_000))
+                }) && player.translation[2] < exit_z
+                {
+                    // Collecting the first token proves that Crash has
+                    // physically crossed entity 24, but the collection wait
+                    // deliberately rolls back the base controller each frame.
+                    // Preserve the live exit plane for the Brio-owned
+                    // recenter/re-anchor on the following ordinary samples.
+                    self.route.exact_post_wall_exit_z = Some(exit_z);
+                }
                 return held;
             }
             self.route = route_before;
-            self.first_token_tick = Some(tick.saturating_add(1));
-            let mut action = if tick <= 16 { PAD_CROSS } else { 0 };
-            action |= if player.translation[0] < 1_340_000 && player.velocity[0] <= 400_000
-                || player.velocity[0] < -100_000
-            {
+            let first_bound = objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 25
+                            && descriptor.executable == 34
+                            && object.state == 21
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            let target_x = first_bound.map_or(1_380_000, |bound| {
+                bound.min.x + (bound.max.x - bound.min.x) / 2
+            });
+            let target_z = first_bound.map_or(27_085_000, |bound| {
+                bound.min.z + (bound.max.z - bound.min.z) / 2
+            });
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+            let predicted_z =
+                player.translation[2].saturating_add(player.velocity[2].saturating_mul(3) / 34);
+            let retry_jump = tick > 16
+                && player.status_a & 1 != 0
+                && first_bound.is_some_and(|bound| {
+                    (bound.min.x.saturating_sub(32_000)..=bound.max.x.saturating_add(32_000))
+                        .contains(&predicted_x)
+                        && (bound.min.z.saturating_sub(32_000)..=bound.max.z.saturating_add(32_000))
+                            .contains(&predicted_z)
+                });
+            self.first_token_tick = Some(if retry_jump {
+                1
+            } else {
+                tick.saturating_add(1)
+            });
+            let mut action = if tick <= 16 || retry_jump {
+                PAD_CROSS
+            } else {
+                0
+            };
+            action |= if predicted_x < target_x - 24_000 {
                 PAD_RIGHT
-            } else if player.translation[0] > 1_420_000
-                || (player.translation[0] > 1_340_000 && player.velocity[0] > 100_000)
-            {
+            } else if predicted_x > target_x + 24_000 {
+                PAD_LEFT
+            } else if player.velocity[0] < -100_000 {
+                PAD_RIGHT
+            } else if player.velocity[0] > 100_000 {
                 PAD_LEFT
             } else {
                 0
             };
-            action |= if player.velocity[2] < -100_000 || player.translation[2] < 27_045_000 {
+            action |= if predicted_z < target_z - 24_000 {
                 PAD_DOWN
-            } else if player.velocity[2] > 100_000 || player.translation[2] > 27_125_000 {
+            } else if predicted_z > target_z + 24_000 {
+                PAD_UP
+            } else if player.velocity[2] < -100_000 {
+                PAD_DOWN
+            } else if player.velocity[2] > 100_000 {
                 PAD_UP
             } else {
                 0
@@ -18157,17 +18473,132 @@ impl RollingStonesBrioBonusRouteController {
         if player.brio_counter == 0x100
             && camera.path.zone == zero_h
             && (1_000..=9_000).contains(&camera.progress.raw())
-            && objects.iter().any(|object| {
+            && let Some(turtle_bound) = objects.iter().find_map(|object| {
                 matches!(
                     object.origin,
                     ObjectOrigin::Entity(descriptor)
                         if descriptor.id == 15
                             && descriptor.executable == 19
-                            && object.state == 2
+                        && object.state == 2
                 )
+                .then_some(object.bound)
+                .flatten()
             })
         {
-            held |= PAD_SQUARE;
+            // The Brio detour enters 0h while Crash is still in the preceding
+            // bounce state, so extending the base route's Square hold cannot
+            // start a new attack. Release it through that state and create a
+            // fresh edge as soon as WillC returns to ordinary grounded state
+            // immediately before the live turtle encounter.
+            if player.state == 2 {
+                held |= PAD_SQUARE;
+            } else {
+                held &= !PAD_SQUARE;
+            }
+            let target_x = turtle_bound.min.x.saturating_sub(250_000);
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 34);
+            let lateral = if predicted_x > target_x + 24_000 {
+                PAD_LEFT
+            } else if predicted_x < target_x - 24_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+        }
+        let zero_i = Eid::from_name("0i_lZ").expect("fixed Rolling Stones gap-zone EID is valid");
+        if player.brio_counter == 0x100
+            && !self.zero_i_gap_jump_done
+            && player.zone == zero_i
+            && player.status_a & 1 != 0
+            && (23_700_000..=23_790_000).contains(&player.translation[2])
+        {
+            // The live-turtle sidestep reaches 0i after the fixed route's
+            // Cross window. Recreate that edge on the final grounded shelf.
+            self.zero_i_gap_jump_done = true;
+            self.zero_i_gap_jump_hold = 24;
+        }
+        if self.zero_i_gap_jump_hold > 0 {
+            self.zero_i_gap_jump_hold -= 1;
+            held |= PAD_CROSS;
+        }
+        if player.brio_counter == 0x100
+            && player.zone == zero_i
+            && let Some(platform) = objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 19
+                            && descriptor.executable == 22
+                            && descriptor.subtype == 6
+                            && object.state == 5
+                )
+                .then_some(object.bound)
+                .flatten()
+            })
+            && (23_200_000..=23_850_000).contains(&player.translation[2])
+        {
+            let target_x = platform.min.x + (platform.max.x - platform.min.x) / 2;
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+            let lateral = if predicted_x < target_x - 32_000 {
+                PAD_RIGHT
+            } else if predicted_x > target_x + 32_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+        }
+
+        let zero_x =
+            Eid::from_name("0x_lZ").expect("fixed Rolling Stones platform-approach EID is valid");
+        let zero_x_platform = objects.iter().find_map(|object| {
+            matches!(
+                object.origin,
+                ObjectOrigin::Entity(descriptor)
+                    if descriptor.id == 78
+                        && descriptor.executable == 11
+                        && descriptor.subtype == 2
+                        && object.state == 8
+            )
+            .then_some(object.bound)
+            .flatten()
+        });
+        if player.brio_counter == 0x200
+            && !self.zero_x_platform_jump_done
+            && player.status_a & 1 != 0
+            && held & PAD_CROSS != 0
+            && let Some(platform) = zero_x_platform
+            && (0..=700_000).contains(&player.translation[2].saturating_sub(platform.max.z))
+        {
+            // The second-token detour reaches entity 78 after its authored
+            // cycle has shifted vertically. Extend the historical grounded
+            // Cross edge so Crash is still above the live landing plane when
+            // he reaches the platform's trailing face.
+            self.zero_x_platform_jump_done = true;
+            self.zero_x_platform_jump_hold = 24;
+        }
+        if self.zero_x_platform_jump_hold > 0 {
+            self.zero_x_platform_jump_hold -= 1;
+            held |= PAD_UP | PAD_CROSS;
+        }
+        if player.brio_counter == 0x200
+            && (camera.path.zone == zero_x || player.zone == zero_x)
+            && let Some(platform) = zero_x_platform
+            && player.translation[2] >= platform.min.z.saturating_sub(64_000)
+        {
+            let target_x = platform.min.x + (platform.max.x - platform.min.x) / 2;
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+            let lateral = if predicted_x < target_x - 24_000 {
+                PAD_RIGHT
+            } else if predicted_x > target_x + 24_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
         }
 
         let zero_q =
@@ -18342,12 +18773,20 @@ impl RollingStonesBrioBonusRouteController {
     fn restart_from_checkpoint(&mut self) {
         self.route.restart_from_checkpoint();
         self.first_token_tick = None;
+        self.first_wall_reanchored = false;
+        self.first_gap_jump_done = false;
+        self.first_gap_jump_hold = 0;
+        self.zero_i_gap_jump_done = false;
+        self.zero_i_gap_jump_hold = 0;
+        self.zero_x_platform_jump_done = false;
+        self.zero_x_platform_jump_hold = 0;
         self.bridge_center_last_x = None;
         self.bridge_phase_ready = false;
         self.second_pickup_wait = false;
         self.second_exit_tick = None;
         self.zero_y_ledge_jump_done = false;
         self.zero_y_ledge_jump_hold = 0;
+        self.zero_y_platform_approach_jump_done = false;
         self.zero_y_platform_jump_armed = false;
         self.zero_y_platform_jump_done = false;
         self.zero_a_platform_jump_done = false;
@@ -18386,6 +18825,8 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
     let mut controller = RollingStonesRouteController {
         session_globals: true,
         exact_campaign_phase: false,
+        live_pre_checkpoint_walls: true,
+        live_zero_p_route_reanchored: false,
         opening_started: true,
         opening_tick: 225,
         post_tick: 877,
@@ -26878,6 +27319,7 @@ impl ToxicWasteCompletionRouteController {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CortexPowerCompletionRouteController {
     session_globals: bool,
+    opening_cross_latched: bool,
     tick: u32,
     jump_frames: u8,
     release_frames: u8,
@@ -26905,6 +27347,18 @@ struct CortexPowerCompletionRouteController {
 }
 
 impl CortexPowerCompletionRouteController {
+    fn new(session_globals: bool, mount_held: u32) -> Self {
+        Self {
+            session_globals,
+            opening_cross_latched: mount_held & PAD_CROSS != 0,
+            ..Self::default()
+        }
+    }
+
+    fn reset_for_restart(&mut self, mount_held: u32) {
+        *self = Self::new(self.session_globals, mount_held);
+    }
+
     fn centerline_x(camera: RetailCameraLocation, player_z: i32) -> Option<i64> {
         let path = camera.path;
         if path.zone == Eid::from_name("a5_3Z").expect("fixed Cortex Power camera EID is valid")
@@ -27130,6 +27584,40 @@ impl CortexPowerCompletionRouteController {
             self.a7_beam_previous_state == Some(7) && state == 6 && x >= 3_500_000
         });
         self.a7_beam_previous_state = a7_beam.map(|(state, _)| state);
+
+        // Cortex Power opens on two mode-one camera paths. Face-button taps
+        // are retail's cutscene-skip input, so do not manufacture a jump or
+        // spin edge until that authored camera reaches the playable path.
+        // The earlier survey accidentally hid those taps from CamUpdate;
+        // keeping the opening input directional preserves the intended full
+        // cutscene while exercising the source-accurate pad boundary.
+        if camera.path.zone
+            == Eid::from_name("e0_3Z").expect("fixed Cortex Power camera EID is valid")
+            && matches!(camera.path.index, 0 | 1)
+        {
+            // Keep the carried Cross latch closed from CoreObjectsCreate so
+            // CamUpdate never observes a new face-button edge. Advance the
+            // route's ordinary jump cadence behind that stable latch; when
+            // path two becomes playable, its release/re-press schedule is
+            // still aligned with the characterized opening movement.
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+            } else if self.release_frames != 0 {
+                self.release_frames -= 1;
+            } else if self.tick >= 55
+                && player
+                    .is_some_and(|player| player.status_a & 1 != 0 && matches!(player.state, 1 | 2))
+            {
+                self.jump_frames = 10;
+                self.release_frames = 4;
+            }
+            return PAD_RIGHT
+                | if self.opening_cross_latched {
+                    PAD_CROSS
+                } else {
+                    0
+                };
+        }
 
         // The uninterrupted post-Sunset phase reaches the first reactor
         // eighteen scheduler ticks nearer its active sweep than a fresh boot.
@@ -28115,6 +28603,52 @@ impl CortexPowerCompletionRouteController {
         }
         held
     }
+}
+
+#[test]
+fn cortex_power_opening_preserves_the_mount_face_button_latch() {
+    let zone = Eid::from_name("e0_3Z").expect("fixed Cortex Power opening EID is valid");
+    for index in [0, 1] {
+        let camera = RetailCameraLocation {
+            path: RetailPathId { zone, index },
+            progress: PathProgress::ZERO,
+        };
+
+        let mut neutral = CortexPowerCompletionRouteController::new(false, 0);
+        let neutral_held = neutral.held(camera, None, &[]);
+        assert_eq!(neutral_held, PAD_RIGHT);
+        assert_eq!((neutral_held & 0xf0), 0);
+
+        let mut carried = CortexPowerCompletionRouteController::new(true, PAD_CROSS);
+        let carried_held = carried.held(camera, None, &[]);
+        assert_eq!(carried_held, PAD_RIGHT | PAD_CROSS);
+        assert_eq!(((!PAD_CROSS & carried_held) & 0xf0), 0);
+    }
+}
+
+#[test]
+fn cortex_power_restart_resets_route_state_without_losing_mount_authority() {
+    let mut controller = CortexPowerCompletionRouteController::new(true, 0);
+    controller.tick = 999;
+    controller.jump_frames = 8;
+    controller.hazard_stage = 4;
+    controller.a7_beam_previous_state = Some(7);
+    controller.lower_barrier_waiting = true;
+    controller.final_reactor_phase_cleared = true;
+    controller.seven_b_alignment_stage = 3;
+
+    controller.reset_for_restart(PAD_CROSS);
+    assert_eq!(
+        controller,
+        CortexPowerCompletionRouteController::new(true, PAD_CROSS),
+    );
+
+    controller.tick = 1;
+    controller.reset_for_restart(0);
+    assert_eq!(
+        controller,
+        CortexPowerCompletionRouteController::new(true, 0),
+    );
 }
 
 /// Deterministic ordinary-pad characterization of Heavy Machinery from a
@@ -35444,7 +35978,7 @@ impl CastleMachineryCompletionRouteController {
                     0
                 }
             } else {
-                PAD_UP | PAD_DOWN
+                0
             };
             let lateral = if player.velocity[0] < -80_000 {
                 PAD_RIGHT
@@ -62124,6 +62658,7 @@ impl SurveyInputController {
         profile: SurveyInputProfile,
         context_source: LevelContextSource,
         initial_draw_count: u32,
+        initial_held: u32,
     ) -> Self {
         let bonus_return = matches!(context_source, LevelContextSource::BonusReturn);
         let session_globals = matches!(context_source, LevelContextSource::SessionGlobals);
@@ -62280,33 +62815,7 @@ impl SurveyInputController {
                 j3_corner_frame: None,
                 j3_portal_stabilizing: false,
             },
-            cortex_power: CortexPowerCompletionRouteController {
-                session_globals,
-                tick: 0,
-                jump_frames: 0,
-                release_frames: 0,
-                hazard_stage: 0,
-                hazard_tick: 0,
-                a4_entry_seen: false,
-                a4_recovery_required: false,
-                a6_jump_rearmed: false,
-                a6_jump_started: false,
-                a7_beam_previous_state: None,
-                a7_launch_phase_cleared: false,
-                a7_second_jump_started: false,
-                a8_short_runup: false,
-                lower_barrier_previous_x: None,
-                lower_barrier_waiting: false,
-                lower_barrier_phase_cleared: false,
-                lower_barrier_runup_frames: 0,
-                second_barrier_previous_x: None,
-                six_b_middle_phase_cleared: false,
-                six_b_middle_runup_frames: 0,
-                final_reactor_previous_x: None,
-                final_reactor_phase_cleared: false,
-                seven_b_alignment_stage: 0,
-                opening_reactor_phase_cleared: false,
-            },
+            cortex_power: CortexPowerCompletionRouteController::new(session_globals, initial_held),
             generator_room: GeneratorRoomCompletionRouteController {
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
                 tick: 0,
@@ -62686,6 +63195,12 @@ impl SurveyInputController {
             rolling_stones: RollingStonesRouteController {
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
                 exact_campaign_phase: profile == SurveyInputProfile::RollingStonesExactCampaign,
+                live_pre_checkpoint_walls: matches!(
+                    profile,
+                    SurveyInputProfile::RollingStonesCheckpoint
+                        | SurveyInputProfile::RollingStonesExactCampaign
+                ),
+                live_zero_p_route_reanchored: false,
                 opening_started: false,
                 opening_tick: 0,
                 post_tick: 0,
@@ -62717,6 +63232,8 @@ impl SurveyInputController {
                 route: RollingStonesRouteController {
                     session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
                     exact_campaign_phase: false,
+                    live_pre_checkpoint_walls: true,
+                    live_zero_p_route_reanchored: false,
                     opening_started: false,
                     opening_tick: 0,
                     post_tick: 0,
@@ -62745,12 +63262,20 @@ impl SurveyInputController {
                     post_bank_tick: None,
                 },
                 first_token_tick: None,
+                first_wall_reanchored: false,
+                first_gap_jump_done: false,
+                first_gap_jump_hold: 0,
+                zero_i_gap_jump_done: false,
+                zero_i_gap_jump_hold: 0,
+                zero_x_platform_jump_done: false,
+                zero_x_platform_jump_hold: 0,
                 bridge_center_last_x: None,
                 bridge_phase_ready: false,
                 second_pickup_wait: false,
                 second_exit_tick: None,
                 zero_y_ledge_jump_done: false,
                 zero_y_ledge_jump_hold: 0,
+                zero_y_platform_approach_jump_done: false,
                 zero_y_platform_jump_armed: false,
                 zero_y_platform_jump_done: false,
                 zero_a_platform_jump_done: false,
@@ -63083,7 +63608,7 @@ impl SurveyInputController {
         }
     }
 
-    fn on_restart(&mut self) {
+    fn on_restart(&mut self, current_held: u32) {
         if self.profile == SurveyInputProfile::JungleDeathAkuCompletionRoute {
             self.jungle_restarted = true;
             self.jungle_restart_tick = 0;
@@ -63123,7 +63648,7 @@ impl SurveyInputController {
             self.high_road.jump_hold = 0;
         }
         if self.profile == SurveyInputProfile::CortexPowerCompletionRoute {
-            self.cortex_power = CortexPowerCompletionRouteController::default();
+            self.cortex_power.reset_for_restart(current_held);
         }
         if matches!(
             self.profile,
@@ -63597,6 +64122,7 @@ struct ProgramObjectTrace {
 #[derive(Debug)]
 struct OwnedZone {
     eid: Eid,
+    world_count: usize,
     entities: Vec<ZoneEntity>,
 }
 
@@ -64321,7 +64847,11 @@ fn bonus_replay_exit_uses_returned_parent_entry_boundary_and_source_final_pad() 
         .record_frame(1, PAD_CROSS)
         .expect("synthetic bonus input is physical");
     source_pad.update(PAD_CROSS);
-    source_pad.recovery.load_states = 1;
+    source_pad.recovery = BrowserReplayRecoveryCounters {
+        hard_restarts: 1,
+        load_states: 1,
+        ..BrowserReplayRecoveryCounters::default()
+    };
 
     let mut returned_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, parent);
     returned_runtime
@@ -64357,8 +64887,8 @@ fn bonus_replay_exit_uses_returned_parent_entry_boundary_and_source_final_pad() 
     );
     assert_eq!(
         document["exitCheckpoint"]["retailHardRestarts"],
-        serde_json::json!(1),
-        "the protected parent restart belongs to the returned entry boundary"
+        serde_json::json!(2),
+        "the cross-level LoadState and protected parent restart both belong to the returned entry"
     );
     assert_eq!(
         document["finalPad"],
@@ -64623,6 +65153,7 @@ struct LevelSurvey {
     next_lid: Option<(u32, i32)>,
     cross_level_restart: Option<(u32, LevelId)>,
     replay_entry_boundary: Option<BrowserReplayEntryBoundary>,
+    replay_entry_player: Option<PlayerTrace>,
     pending_browser_replay: Option<PendingBrowserReplay>,
 }
 
@@ -64694,6 +65225,7 @@ impl LevelSurvey {
             next_lid: None,
             cross_level_restart: None,
             replay_entry_boundary: None,
+            replay_entry_player: None,
             pending_browser_replay: None,
         }
     }
@@ -64975,6 +65507,24 @@ fn zone_catalog(
     graph: &RetailZoneGraph,
     level: LevelId,
 ) -> Result<(BTreeMap<Eid, OwnedZone>, ZoneLifecycle), String> {
+    zone_catalog_at_initial_zone(
+        nsd,
+        nsf,
+        nsf_bytes,
+        graph,
+        graph.spawn_path().zone,
+        level != LevelId::TITLE,
+    )
+}
+
+fn zone_catalog_at_initial_zone(
+    nsd: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    graph: &RetailZoneGraph,
+    initial_zone: Eid,
+    activation_marker: bool,
+) -> Result<(BTreeMap<Eid, OwnedZone>, ZoneLifecycle), String> {
     let mut zones = BTreeMap::new();
     let mut lifecycle_zones = Vec::with_capacity(graph.zone_count());
     for node in graph.zones() {
@@ -65015,13 +65565,14 @@ fn zone_catalog(
             node.eid,
             OwnedZone {
                 eid: node.eid,
+                world_count: header.worlds.len(),
                 entities,
             },
         );
     }
     let mut lifecycle = ZoneLifecycle::new(lifecycle_zones).map_err(|error| error.to_string())?;
     lifecycle
-        .transition_with_marker(graph.spawn_path().zone, level != LevelId::TITLE)
+        .transition_with_marker(initial_zone, activation_marker)
         .map_err(|error| error.to_string())?;
     Ok((zones, lifecycle))
 }
@@ -66923,7 +67474,7 @@ fn update_camera(
     runtime: &mut RetailRuntime,
     host: &mut PagedNsfProgramHost<'_, '_>,
     survey: &mut LevelSurvey,
-    held_buttons: u32,
+    pad: RetailPadSnapshot,
 ) -> Result<(), String> {
     let shared_game_state = runtime
         .global_word(GAME_STATE_GLOBAL)
@@ -66975,7 +67526,7 @@ fn update_camera(
     } else if display_mask & 0x2 != 0x2 {
         camera.stationary_step()
     } else if matches!(mode, 5 | 6) {
-        let input = follow_input(runtime, level, held_buttons)?
+        let input = follow_input(runtime, level, pad.held)?
             .ok_or_else(|| "follow camera has no main-object input".to_owned())?;
         camera
             .update_follow(graph, input)
@@ -66986,7 +67537,7 @@ fn update_camera(
             })?
     } else {
         camera
-            .update(graph, RetailCameraInput::default())
+            .update(graph, RetailCameraInput { tapped: pad.tapped })
             .map_err(|error| {
                 format!(
                     "{error}; mode={mode} camera={camera_before:?} display-mask={display_mask:#010x}"
@@ -67239,6 +67790,40 @@ fn transition_sweep_preserves_button_frames_without_pressing_start() {
     assert_eq!(transition_survey_held(105), PAD_CROSS);
 }
 
+fn drain_restart_level_update_pages(
+    runtime: &mut RetailRuntime,
+    pager: &mut Pager,
+) -> Result<(), String> {
+    let step_budget = pager.page_count().saturating_mul(64).max(64);
+    for _ in 0..step_budget {
+        if pager.pending_virtual_pages().next().is_none() {
+            return Ok(());
+        }
+        let Some(outcome) = pager
+            .update_pending_virtual_page()
+            .map_err(|error| format!("synchronous restart pager update: {error:?}"))?
+        else {
+            continue;
+        };
+        match outcome {
+            PagerUpdateOutcome::Invalidated(pages) => runtime
+                .apply_platform_paging_evictions(&pages)
+                .map_err(|error| format!("publish restart page evictions: {error:?}"))?,
+            PagerUpdateOutcome::Resolved(outcome) => runtime
+                .apply_platform_paging_resolution(outcome.page, outcome.invalidated)
+                .map_err(|error| format!("publish restart page resolution: {error:?}"))?,
+        }
+    }
+    let page = pager
+        .pending_virtual_pages()
+        .next()
+        .expect("an exhausted restart update budget retains a pending page");
+    Err(format!(
+        "synchronous restart pager update stalled with page {} still pending",
+        page.get()
+    ))
+}
+
 fn apply_restart(
     frame: u32,
     level: LevelId,
@@ -67271,9 +67856,23 @@ fn apply_restart(
         };
     }
 
-    let plan = lifecycle
-        .plan_hard_restart(snapshot.location.path.zone, level != LevelId::TITLE)
-        .map_err(|error| error.to_string())?;
+    let active_plan = lifecycle
+        .plan_hard_restart(snapshot.location.path.zone, true)
+        .map_err(|error| format!("active hard-restart plan: {error}"))?;
+    let inactive_plan = lifecycle
+        .plan_hard_restart(snapshot.location.path.zone, false)
+        .map_err(|error| format!("inactive hard-restart plan: {error}"))?;
+    let restored_load_entries = lifecycle
+        .zone(snapshot.location.path.zone)
+        .ok_or_else(|| {
+            format!(
+                "restored lifecycle zone {} is absent",
+                snapshot.location.path.zone
+            )
+        })?
+        .load_list()
+        .entries()
+        .to_vec();
     let mut camera_preview = *camera;
     let expected_flags = u8::from(
         !runtime
@@ -67281,7 +67880,7 @@ fn apply_restart(
             .ok_or_else(|| "restart has no level-state context".to_owned())?
             .first_spawn,
     );
-    camera_preview
+    let camera_step = camera_preview
         .level_update(
             graph,
             snapshot.location.path,
@@ -67289,9 +67888,151 @@ fn apply_restart(
             expected_flags,
         )
         .map_err(|error| error.to_string())?;
+    if camera_step.after != snapshot.location {
+        return Err(format!(
+            "hard-restart camera preflight produced {:?}, not {:?}",
+            camera_step.after, snapshot.location
+        ));
+    }
     let outcome = runtime
-        .restart_saved_level_from_effect(host, captured_saved_level)
-        .map_err(|error| format!("object restart: {error:?}"))?;
+        .restart_saved_level_from_effect_with_level_update(
+            host,
+            captured_saved_level,
+            |runtime, host, boundary| {
+                if boundary.location != snapshot.location || boundary.flags != expected_flags {
+                    return Err(format!(
+                        "hard-restart LevelUpdate changed after preflight: expected {:?}/flags \
+                         {expected_flags}, got {:?}/flags {}",
+                        snapshot.location, boundary.location, boundary.flags
+                    ));
+                }
+                let plan = if boundary.effective_flag {
+                    &active_plan
+                } else {
+                    &inactive_plan
+                };
+                let mut destination_selected = false;
+                // The runtime delivered hard-restart TERM before exposing
+                // this checked LevelUpdate boundary; display flags are owned
+                // by the lifecycle commit after the fallible pager actions.
+                for action in plan.actions().iter().copied() {
+                    match action {
+                        ZoneTransitionAction::TerminateZoneObjects(_)
+                        | ZoneTransitionAction::SetDisplayFlags { .. } => {}
+                        ZoneTransitionAction::CloseEntry(eid) => {
+                            let outcome = host
+                                .pager_mut()
+                                .close_eid_retail_with_outcome(eid)
+                                .map_err(|error| format!("close restart EID {eid}: {error:?}"))?;
+                            runtime
+                                .apply_platform_paging_close(
+                                    outcome.page,
+                                    outcome.decremented,
+                                    outcome.unresolved,
+                                )
+                                .map_err(|error| format!("publish restart EID close: {error:?}"))?;
+                        }
+                        ZoneTransitionAction::ClosePage(page) => {
+                            let outcome = host
+                                .pager_mut()
+                                .close_page_retail_with_outcome(page)
+                                .map_err(|error| {
+                                    format!("close restart page {}: {error:?}", page.get())
+                                })?;
+                            runtime
+                                .apply_platform_paging_close(
+                                    outcome.page,
+                                    outcome.decremented,
+                                    outcome.unresolved,
+                                )
+                                .map_err(|error| {
+                                    format!("publish restart page close: {error:?}")
+                                })?;
+                        }
+                        ZoneTransitionAction::OpenEntry(eid) => {
+                            if !destination_selected {
+                                host.pager_mut().set_current_texture_load_eids(
+                                    restored_load_entries.iter().copied(),
+                                );
+                                destination_selected = true;
+                            }
+                            match host.pager_mut().open_eid_virtual_with_outcome(eid) {
+                                Ok(outcome) => {
+                                    let published = if outcome.resolved {
+                                        runtime.apply_platform_paging_open(
+                                            outcome.page,
+                                            outcome.invalidated,
+                                        )
+                                    } else {
+                                        runtime.apply_platform_paging_queued_open(outcome.page)
+                                    };
+                                    published.map_err(|error| {
+                                        format!("publish restart EID open: {error:?}")
+                                    })?;
+                                }
+                                Err(
+                                    PagingError::NoFreePhysicalSlot(_)
+                                    | PagingError::NoFreeTextureSlot(_),
+                                ) => {}
+                                Err(error) => {
+                                    return Err(format!("open restart EID {eid}: {error:?}"));
+                                }
+                            }
+                        }
+                        ZoneTransitionAction::OpenPage(page) => {
+                            if !destination_selected {
+                                host.pager_mut().set_current_texture_load_eids(
+                                    restored_load_entries.iter().copied(),
+                                );
+                                destination_selected = true;
+                            }
+                            match host.pager_mut().open_page_virtual_with_outcome(page) {
+                                Ok(outcome) => {
+                                    let published = if outcome.resolved {
+                                        runtime.apply_platform_paging_open(
+                                            outcome.page,
+                                            outcome.invalidated,
+                                        )
+                                    } else {
+                                        runtime.apply_platform_paging_queued_open(outcome.page)
+                                    };
+                                    published.map_err(|error| {
+                                        format!("publish restart page open: {error:?}")
+                                    })?;
+                                }
+                                Err(
+                                    PagingError::NoFreePhysicalSlot(_)
+                                    | PagingError::NoFreeTextureSlot(_),
+                                ) => {}
+                                Err(error) => {
+                                    return Err(format!(
+                                        "open restart page {}: {error:?}",
+                                        page.get()
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                if !destination_selected {
+                    host.pager_mut()
+                        .set_current_texture_load_eids(restored_load_entries.iter().copied());
+                }
+                if boundary.effective_flag {
+                    drain_restart_level_update_pages(runtime, host.pager_mut())?;
+                }
+                lifecycle
+                    .commit_hard_restart(plan)
+                    .map_err(|error| format!("commit hard-restart lifecycle: {error}"))?;
+                Ok(())
+            },
+        )
+        .map_err(|error| match error {
+            RetailRestartTransactionError::Runtime(error) => {
+                format!("object restart: {error:?}")
+            }
+            RetailRestartTransactionError::LevelUpdate(error) => error,
+        })?;
     let RetailRestartOutcome::Restarted(report) = outcome else {
         return Err("same-level snapshot requested a different stream".to_owned());
     };
@@ -67314,9 +68055,6 @@ fn apply_restart(
             );
         }
     }
-    lifecycle
-        .commit_hard_restart(&plan)
-        .map_err(|error| error.to_string())?;
     *camera = camera_preview;
     refresh_level_context(runtime, graph, lifecycle, report.snapshot.location)?;
     survey.restarts += 1;
@@ -67558,7 +68296,10 @@ fn survey_pair_with_runtime_impl(
         && runtime.draw_count() == PERSISTENT_POST_BRIO_LAB_DRAW_COUNT
         && runtime.random_seed_b() == PERSISTENT_POST_BRIO_LAB_RANDOM_SEED_B;
     let graph = graph_for_pair(level, nsd, nsf, nsf_bytes)?;
-    let (zones, mut lifecycle) = zone_catalog(nsd, nsf, nsf_bytes, &graph, level)?;
+    let initial_game_state = runtime
+        .global_word(GAME_STATE_GLOBAL)
+        .map(u32::cast_signed)
+        .map_err(|error| format!("mounted game-state global: {error:?}"))?;
     let bonus_return_snapshot = if context_source == LevelContextSource::BonusReturn {
         let snapshot = runtime
             .saved_level_state()
@@ -67570,26 +68311,48 @@ fn survey_pair_with_runtime_impl(
                 snapshot.level
             ));
         }
-        // A bonus return presents the saved camera immediately, but native
-        // still mounts the parent's ordinary spawn band long enough to create
-        // its protected Crash object. LevelRestart then moves lifecycle and
-        // camera ownership to the saved non-spawn zone. Activating the saved
-        // zone here can exclude Crash's descriptor before that restart.
+        // LdatInit replaces the ordinary spawn path with the saved parent
+        // path before its initial LevelUpdate. The protected pre-restart scan
+        // therefore belongs to this exact saved-zone neighbor band.
         Some(snapshot)
     } else {
         None
     };
+    // `LdatInit` first selects the LDAT spawn, substitutes Title's Game Over
+    // path when state 0x200 is carried, and only then applies a saved bonus
+    // return. Keep the native characterization runner on that same path so
+    // its initial camera, zone ownership, and replay boundary agree with the
+    // browser runtime.
+    let initial_path = bonus_return_snapshot.as_ref().map_or_else(
+        || {
+            if level == LevelId::TITLE && initial_game_state == 0x200 {
+                RetailPathId {
+                    zone: Eid::from_name("0b_pZ").expect("fixed Title Game Over EID is valid"),
+                    index: 0,
+                }
+            } else {
+                graph.spawn_path()
+            }
+        },
+        |snapshot| snapshot.location.path,
+    );
+    let initial_zone = initial_path.zone;
+    // Null-origin LevelUpdate is active in ordinary gameplay (including a
+    // bonus return) and inactive only while Title/PBAK game state is live.
+    let initial_level_update_active = initial_game_state != 0x600;
+    let (zones, mut lifecycle) = zone_catalog_at_initial_zone(
+        nsd,
+        nsf,
+        nsf_bytes,
+        &graph,
+        initial_zone,
+        initial_level_update_active,
+    )?;
     let mut camera = match context_source {
         LevelContextSource::FreshBoot => RetailCameraRuntime::new(&graph),
-        LevelContextSource::SessionGlobals => RetailCameraRuntime::at_path(
-            &graph,
-            graph.spawn_path(),
-            0,
-            runtime
-                .global_word(GAME_STATE_GLOBAL)
-                .map(u32::cast_signed)
-                .map_err(|error| format!("mounted camera game-state global: {error:?}"))?,
-        ),
+        LevelContextSource::SessionGlobals => {
+            RetailCameraRuntime::at_path(&graph, initial_path, 0, initial_game_state)
+        }
         LevelContextSource::BonusReturn => {
             let snapshot = bonus_return_snapshot
                 .as_ref()
@@ -67598,10 +68361,7 @@ fn survey_pair_with_runtime_impl(
                 &graph,
                 snapshot.location.path,
                 snapshot.location.progress.raw(),
-                runtime
-                    .global_word(GAME_STATE_GLOBAL)
-                    .map(u32::cast_signed)
-                    .map_err(|error| format!("bonus-return camera game-state global: {error:?}"))?,
+                initial_game_state,
             )
         }
     }
@@ -67614,7 +68374,7 @@ fn survey_pair_with_runtime_impl(
         .and_then(|path| u16::try_from(path.points.len()).ok())
         .and_then(NonZeroU16::new)
         .ok_or_else(|| "initial camera path has no representable points".to_owned())?;
-    let mut frame_state = RetailFrameState::ready(spawn_points, 0);
+    let mut frame_state = RetailFrameState::ready(spawn_points, camera.location().progress.raw());
     match context_source {
         LevelContextSource::FreshBoot => {
             refresh_level_context(&mut runtime, &graph, &lifecycle, camera.location())?;
@@ -67668,15 +68428,13 @@ fn survey_pair_with_runtime_impl(
     let initial_zone = lifecycle
         .current_zone()
         .ok_or_else(|| "retail lifecycle has no initial zone".to_owned())?;
-    if let Some(snapshot) = &bonus_return_snapshot {
-        let spawn_zone = graph.spawn_path().zone;
-        if initial_zone != spawn_zone {
-            return Err(format!(
-                "bonus-return lifecycle mounted {initial_zone}, not the parent spawn zone \
-                 {spawn_zone}, before protected Crash creation for {}",
-                snapshot.location.path.zone
-            ));
-        }
+    if let Some(snapshot) = &bonus_return_snapshot
+        && initial_zone != snapshot.location.path.zone
+    {
+        return Err(format!(
+            "bonus-return lifecycle mounted {initial_zone}, not saved zone {}",
+            snapshot.location.path.zone
+        ));
     }
     let initial_load_list = lifecycle
         .zone(initial_zone)
@@ -67690,25 +68448,43 @@ fn survey_pair_with_runtime_impl(
                 .map_err(|error| format!("invalid C1_RETAIL_PHYSICAL_PAGES={value:?}: {error}"))
         })
         .transpose()?;
-    let mut pager = match characterized_physical_pages {
-        Some(count) => Pager::mount_retail_level_with_physical_slot_count(
-            nsd,
-            nsf,
-            level,
-            initial_zone,
-            initial_load_list.entries().iter().copied(),
-            initial_load_list.pages().iter().copied(),
-            count,
-        ),
-        None => Pager::mount_retail_level(
-            nsd,
-            nsf,
-            level,
-            initial_zone,
-            initial_load_list.entries().iter().copied(),
-            initial_load_list.pages().iter().copied(),
-        ),
+    let page_update = if initial_level_update_active {
+        RetailLevelMountPageUpdate::Drain
+    } else {
+        RetailLevelMountPageUpdate::Defer
+    };
+    let initial_visibility_list = if zones
+        .get(&initial_zone)
+        .ok_or_else(|| format!("initial parsed zone {initial_zone} is absent"))?
+        .world_count
+        != 0
+    {
+        Some(
+            graph
+                .path(camera.location().path)
+                .ok_or_else(|| {
+                    format!("initial camera path {:?} is absent", camera.location().path)
+                })?
+                .visibility_list,
+        )
+    } else {
+        None
+    };
+    let mut mount_options = RetailLevelMountOptions::new(level)
+        .with_page_update(page_update)
+        .with_initial_visibility_list(initial_visibility_list);
+    if let Some(count) = characterized_physical_pages {
+        mount_options = mount_options.with_physical_slot_count(count);
     }
+    let mut pager = Pager::mount_retail_level_with_options(
+        nsd,
+        nsf,
+        level,
+        initial_zone,
+        initial_load_list.entries().iter().copied(),
+        initial_load_list.pages().iter().copied(),
+        mount_options,
+    )
     .map_err(|error| format!("initial retail pager mount: {error:?}"))?;
     runtime
         .seed_platform_paging_state_with_capacity(
@@ -67741,6 +68517,59 @@ fn survey_pair_with_runtime_impl(
     survey.replay_entry_boundary = ordinary_replay_entry;
     let mut recovery_restarts_accounted_at_entry = 0_u64;
     if let Some(snapshot) = &bonus_return_snapshot {
+        let expected_snapshot = snapshot.clone();
+        let protected_scan = lifecycle.next_frame_spawn_scan();
+        let protected_neighbors = protected_scan
+            .iter()
+            .map(|candidate| {
+                let zone = zones.get(&candidate.zone).ok_or_else(|| {
+                    format!(
+                        "bonus-return protected spawn zone {} is absent",
+                        candidate.zone
+                    )
+                })?;
+                Ok(NeighborZone {
+                    eid: zone.eid,
+                    display_flags: candidate.display_flags,
+                    entities: zone.entities.as_slice(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        runtime.set_initial_crash_save_suppressed(true);
+        let protected_attempts =
+            runtime.spawn_current_zone_neighbors(&protected_neighbors, &mut host);
+        runtime.set_initial_crash_save_suppressed(false);
+
+        let mut protected_spawn_error = None;
+        survey.spawn_attempts += protected_attempts.len() as u64;
+        for attempt in &protected_attempts {
+            match &attempt.result {
+                Ok(_) => survey.successful_spawns += 1,
+                Err(_) if expected_spawn_rejection(&attempt.result) => {
+                    survey.expected_spawn_rejections += 1;
+                }
+                Err(error) => {
+                    survey.unexpected_spawn_errors += 1;
+                    let detail = format!(
+                        "zone {} entity {} descriptor {:?}: {error:?}",
+                        attempt.zone, attempt.entity_index, attempt.descriptor
+                    );
+                    survey.record_issue("spawn", 0, detail.clone());
+                    protected_spawn_error.get_or_insert(detail);
+                }
+            }
+        }
+        drain_reclaim_diagnostics(&mut runtime, &mut survey, 0);
+        if runtime.saved_level_state() != Some(&expected_snapshot) {
+            return Err(
+                "bonus-return protected spawn changed the carried snapshot before LevelRestart"
+                    .to_owned(),
+            );
+        }
+        if let Some(error) = protected_spawn_error {
+            return Err(format!("bonus-return protected spawn failed: {error}"));
+        }
+
         let terminal = apply_restart(
             0,
             level,
@@ -67772,6 +68601,16 @@ fn survey_pair_with_runtime_impl(
             ));
         }
         drain_reclaim_diagnostics(&mut runtime, &mut survey, 0);
+        let restored_path = graph
+            .path(snapshot.location.path)
+            .ok_or_else(|| "bonus-return restored camera path is absent".to_owned())?;
+        let restored_point_count = NonZeroU16::new(
+            u16::try_from(restored_path.points.len())
+                .map_err(|_| "bonus-return restored path has too many points".to_owned())?,
+        )
+        .ok_or_else(|| "bonus-return restored path is empty".to_owned())?;
+        frame_state =
+            RetailFrameState::ready(restored_point_count, snapshot.location.progress.raw());
 
         let mounted_restarts = u32::try_from(survey.restarts)
             .map_err(|_| "bonus-return mount restart count exceeds u32".to_owned())?;
@@ -67784,6 +68623,7 @@ fn survey_pair_with_runtime_impl(
         let entry_boundary =
             BrowserReplayEntryBoundary::from_runtime(&runtime, level.get(), active_pad.recovery);
         survey.replay_entry_boundary = Some(entry_boundary);
+        survey.replay_entry_player = player_trace(&runtime)?;
         replay_capture = replay_export_dir.clone().map(|export_dir| {
             BrowserReplayCapture::configured_level_survey(
                 Some(export_dir),
@@ -67796,8 +68636,12 @@ fn survey_pair_with_runtime_impl(
             )
         });
     }
-    let mut input_controller =
-        SurveyInputController::new(input_profile, context_source, runtime.draw_count());
+    let mut input_controller = SurveyInputController::new(
+        input_profile,
+        context_source,
+        runtime.draw_count(),
+        active_pad.snapshot.held,
+    );
     input_controller.slippery_climb.post_high_road_phase = post_high_road_slippery_phase;
     input_controller.slippery_climb.actual_post_sunset_phase = actual_post_sunset_slippery_phase;
     input_controller.lights_out.actual_post_sunset_phase = actual_post_sunset_lights_phase;
@@ -69020,7 +69864,7 @@ fn survey_pair_with_runtime_impl(
         {
             survey.pad_change_samples.push((frame, held));
         }
-        let camera_held = if persistent_pad_enabled {
+        let camera_pad = if persistent_pad_enabled {
             // Source CamUpdate runs before traversal reaches Crash and calls
             // PadUpdate, so it consumes the snapshot published on the prior
             // frame (or by CoreObjectsCreate at a mount).
@@ -69032,10 +69876,17 @@ fn survey_pair_with_runtime_impl(
                 published, active_pad.snapshot,
                 "the persistent physical-pad mirror must track the VM snapshot"
             );
-            published.held
+            published
         } else {
-            held
+            RetailPadSnapshot {
+                tapped: held & !held_previous,
+                held,
+                tapped_previous,
+                held_previous,
+                held_previous_2,
+            }
         };
+        let camera_held = camera_pad.held;
         if !persistent_pad_enabled {
             let pad_snapshot = RetailPadSnapshot {
                 tapped: held & !held_previous,
@@ -69130,7 +69981,7 @@ fn survey_pair_with_runtime_impl(
             &mut runtime,
             &mut host,
             &mut survey,
-            camera_held,
+            camera_pad,
         ) {
             survey.record_issue("camera", frame, error.clone());
             survey.terminal = Some(format!("camera boundary: {error}"));
@@ -69622,7 +70473,7 @@ fn survey_pair_with_runtime_impl(
                         })?;
                     death_camera = RetailDeathCameraState::default();
                     death_camera_pose = None;
-                    input_controller.on_restart();
+                    input_controller.on_restart(active_pad.snapshot.held);
                 }
                 Err(error) => {
                     survey.record_issue("restart", frame, error.clone());
@@ -69662,7 +70513,10 @@ fn survey_pair_with_runtime_impl(
         .restarts
         .checked_sub(recovery_restarts_accounted_at_entry)
         .ok_or_else(|| "survey restart accounting moved backwards".to_owned())?;
-    let hard_restarts = u32::try_from(unaccounted_restarts)
+    let hard_restart_calls = unaccounted_restarts
+        .checked_add(u64::from(survey.cross_level_restart.is_some()))
+        .ok_or_else(|| "survey hard-restart-call count overflowed u64".to_owned())?;
+    let hard_restarts = u32::try_from(hard_restart_calls)
         .map_err(|_| "survey hard-restart count exceeds u32".to_owned())?;
     let load_states = u32::try_from(survey.effect_counts.get("load-state").copied().unwrap_or(0))
         .map_err(|_| "survey LoadState count exceeds u32".to_owned())?;
@@ -70261,7 +71115,14 @@ fn post_sunset_and_koala_carried_map_handoffs_use_isldc_selection() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn authentic_post_sunset_session_reaches_ending_and_returns_to_title() {
+fn legacy_synthetic_post_sunset_session_reaches_ending_and_returns_to_title() {
+    if std::env::var_os("C1_LEGACY_SUNSET_CARRY").is_none() {
+        return;
+    }
+
+    // This chain starts from the legacy hand-authored post-Sunset title
+    // snapshot above. The executable persistent-pad campaign chain is the
+    // supported successor; retain this fixture only as an opt-in comparison.
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -72793,7 +73654,7 @@ fn carry_boulder_dash_through_heavy_machinery(
         dr_neo_cortex.finish_checked_with_replay(cortex_runtime, LevelId::ENDING, &cortex_survey);
 
     let (ending_survey, ending_runtime) =
-        ending.run_carried_with_pad(ending_carry, SurveyInputProfile::Idle, 3_600, &mut pad);
+        ending.run_carried_with_pad(ending_carry, SurveyInputProfile::Idle, 3_396, &mut pad);
     assert_eq!(
         ending_survey.next_lid.map(|(_, lid)| lid),
         Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
@@ -72805,7 +73666,7 @@ fn carry_boulder_dash_through_heavy_machinery(
     assert!(ending_survey.is_clean(), "{}", ending_survey.summary());
     assert_eq!(
         campaign_progression_globals(&ending_runtime),
-        [0, 15, 15, 31, 4, 32, 0]
+        [0x600, 15, 15, 31, 4, 32, 0]
     );
     let title_after_ending_carry =
         ending.finish_checked_with_replay(ending_runtime, LevelId::TITLE, &ending_survey);
@@ -72815,7 +73676,7 @@ fn carry_boulder_dash_through_heavy_machinery(
     assert_eq!(title_after_ending.faulted_object_count(), 0);
     assert_eq!(
         campaign_progression_globals(&title_after_ending),
-        [0, 15, 15, 31, 4, 32, 0]
+        [0x600, 15, 15, 31, 4, 32, 0]
     );
 }
 
@@ -73533,7 +74394,7 @@ fn rolling_stones_direct_boot_reaches_level_complete() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::RollingStonesCheckpoint,
-        2_448,
+        3_000,
     )
     .expect("Rolling Stones' ordinary-pad completion route must execute");
     eprintln!("{}", survey.summary());
@@ -73544,17 +74405,17 @@ fn rolling_stones_direct_boot_reaches_level_complete() {
     assert_eq!(requested_lid, 0x2d);
     assert_eq!(survey.frames, transition_frame);
     assert!(
-        transition_frame <= 2_448,
+        transition_frame <= 3_000,
         "the ordinary-pad route must reach WarpC within its characterized budget: {}",
         survey.summary()
     );
     let expected_terminal = format!("frame {transition_frame} requested level transition to 0x2d");
     assert_eq!(survey.terminal.as_deref(), Some(expected_terminal.as_str()));
     assert_eq!(survey.successful_spawns, 117);
-    assert_eq!(survey.spawn_attempts, 29_168);
-    assert_eq!(survey.expected_spawn_rejections, 29_051);
+    assert_eq!(survey.spawn_attempts, 31_350);
+    assert_eq!(survey.expected_spawn_rejections, 31_233);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 55_122);
+    assert_eq!(survey.executions, 58_740);
     assert_eq!(survey.zone_transitions, 32);
     assert_eq!(survey.camera_ranges.len(), 45);
     assert_eq!(survey.camera_path_changes, 46);
@@ -73566,7 +74427,7 @@ fn rolling_stones_direct_boot_reaches_level_complete() {
         Eid::from_name("0O_lZ").expect("fixed Rolling Stones end-zone EID is valid")
     );
     assert_eq!(final_camera.path.index, 0);
-    assert_eq!(final_camera.progress.raw(), 9_984);
+    assert_eq!(final_camera.progress.raw(), 11_248);
     let player = player_trace(&runtime)
         .expect("Rolling Stones completion player trace must resolve")
         .expect("Rolling Stones completion must retain Crash");
@@ -73575,9 +74436,9 @@ fn rolling_stones_direct_boot_reaches_level_complete() {
         Eid::from_name("0O_lZ").expect("fixed Rolling Stones end-zone EID is valid")
     );
     assert_eq!(player.state, 32);
-    assert_eq!(player.translation, [2_235_680, 9_256_244, -1_821_440]);
+    assert_eq!(player.translation, [2_236_480, 9_256_234, -1_870_592]);
     assert_eq!(survey.final_live_objects, 22);
-    assert!(survey.max_live_objects >= 35);
+    assert!(survey.max_live_objects >= 33);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.death_camera_frames, 0);
@@ -73596,34 +74457,32 @@ fn rolling_stones_direct_boot_reaches_level_complete() {
             (1, 0),
             (278, 0x100),
             (279, 0x200),
-            (280, 0x300),
-            (281, 0x400),
-            (295, 0x500),
-            (355, 0x600),
-            (629, 0x700),
-            (1_036, 0x800),
-            (1_053, 0x900),
-            (1_159, 0xa00),
-            (1_860, 0xb00),
+            (282, 0x300),
+            (296, 0x400),
+            (716, 0x500),
+            (1_183, 0x600),
+            (1_200, 0x700),
+            (1_305, 0x800),
+            (2_068, 0x900),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples,
         [
             (1, -1, [0, 0, 0]),
-            (1_159, 8 << 8, [2_815_232, 2_979_072, 17_458_688]),
+            (1_305, 8 << 8, [2_815_232, 2_979_072, 17_458_688]),
         ]
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_159, 0x900)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_305, 0x700)]);
     for defeated in [
-        (626, 18, 3),
-        (690, 15, 3),
-        (825, 49, 3),
-        (845, 57, 3),
-        (1_117, 72, 3),
-        (1_159, 8, 9),
-        (1_696, 86, 3),
-        (1_860, 92, 3),
+        (713, 18, 3),
+        (833, 15, 3),
+        (966, 49, 3),
+        (991, 57, 3),
+        (1_264, 72, 3),
+        (1_305, 8, 9),
+        (1_856, 86, 3),
+        (2_068, 92, 3),
     ] {
         assert!(
             survey.spawn_flag_samples.contains(&defeated),
@@ -73654,7 +74513,7 @@ fn rolling_stones_direct_boot_reaches_level_complete() {
             "WarpC state {state} must execute before the authored transition"
         );
     }
-    assert_eq!(runtime.machine().random_seed(), 0xfb2e_6e83);
+    assert_eq!(runtime.machine().random_seed(), 0x9ab1_e822);
     assert_eq!(runtime.draw_count(), transition_frame);
     assert!(
         survey.is_clean(),
@@ -87993,6 +88852,82 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
         let returned_entry_boundary = great_gate_survey
             .replay_entry_boundary
             .expect("bonus-return survey must retain its post-restart entry boundary");
+        assert_eq!(
+            returned_entry_boundary.checkpoint,
+            BrowserReplayCheckpoint {
+                current_lid: great_gate.get(),
+                mounted_lid: great_gate.get(),
+                retail_draw_count: 0,
+                retail_process_draw_count: 0,
+                retail_random_seed: 0xdb22_6995,
+                retail_random_seed_b: 0,
+                retail_hard_restarts: 3,
+                retail_load_states: 2,
+                retail_death_camera_frames: 0,
+                title_state: TitleScreen::Map.raw(),
+            },
+            "the bonus fragment must join the exact post-LevelRestart source boundary"
+        );
+        assert_eq!(
+            returned_entry_boundary.progression,
+            BrowserReplayProgression {
+                game_state: 0x300,
+                title_state: TitleScreen::Map.raw(),
+                saved_title_state: TitleScreen::Map.raw(),
+                current_map_level: 3,
+                level_count: 4,
+                levels_unlocked: 3,
+                island_camera_state: 0,
+            }
+        );
+        assert_eq!(
+            great_gate_survey.replay_entry_player.map(|player| (
+                player.zone,
+                player.state,
+                player.code_address,
+                player.translation,
+            )),
+            Some((
+                Eid::from_name("c5_iZ").expect("fixed Great Gate return-zone EID is valid"),
+                0,
+                CodeAddress {
+                    segment: CodeSegment::External,
+                    pc: 49,
+                },
+                [5_426_944, -8_346_368, 127_744],
+            )),
+            "the source handle-six fallback must be observable at the exact mount boundary"
+        );
+        let returned_first_frame = great_gate_survey
+            .first_frame_phase
+            .expect("returned Great Gate must complete one ordinary parent frame");
+        assert_eq!(
+            (
+                returned_first_frame.draw_count,
+                returned_first_frame.random_seed,
+                returned_first_frame.random_seed_b,
+                returned_first_frame.executions,
+            ),
+            (1, 0xaacb_c502, 0, 22)
+        );
+        assert_eq!(
+            returned_first_frame.player.map(|player| (
+                player.zone,
+                player.state,
+                player.code_address,
+                player.translation,
+            )),
+            Some((
+                Eid::from_name("c5_iZ").expect("fixed Great Gate return-zone EID is valid"),
+                40,
+                CodeAddress {
+                    segment: CodeSegment::External,
+                    pc: 2_695,
+                },
+                [5_426_944, -8_346_368, 127_744],
+            )),
+            "the first completed resume frame must enter Crash's ordinary gameplay state"
+        );
         bonus_survey
             .export_finished_browser_replay_to_entry_boundary(great_gate, returned_entry_boundary)
             .expect("Bonus 2 replay export must join the mounted Great Gate entry");
@@ -88010,6 +88945,12 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
         );
         assert_eq!(great_gate_survey.death_camera_frames, 0);
         assert!(great_gate_survey.first_terminal_fall.is_none());
+        assert_eq!(
+            great_gate_survey.frames,
+            514,
+            "{}",
+            great_gate_survey.summary()
+        );
         assert_eq!(
             great_gate_survey.next_lid.map(|(_, lid)| lid),
             Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
@@ -88194,7 +89135,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
         );
         assert_eq!(
             great_gate_completion_runtime.machine().random_seed(),
-            0x1ec0_e8b3
+            0xf0c4_4217
         );
         assert_eq!(great_gate_completion_runtime.draw_count(), 739);
         let post_great_gate_title_carry: RetailSessionCarry = {
@@ -88221,7 +89162,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 .expect("Great Gate completion replay export must finish at Title");
             report.carry
         };
-        assert_eq!(post_great_gate_title_carry.random_seed, 0x1ec0_e8b3);
+        assert_eq!(post_great_gate_title_carry.random_seed, 0xf0c4_4217);
         assert_eq!(post_great_gate_title_carry.draw_count, 739);
         let mut post_great_gate_map = AuthoredTitleMapHarness::from_session_with_pad(
             &title_nsd,
@@ -88275,7 +89216,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
         );
         assert_eq!(
             post_great_gate_map.runtime.machine().random_seed(),
-            0xd8ea_c65d
+            0xf1f2_f77a
         );
         assert_eq!(post_great_gate_map.runtime.draw_count(), 992);
         let (boulders_carry, next_pad) = post_great_gate_map.finish_transition(boulders);
@@ -88301,7 +89242,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 1,
             ]
         );
-        assert_eq!(boulders_carry.random_seed, 0xd8ea_c65d);
+        assert_eq!(boulders_carry.random_seed, 0xf1f2_f77a);
         assert_eq!(boulders_carry.draw_count, 992);
         let (boulders_nsd, boulders_nsf, boulders_nsf_bytes) =
             parse_local_pair(&root, boulders).expect("Boulders pair must parse");
@@ -88345,7 +89286,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
         assert_eq!(boulders_survey.unexpected_spawn_errors, 0);
         assert_eq!(
             boulders_survey.executions,
-            18_201,
+            18_226,
             "{}",
             boulders_survey.summary()
         );
@@ -88446,7 +89387,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
         assert_eq!(completion_route_survey.spawn_attempts, 28_891);
         assert_eq!(completion_route_survey.expected_spawn_rejections, 28_797);
         assert_eq!(completion_route_survey.unexpected_spawn_errors, 0);
-        assert_eq!(completion_route_survey.executions, 56_422);
+        assert_eq!(completion_route_survey.executions, 56_447);
         assert_eq!(completion_route_survey.zone_transitions, 24);
         assert_eq!(completion_route_survey.camera_ranges.len(), 48);
         assert_eq!(completion_route_survey.camera_path_changes, 47);

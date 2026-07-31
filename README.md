@@ -46,6 +46,18 @@ publishes its next state before `LevelUpdate`, while mode eight publishes after 
 Menu → Map → N. Sanity Cross route emits and mounts retail level `0x09` rather than stopping at a
 host boundary.
 
+The strongest completed campaign proof is legally local and runs in a real Chrome-compatible
+browser. It starts at the retail publisher/title opening, preserves process state and physical pad
+history across authored mounts, follows the main-map campaign through every gameplay, boss, bonus,
+Level Complete and island-map phase, defeats Dr. Neo Cortex, executes Ending, and returns to Title.
+The owned-raw-BIN run recognized all 88 streams and 44/44 pairs, executed 141,776 captured replay
+frames plus 96 bounded transition-settle frames, and finished at Title with draw/process count
+130,740 and RNG-A `0x3b704e12`. It skipped no replay frame and reported no checkpoint, runtime,
+GOOL, zone, spawn, console, network, or WebGL failure. Its three hard-restart calls and two
+LoadState effects are the expected source bonus-return transactions, not recovery from a failed
+route. Stormy Ascent separately has a clean native direct-boot route to its authored end warp;
+secret-key integration and the corresponding browser route remain explicit parity gates.
+
 The browser now owns a checked retail object runtime for title, gameplay, bonus, boss, level-
 complete, intro and ending states.
 At the cooperative 30 Hz boundary it scans displayed current-zone neighbors, spawns group-three
@@ -310,22 +322,14 @@ These are deterministic native integration goldens over user-supplied local data
 playthrough or full-game parity claim; a browser exercise of this complete carried chain remains
 open.
 
-An independent legally local direct-boot route now completes Rolling Stones using only ordinary
-30 Hz pad input.
-It breaks the authored opening wall and later crates, defeats PlanC entities 18/49/57 and turtle
-entities 15/72, clears JunOC entity 69, and avoids the `0x1900` squash paths from JunOC entities
-75/77/52. BoxsC subtype-four entity 8 activates on frame 1,159: SaveState captures checkpoint
-`0x0800`, player `[2815232, 2979072, 17458688]`, and pre-increment box count `0x0900`; the live
-count then becomes `0x0a00` and spawn flags become nine. It also breaks BoxsC entity 92 on frame
-1,860, advancing the live count to `0x0b00`. Three ordinary terrain jumps carry Crash from `0M`
-into normal-route `0O` without entering alternate `0N`; a short right-jump enters end `WarpC`.
-WarpC executes states zero through four and requests Level Complete `0x2d` on frame 2,447. The
-route records 117 successful spawns from 29,168 attempts with 29,051 source-expected rejections,
-55,122 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes. Its
-final camera is `0O_lZ:0@9984`, Crash is `[2235680, 9256244, -1821440]`, and RNG is `0xfb2e6e83`
-at draw 2,447. It has no restart, state-31 squash, death camera, terminal fall, VM fault, execution
-error, or LoadState. The carried route above independently reaches the same authored end 18
-frames later.
+The exact current and session-carried Rolling Stones normal routes reach the authored end and are
+the active coverage for that level. Three older FreshBoot-family characterizations are pending
+revalidation after scheduler/controller changes: the standalone direct-completion fixture, its
+short Brio-token snapshot, and the longer Rolling Stones → Brio Bonus round trip. The current
+owned-data sweep does not count those legacy fixtures as passing, and there is not yet a
+current-campaign replacement for the Brio round trip. Their earlier direct-boot frame and phase
+measurements remain historical evidence only; this distinction does not weaken the passing
+canonical carried route.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 174-frame death camera, and the same-level checkpoint
@@ -453,10 +457,11 @@ restarts, load-state effects, faults, or checked issues. Terminal globals are
 `[0x500,15,15,14,1,15,0]`, RNG is `0xa2cc489a`/`0x654cb6a6`, and draw is 10,239. This is
 deterministic native-engine characterization, not a browser playthrough.
 
-That same fixture now continues from Road to Nowhere through Boulder Dash and every remaining
-authored main-map level and boss. It retains the characterized carried machinery and hazard phases
-for Jaws of Darkness, Castle Machinery, and The Lab, crosses Great Hall, defeats Cortex, executes
-the complete Ending stream, and remounts Title with level 32 unlocked. This is a complete native
+The canonical fixture starts at the publisher/title opening and continues without a process reset
+through the main-map campaign. From Road to Nowhere it crosses Boulder Dash and every remaining
+authored main-map level and boss, retains the characterized carried machinery and hazard phases for
+Jaws of Darkness, Castle Machinery, and The Lab, crosses Great Hall, defeats Cortex, executes the
+complete Ending stream, and remounts Title with level 32 unlocked. This is a complete native
 main-map session-carry proof over user-supplied local streams. Its documented PBAK-assisted
 Boulders, Upstream, and Lost City sections and Lost City's six recovery restarts remain part of the
 fixture; a zero-recovery browser playthrough is still a separate parity gate.
@@ -493,9 +498,11 @@ direct `0x1600 [0]` handoff into WillC state 32. The downstream cross-stream cha
 real WarpC/CardC confirmation path, observes `LoadState` on frame 301, resolves `-2` back to Jungle
 Rollers, and reproduces the protected parent remount while checking Crash's transform, camera
 path/progress, box count, and all 304 spawn words. These deterministic boundaries do not
-substitute for a browser full-playthrough. Newer legally local ordinary-pad routes physically join
-the parent, token, bonus, portal, `LoadState`, and return boundaries for representative Tawna,
-Brio, second-Tawna, and Cortex layouts; other parent-specific layouts remain to be certified.
+substitute for a browser full-playthrough. Current legally local ordinary-pad routes physically
+join the parent, token, bonus, portal, `LoadState`, and return boundaries for representative Tawna,
+second-Tawna, and Cortex layouts. The former Rolling Stones/Brio FreshBoot round trip is pending
+revalidation and is not counted as current coverage; other parent-specific layouts also remain to
+be certified.
 Follow and automatic camera movement now calls `LevelUpdate` after every successful same-path or
 crossing movement, in source order after the applicable shared game-state write. Every
 `LevelUpdate` also republishes the destination zone's graphics flags in GOOL
@@ -556,7 +563,9 @@ filled all 97 arena slots at frame 1,437. The legally local completion regressio
 authored credits sequence through 113 credits-child spawns, peaks at 82 live objects while reusing
 returned slots through generation three, and requests Title `0x19` on frame 3,396 without a VM
 fault. Its checked `LEVEL_END` exports a clean session carry that a fresh Title runtime imports
-with the exact draw phase. Ending's authored ID-one main entity also takes the dedicated native
+with the exact draw phase. `GAME_STATE` remains `0x600` both immediately before Ending's
+`LEVEL_END` and on the freshly mounted frame-zero Title carry; Title clears it on its first
+authored tick. Ending's authored ID-one main entity also takes the dedicated native
 `crash` slot and now writes its initial restart snapshot exactly like executable-zero Crash, rather
 than retaining a stale snapshot from the preceding stream. The subsequent browser graph remount is
 not part of that native golden.
@@ -572,8 +581,8 @@ restart snapshots around the Title/Cortex boundary, and the Ending-to-Title draw
 The current strict direction/button survey runs all 43 bootable pairs for 5,400
 browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
-The `crust-sim` library has 596 passing tests; the locked all-target workspace inventory has 958
-default-active tests plus 133 ignored-by-default legally local tests. Native
+The `crust-sim` library enumerates 645 tests; the locked all-target workspace inventory has 1,064
+default-active tests plus 231 ignored-by-default legally local tests. Native
 warnings-denied Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm
 build gates pass.
 A final Chrome-compatible browser pass mounted the user's legally local 632 MB raw BIN through a
@@ -585,21 +594,20 @@ exercised. At 390x844 the touch surface was visible with no horizontal overflow.
 cycle persisted and reopened the version-one 15-slot virtual-card envelope. Earlier foreground
 coverage exercised the publisher screen, main menu, island map, and direct level boot. These remain
 bounded checks, not a full playthrough, physical-controller certification, or retail-parity claim.
-A later owned-raw-BIN Chromium campaign run joined the real publisher/title sequence through Papu
-Papu, Rolling Stones, its Level Complete screen, the authored map handoff, Hog Wild, its Level
-Complete screen, and the following authored map handoff in one Wasm session. It mounted Native
-Fortress at draw 22,829, completed its exact carried route, acknowledged its Level Complete screen,
-then completed Up the Creek and Ripper Roo before visibly mounting The Lost City at draw 37,277.
-Across 37,313 executed harness frames it reported zero cumulative hard restarts, LoadState effects,
-or death-camera frames and no runtime, GOOL, zone, spawn, console, network, or WebGL error. This
-materially extends browser progression evidence but still does not certify The Lost City's carried
-completion, the remaining campaign, or full retail parity.
+The completed owned-raw-BIN Chromium campaign joined the real publisher/title sequence, every
+main-map campaign phase, Dr. Neo Cortex, Ending, and the authored return to Title in one Wasm
+session. The harness executed 141,872 frames in total: 141,776 recorded route frames and 96 bounded
+settle frames, with zero skipped replay frames and zero death-camera frames. The final current and
+mounted LID are both Title `0x19`; every exact draw/RNG/transition checkpoint passed. This proves
+the ordinary NTSC-U campaign path in the browser, but it does not by itself certify every secret,
+alternate-completion, damaged-save, demo, hardware-input, or low-level SPU/CD edge case.
 See [compatibility](docs/COMPATIBILITY.md) for the exact gaps and
 [verification](docs/VERIFICATION.md) for checks actually performed.
 
 ## Run locally
 
-Requirements are Node.js 20+, Rust 1.97.0 through `rustup`, and the matching `wasm-bindgen` CLI:
+Requirements are Node.js 22.16.0 (also pinned by `package.json` and CI), Rust 1.97.0 through
+`rustup`, and the matching `wasm-bindgen` CLI:
 
 ```bash
 rustup toolchain install 1.97.0 --profile minimal --component clippy,rustfmt \
@@ -672,15 +680,22 @@ Fullscreen, pause, and mute are in the stage toolbar.
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
-cargo build --workspace --release
-cargo build --release --target wasm32-unknown-unknown -p crust-web
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy -p crust-web --target wasm32-unknown-unknown --locked -- -D warnings
+cargo clippy -p crust-web --features browser-test-harness \
+  --target wasm32-unknown-unknown --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+cargo build --workspace --release --locked
+cargo build --release --locked --target wasm32-unknown-unknown -p crust-web
+cargo build --release --locked --target wasm32-unknown-unknown -p crust-web \
+  --features browser-test-harness
 ```
 
 `npm run build` additionally generates the unavoidable JavaScript/Wasm loader into ignored
 `dist/pkg/`. All authored engine, parsing, simulation, rendering, audio, input, and persistence
 logic is Rust. Static HTML/CSS and the small Wasm bootstrap are the only hand-authored web glue.
+The explicit harness feature is compiled and warnings-denied separately so its local-only browser
+verification API cannot escape the same release gates as the production Wasm artifact.
 
 ## Workspace
 

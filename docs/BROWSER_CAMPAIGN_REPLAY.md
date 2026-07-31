@@ -148,6 +148,13 @@ not an asynchronous request in flight. Every field of one phase's `exit` must ex
 following phase's `entry`; missing fields are rejected rather than treated as wildcards. `bootLid`
 must equal the first entry LID.
 
+The recovery counters describe source calls, not only successful same-stream commits.
+`retailLoadStates` counts GOOL `LoadState` effects. `retailHardRestarts` counts every resulting
+`LevelRestart` call, including the different-level call that selects a saved parent and the
+protected same-level call performed after that parent is mounted. Consequently a bonus return adds
+one LoadState and two hard-restart calls; any earlier death/checkpoint recovery remains in both
+cumulative session totals.
+
 Base phases remain in the manifest's listed order. A `title-map` handoff names two adjacent base
 phases and supplies one or more ordinary authored fragments to run between them. At least one of
 those phases must enter the retail Title / Island Map stream (`0x19`). A normal level can therefore
@@ -243,22 +250,22 @@ post-mount pad history exactly. It never fills a missing edge or generates an in
 cover unordered input, hybrid PBAK/physical fragments, ambiguous graphs, disconnected captures,
 and one-word checkpoint and pad-history mismatches.
 
-The current legally-local full-campaign export proves an 18-phase, 16,369-frame exact chain from
-the authored Title map through N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders,
-Upstream, Papu Papu, and the authored map selection of Rolling Stones. Tracing begins at Jungle
-Rollers. The chain includes Boulders' locally reconstructed PBAK prefix as `"recorded"` input and
-Papu Papu as an ordinary physical boss route. A separate nine-phase, 9,477-frame exact branch
-proves The Great Gate's physical Tawna path, Bonus 2, its `-2` save-state return, and the remounted
-Great Gate checkpoint.
+The completed legally-local browser campaign proof starts with the real publisher/title sequence
+and follows the complete ordinary main-map route through every gameplay, boss, bonus, completion,
+and map phase, Dr. Neo Cortex, Ending, and the authored return to Title. The browser executed the
+89-phase, 141,776-frame replay discovered from 92 captures plus 96 bounded settle frames, for
+141,872 harness frames total. It consumed all 14,429 captured input runs, inserted no synthetic
+handoff, and skipped zero replay frames. Three diagnostic alternatives remain outside the canonical
+connected path.
 
-The next exact edge is intentionally still open. Rolling Stones' existing controller completes
-under the older same-frame camera/input survey ordering, but with the browser-faithful persistent
-pad path it misses the final route jump, reloads its checkpoint at frame 1,610, and therefore does
-not reach its authored transition within the 3,200-frame budget. The exporter records the failed
-Rolling Stones attempt as an isolated local fragment, but the composer refuses to attach it to
-the preceding map phase. Bosses and ending phases later in the campaign remain separate evidence
-until an unforced, controller-authentic route closes this boundary and the subsequent exact
-checkpoints. Do not describe those separate fragments as one continuous browser campaign.
+The terminal snapshot is current/mounted Title LID `0x19`, draw/process count 130,740, and RNG-A
+`0x3b704e12`. The harness reported three source hard-restart calls and two LoadState effects from
+the expected bonus-return transactions, zero death-camera frames, and no checkpoint,
+runtime/GOOL/zone/spawn, console, network, or WebGL failure. A separate nine-phase, 9,477-frame
+exact branch still proves The Great Gate's physical Tawna path, Bonus 2, its `-2` save-state return,
+and the remounted Great Gate checkpoint. The completed browser campaign is authoritative for the
+ordinary route; secret-key/Stormy Ascent integration, alternate completion, and other explicitly
+documented edge routes remain separate parity gates.
 
 Every composed gameplay, completion, and island-map segment receives:
 
@@ -271,6 +278,14 @@ harness stops at the mount request and skips the remainder after the destination
 leaking old-level input into the new stream. The final segment of every phase receives the exact
 exit expectation and its bounded settle budget. A transition that is missing, late, points to the
 wrong LID, or reaches the right LID with the wrong draw/RNG/counter state therefore fails closed.
+
+`retailRandomSeedB` remains exact native capture metadata: discovery and composition reject a
+fragment whose entry or exit RNG-B word breaks the native chain. The composed browser replay lists
+that field under `composition.browserObservedOnlyCheckpointFields` and does not compare it at a
+browser checkpoint. Native route capture has no audio host, while the browser's `RetailAudioEngine`
+legitimately advances the shared RNG-B word when it allocates SFX voices. The harness still reports
+the browser word for diagnosis; treating the native no-audio value as a browser gameplay invariant
+would turn correct WebAudio activity into a false campaign failure.
 
 Publisher/title captures are the deliberate exception: their segments omit the entry-LID guard
 because the authored opening temporarily mounts Intro before returning to Title. Their final exact

@@ -25,8 +25,8 @@ use crate::{
         AnimationLocalBoundRefresh, AnimationReference, AnimationSource, AudioHostRequest,
         AudioHostResponse, COLOR_COUNT, CURRENT_DISPLAY_GLOBAL, CURRENT_LEVEL_GLOBAL,
         CardHostRequest, CollisionObjectReference, EventDispatchOutcome, EventStateChange,
-        Execution, GoolProgramIdentity, HaltReason, INITIAL_DISPLAY_MASK, MAX_OBJECTS, Machine,
-        ModelVertexSource, NEXT_DISPLAY_GLOBAL, NearestObjectCandidate,
+        Execution, GoolProgramIdentity, HaltReason, INITIAL_DISPLAY_MASK, ITEM_POOL_1_GLOBAL,
+        MAX_OBJECTS, Machine, ModelVertexSource, NEXT_DISPLAY_GLOBAL, NearestObjectCandidate,
         ObjectHandle as VmObjectHandle, PagingHostOperation, PagingHostRequest, PagingHostResponse,
         ProcessAnimationKind, RETAIL_LEVEL_SPAWN_CAPACITY, RetailPadSnapshot,
         RetailSolidEnvironment, RetailSolidZone, RetailTransform, RetailTransformVectorsCamera,
@@ -35,9 +35,10 @@ use crate::{
     },
     math::{Angle12, Angles, Bounds3, Vec3},
     object_arena::{
-        ENEMY_OBJECT_ROOT, EntitySpawnDescriptor, NeighborZone, OBJECT_POOL_CAPACITY, ObjectArena,
-        ObjectHandle as ArenaObjectHandle, ROOT_HANDLE_COUNT, RootHandle, RuntimeCreateError,
-        SPAWN_TABLE_CAPACITY, SpawnError, SpawnedObject, TreeError, TreeParent, ZONE_OBJECT_ROOT,
+        ENEMY_OBJECT_ROOT, EntitySpawnDescriptor, MAIN_OBJECT_ROOT, NeighborZone,
+        OBJECT_POOL_CAPACITY, ObjectArena, ObjectHandle as ArenaObjectHandle, ROOT_HANDLE_COUNT,
+        RootHandle, RuntimeCreateError, SPAWN_TABLE_CAPACITY, SpawnError, SpawnedObject, TreeError,
+        TreeParent, ZONE_OBJECT_ROOT,
     },
     object_bounds::{
         AnimationBoundSource, BoundTransform, bounds_intersect_asymmetric, calculate_local_bound,
@@ -57,6 +58,11 @@ use crate::{
 /// cooperative frame. Retail follows state links synchronously; this bound
 /// preserves that ordering while reporting cycles as a typed VM failure.
 const MAX_SYNCHRONOUS_STATE_CHANGES: usize = 64;
+/// Native calls `LevelRestart` synchronously from GOOL misc 12/1, including
+/// from RESPAWN and TERM handlers that an outer restart is currently running.
+/// Retail data is acyclic here; malformed programs still need a deterministic
+/// failure instead of exhausting the Rust or browser stack.
+const MAX_SYNCHRONOUS_LEVEL_RESTARTS: usize = 8;
 /// Native GOOL completes the instruction tail after a synchronous child
 /// spawn without yielding. Keep that atomic tail bounded if malformed code
 /// never reaches an authored halt.
@@ -140,6 +146,7 @@ const CHECKPOINT_TRANSLATION_GLOBALS: [usize; 3] = [102, 103, 104];
 const DEATH_COUNT_GLOBAL: usize = 108;
 const BOX_COUNT_GLOBAL: usize = 62;
 const BONUS_ROUND_GLOBAL: usize = 60;
+const GAME_STATE_TITLE: u32 = 0x600;
 const PAUSE_OBJECT_GLOBAL: usize = 12;
 const DOCTOR_OBJECT_GLOBAL: usize = 16;
 const LIGHT_SOURCE_OBJECT_GLOBAL: usize = 54;
@@ -1872,6 +1879,10 @@ pub struct RetailRestartReport<E> {
     pub level_update_flags: u8,
     pub respawn_event_failures: Vec<RetailRespawnEventFailure<E>>,
     pub zone_reports: Vec<(Eid, ZoneTerminationReport<E>)>,
+    /// Ordered nonblocking VM effects emitted by RESPAWN/TERM handlers. Their
+    /// synchronous host mutations already occurred; the browser must still
+    /// publish presentation/transition owners before the next `CoreFrame`.
+    pub effects: Vec<VmEffect>,
     pub respawn_count: u32,
     pub death_count: u32,
     pub restored_box_count: i32,
@@ -2036,10 +2047,48 @@ pub enum RuntimeError<E> {
     Transition(RetailTransitionError),
     PendingLevelRestartAtLevelEnd,
     SameLevelRestartDuringLevelEnd(LevelId),
+    LevelRestartRecursionBudgetExhausted {
+        limit: usize,
+    },
     SavedLevelChangedAfterLoad {
         captured: LevelId,
         current: LevelId,
     },
+}
+
+/// Checked host work performed at native `LevelRestart`'s `LevelUpdate`
+/// boundary.
+///
+/// The old neighbor band and its objects have already received `RESPAWN` and
+/// `TERM`, and first-spawn words have already been restored. The saved zone's
+/// load list must become current before the handle-six Crash fallback is
+/// created. Platform hosts use this boundary to apply that ordered paging
+/// transaction without exposing native pointers to the runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailRestartLevelUpdateBoundary {
+    pub location: RetailCameraLocation,
+    /// Raw `LevelUpdate` flags supplied by `LevelRestart`. Spawn clearing and
+    /// `LevelUpdateMisc` consume these even when title state suppresses the
+    /// local activation flag.
+    pub flags: u8,
+    /// Native's local `flag` after the `GAME_STATE_TITLE` adjustment. This
+    /// selects neighbor activation and the PSX `NSUpdate2` drain. `LevelRestart`
+    /// has already cleared `cur_zone`, so no old-zone override remains.
+    pub effective_flag: bool,
+}
+
+/// Separates runtime failures from a checked platform `LevelUpdate` boundary
+/// failure without erasing either error type.
+#[derive(Debug, Eq, PartialEq)]
+pub enum RetailRestartTransactionError<E, B> {
+    Runtime(RuntimeError<E>),
+    LevelUpdate(B),
+}
+
+impl<E, B> From<RuntimeError<E>> for RetailRestartTransactionError<E, B> {
+    fn from(error: RuntimeError<E>) -> Self {
+        Self::Runtime(error)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2069,6 +2118,12 @@ struct FrameTraversalHook<'hook, F> {
 enum EventLoadStateMode {
     RequestRestart,
     ContinueDifferentLevel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NestedRestartKind {
+    SameLevel,
+    DifferentLevel,
 }
 
 /// Borrowed runtime pieces used by one native send-to-colliders traversal.
@@ -3230,9 +3285,31 @@ impl RetailRuntime {
             .apply_platform_paging_resolution(page, invalidated)
     }
 
+    /// Publishes one count-zero page materialization without acquiring a
+    /// reference. Unlike an `NSUpdate` resolution, the target may be raw or
+    /// already pending; both forms become resolved and retain their count.
+    pub fn apply_platform_paging_materialization(
+        &mut self,
+        page: PageIndex,
+        invalidated: PageInvalidations,
+    ) -> Result<(), VmError> {
+        self.machine
+            .apply_platform_program_materialization(page, invalidated)
+    }
+
     /// Publishes every zero-reference PTE re-armed by one CD-group reservation.
     pub fn apply_platform_paging_evictions(&mut self, pages: &[PageIndex]) -> Result<(), VmError> {
         self.machine.apply_platform_paging_evictions(pages)
+    }
+
+    /// Publishes title CLUT reservations that re-arm copied texture PTEs while
+    /// preserving their native reference counts.
+    pub fn apply_platform_title_texture_reservations(
+        &mut self,
+        pages: &[PageIndex],
+    ) -> Result<(), VmError> {
+        self.machine
+            .apply_platform_title_texture_reservations(pages)
     }
 
     /// Applies one browser lifecycle close outside a GOOL instruction.
@@ -3791,18 +3868,62 @@ impl RetailRuntime {
         Ok(())
     }
 
+    /// Mirrors the first assignment in native `TitleLoadState`.
+    ///
+    /// This is deliberately separate from [`Self::reset_retail_pause_for_screen_load`]:
+    /// same-stream title swaps close the old MDAT graph, clear global 74, and
+    /// may run the Main Menu global reset before `TitleLoadScreen` resets the
+    /// host pause latch and performs its second all-object termination.
+    pub fn reset_retail_title_pause_state_for_load_state(&mut self) -> Result<(), VmError> {
+        if self.machine.global_words().len() > TITLE_PAUSE_STATE_GLOBAL {
+            self.machine.set_global_word(TITLE_PAUSE_STATE_GLOBAL, 0)?;
+        }
+        Ok(())
+    }
+
     /// Refreshes the pointer-free globals consumed by retail save/restart.
     pub fn set_level_state_context(&mut self, mut context: RetailLevelStateContext) {
         if self.pending_first_spawn {
             context.first_spawn = true;
             self.pending_first_spawn = false;
         }
+        self.publish_level_state_context(context, true);
+    }
+
+    /// Publishes a successfully committed platform `LevelUpdate` from inside
+    /// one possibly recursive [`Self::restart_saved_level_from_effect_with_level_update`].
+    ///
+    /// Native `LevelUpdate` replaces `cur_zone` and its graphics globals
+    /// before a suspended outer `LevelRestart` resumes. The outer call then
+    /// reads that live destination header when choosing the neighbor band for
+    /// its TERM scan. Browser paging and lifecycle state are owned outside the
+    /// simulation, so their checked callback must rebuild the pointer-free
+    /// context and publish it through this exact source boundary.
+    ///
+    /// Unlike [`Self::set_level_state_context`], this deliberately does not
+    /// consume `pending_first_spawn`: a nested different-level `LoadState`
+    /// can arm the process-global remount while an outer same-level restart is
+    /// still completing its own `LevelUpdate`. It likewise preserves the live
+    /// checkpoint-write latch: the callback only replaces pointer-bearing
+    /// `LevelUpdate` ownership, while the recursive restart still owns the
+    /// later source-order checkpoint sample.
+    pub fn publish_restart_level_update_context(&mut self, context: RetailLevelStateContext) {
+        self.publish_level_state_context(context, false);
+    }
+
+    fn publish_level_state_context(
+        &mut self,
+        context: RetailLevelStateContext,
+        acknowledge_checkpoint_globals: bool,
+    ) {
         // Native LevelUpdate publishes this scalar before the following GOOL
         // spawn/update pass. Bonus WARP state 32 reads bit 0x2000 to select
         // LoadState instead of the ordinary Title transition.
         self.set_mount_global(CURRENT_ZONE_FLAGS_GLOBAL, context.graphics_flags);
         self.level_state_context = Some(context);
-        self.machine.acknowledge_level_state_context();
+        if acknowledge_checkpoint_globals {
+            self.machine.acknowledge_level_state_context();
+        }
     }
 
     #[must_use]
@@ -4032,19 +4153,27 @@ impl RetailRuntime {
     ///
     /// Pair parsing and path resolution happen in the browser host before this
     /// call. The runtime still validates the mounted level and live Crash
-    /// handle before publishing any mutation. `restart_saved_level` performs
-    /// the following source-ordered `LevelRestart` transaction.
+    /// handle before publishing any mutation. The PBAK header snapshot remains
+    /// externally owned and distinct from the mutable process-global save.
+    // Keep the snapshot value API paired with the following externally owned
+    // restart call: callers parse and validate one immutable PBAK header, then
+    // deliberately clone it across the two checked transaction boundaries.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn install_retail_demo_start(
         &mut self,
         snapshot: RetailLevelSnapshot,
         random_seed: u32,
         crash_bound: Bounds3,
     ) -> Result<(), RetailDemoStartError> {
+        let RetailLevelSnapshot {
+            level: recorded_level,
+            ..
+        } = snapshot;
         let mounted = self.level.ok_or(RetailDemoStartError::MissingLevel)?;
-        if snapshot.level != mounted {
+        if recorded_level != mounted {
             return Err(RetailDemoStartError::LevelMismatch {
                 mounted,
-                recorded: snapshot.level,
+                recorded: recorded_level,
             });
         }
         if self.level_state_context.is_none() {
@@ -4068,7 +4197,6 @@ impl RetailRuntime {
             .object(main.vm)
             .map_err(RetailDemoStartError::Vm)?;
 
-        self.saved_level_state = Some(snapshot);
         self.machine.set_random_seed(random_seed);
         self.machine
             .object_mut(main.vm)
@@ -4364,10 +4492,123 @@ impl RetailRuntime {
         host: &mut H,
         captured_saved_level: LevelId,
     ) -> Result<RetailRestartOutcome<H::Error>, RuntimeError<H::Error>> {
-        let snapshot = self
-            .saved_level_state
-            .clone()
-            .ok_or(RuntimeError::MissingSavedLevelState)?;
+        match self.restart_saved_level_from_effect_with_level_update(
+            host,
+            captured_saved_level,
+            |_, _, _| Ok::<(), core::convert::Infallible>(()),
+        ) {
+            Ok(outcome) => Ok(outcome),
+            Err(RetailRestartTransactionError::Runtime(error)) => Err(error),
+            Err(RetailRestartTransactionError::LevelUpdate(never)) => match never {},
+        }
+    }
+
+    /// Source-ordered restart with a checked platform `LevelUpdate` boundary.
+    ///
+    /// `level_update` is invoked only for a same-level restart, after every
+    /// `RESPAWN`/`TERM` delivery and spawn-word restoration, but before the
+    /// optional handle-six Crash fallback. An error stops at that boundary;
+    /// no fallback object or post-restart scalar reset is allowed to observe a
+    /// partially applied platform transaction.
+    pub fn restart_saved_level_from_effect_with_level_update<H, F, B>(
+        &mut self,
+        host: &mut H,
+        captured_saved_level: LevelId,
+        mut level_update: F,
+    ) -> Result<RetailRestartOutcome<H::Error>, RetailRestartTransactionError<H::Error, B>>
+    where
+        H: ProgramHost,
+        F: FnMut(&mut Self, &mut H, RetailRestartLevelUpdateBoundary) -> Result<(), B>,
+    {
+        self.restart_level_from_effect_with_level_update_source(
+            host,
+            captured_saved_level,
+            None,
+            &mut level_update,
+            0,
+        )
+    }
+
+    /// Source-ordered restart from an immutable external snapshot.
+    ///
+    /// Native PBAK headers own a save-state structure distinct from the
+    /// process-global checkpoint save. RESPAWN handlers may update the latter,
+    /// but the current demo restart must continue from this exact header.
+    pub fn restart_external_snapshot_from_effect_with_level_update<H, F, B>(
+        &mut self,
+        host: &mut H,
+        captured_saved_level: LevelId,
+        snapshot: RetailLevelSnapshot,
+        mut level_update: F,
+    ) -> Result<RetailRestartOutcome<H::Error>, RetailRestartTransactionError<H::Error, B>>
+    where
+        H: ProgramHost,
+        F: FnMut(&mut Self, &mut H, RetailRestartLevelUpdateBoundary) -> Result<(), B>,
+    {
+        self.restart_level_from_effect_with_level_update_source(
+            host,
+            captured_saved_level,
+            Some(snapshot),
+            &mut level_update,
+            0,
+        )
+    }
+
+    fn restart_level_from_effect_with_level_update_source<H, F, B>(
+        &mut self,
+        host: &mut H,
+        captured_saved_level: LevelId,
+        external_snapshot: Option<RetailLevelSnapshot>,
+        level_update: &mut F,
+        recursion_depth: usize,
+    ) -> Result<RetailRestartOutcome<H::Error>, RetailRestartTransactionError<H::Error, B>>
+    where
+        H: ProgramHost,
+        F: FnMut(&mut Self, &mut H, RetailRestartLevelUpdateBoundary) -> Result<(), B>,
+    {
+        if recursion_depth >= MAX_SYNCHRONOUS_LEVEL_RESTARTS {
+            return Err(RuntimeError::LevelRestartRecursionBudgetExhausted {
+                limit: MAX_SYNCHRONOUS_LEVEL_RESTARTS,
+            }
+            .into());
+        }
+
+        // Validate every pointer-free restart argument before reproducing the
+        // first native write (`bonus_round = 0`). In particular, an ordinary
+        // deferred LoadState must not turn a missing or cross-level mutable
+        // snapshot into a partially mutated restart transaction. A captured
+        // different-level effect is allowed to outlive a later SaveState, as
+        // documented by this API; only the captured level controls that early
+        // `-2` branch.
+        let current_level = self.level.ok_or(RuntimeError::MissingLevelStateContext)?;
+        self.level_state_context
+            .as_ref()
+            .ok_or(RuntimeError::MissingLevelStateContext)?;
+        let ordinary_entry_snapshot = if let Some(snapshot) = external_snapshot.as_ref() {
+            if snapshot.level != captured_saved_level {
+                return Err(RuntimeError::SavedLevelChangedAfterLoad {
+                    captured: captured_saved_level,
+                    current: snapshot.level,
+                }
+                .into());
+            }
+            None
+        } else {
+            let snapshot = self
+                .saved_level_state
+                .as_ref()
+                .ok_or(RuntimeError::MissingSavedLevelState)?
+                .clone();
+            if captured_saved_level == current_level && snapshot.level != captured_saved_level {
+                return Err(RuntimeError::SavedLevelChangedAfterLoad {
+                    captured: captured_saved_level,
+                    current: snapshot.level,
+                }
+                .into());
+            }
+            Some(snapshot)
+        };
+
         // Native clears bonus mode before even checking whether the saved
         // level differs and returning the `-2` remount sentinel.
         self.set_mount_global(BONUS_ROUND_GLOBAL, 0);
@@ -4376,14 +4617,8 @@ impl RetailRuntime {
         // completed its source interpreter/traversal and carries no live-tree
         // mutation, but clearing the shared latch remains harmless.
         self.machine.clear_level_restart_request();
-        if let Ok(value) = self.machine.global_word(RESPAWN_COUNT_GLOBAL) {
-            self.respawn_count = value;
-        }
-        if let Ok(value) = self.machine.global_word(DEATH_COUNT_GLOBAL) {
-            self.death_count = value;
-        }
-        let current_level = self.level.ok_or(RuntimeError::MissingLevelStateContext)?;
         if captured_saved_level != current_level {
+            self.pending_first_spawn = true;
             let context = self
                 .level_state_context
                 .as_mut()
@@ -4394,16 +4629,7 @@ impl RetailRuntime {
                 requested_level_sentinel: -2,
             });
         }
-        if snapshot.level != captured_saved_level {
-            return Err(RuntimeError::SavedLevelChangedAfterLoad {
-                captured: captured_saved_level,
-                current: snapshot.level,
-            });
-        }
-        let mut context = self
-            .level_state_context
-            .clone()
-            .ok_or(RuntimeError::MissingLevelStateContext)?;
+        let effects_start = self.machine.effects().len();
 
         // `GoolSendToColliders(..., type=0)` is an all-root postorder
         // broadcast despite its name. Checked failures are retained while the
@@ -4420,20 +4646,127 @@ impl RetailRuntime {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut respawn_event_failures = Vec::new();
+        let mut zone_reports = Vec::new();
+        let mut nested_different_level_requested = false;
         for object in recipients {
+            // A recursive same-level restart can release an object from the
+            // outer C traversal. Generational handles make that stale pointer
+            // an explicit skip instead of accidentally dispatching to a
+            // replacement that reused its physical slot.
+            if !self.handles.is_live_pair(object) {
+                continue;
+            }
+            let event_effects_start = self.machine.effects().len();
             if let Err(error) = self.dispatch_event(host, None, Some(object), RESPAWN_EVENT, None) {
                 respawn_event_failures.push(RetailRespawnEventFailure { object, error });
             }
+            let nested_restarts = self
+                .observe_nested_restart_effects::<H::Error>(event_effects_start, current_level)?;
+            for restart in nested_restarts {
+                match restart {
+                    NestedRestartKind::DifferentLevel => {
+                        nested_different_level_requested = true;
+                    }
+                    NestedRestartKind::SameLevel => {
+                        let nested = self.restart_level_from_effect_with_level_update_source(
+                            host,
+                            current_level,
+                            None,
+                            level_update,
+                            recursion_depth + 1,
+                        )?;
+                        match nested {
+                            RetailRestartOutcome::Restarted(mut report) => {
+                                respawn_event_failures.append(&mut report.respawn_event_failures);
+                                zone_reports.append(&mut report.zone_reports);
+                            }
+                            RetailRestartOutcome::DifferentLevel { .. } => {
+                                // The captured effect was same-level, but a
+                                // malformed handler can replace the mutable
+                                // save between the VM boundary and recursive
+                                // entry. Preserve its armed remount state.
+                                nested_different_level_requested = true;
+                            }
+                        }
+                    }
+                }
+            }
         }
+
+        // Native reads `cur_zone` only after the RESPAWN broadcast. A nested
+        // restart may have replaced that owner and may have armed first_spawn,
+        // so sample the live pointer-free context at the same boundary.
+        let mut context = self
+            .level_state_context
+            .clone()
+            .ok_or(RuntimeError::MissingLevelStateContext)?;
+
+        // Native assigns the process-global `obj_zone = (entry *)-1` once
+        // before scanning old neighbors. It remains that sentinel even when
+        // the active-neighbor list is empty, so later misc 12/4 cannot reuse a
+        // stale ordinary transition target.
+        self.transition_zone_context = ObjectZoneContext::HardRestartSentinel;
 
         // `obj_zone = (entry *)-1` makes every eligible object die even when
         // a TERM handler tries to migrate it. Zones retain current-header
         // neighbor order, and each report retains native postorder.
-        let mut zone_reports = Vec::with_capacity(context.active_neighbor_zones.len());
         for zone in context.active_neighbor_zones.iter().copied() {
-            let report =
-                self.terminate_zone_objects(zone, ZoneTerminationMode::HardRestart, host)?;
-            zone_reports.push((zone, report));
+            loop {
+                let event_effects_start = self.machine.effects().len();
+                let report =
+                    self.terminate_zone_objects(zone, ZoneTerminationMode::HardRestart, host)?;
+                zone_reports.push((zone, report));
+                let nested_restarts = self.observe_nested_restart_effects::<H::Error>(
+                    event_effects_start,
+                    current_level,
+                )?;
+                let mut recursed = false;
+                for restart in nested_restarts {
+                    match restart {
+                        NestedRestartKind::DifferentLevel => {
+                            nested_different_level_requested = true;
+                        }
+                        NestedRestartKind::SameLevel => {
+                            recursed = true;
+                            let nested = self.restart_level_from_effect_with_level_update_source(
+                                host,
+                                current_level,
+                                None,
+                                level_update,
+                                recursion_depth + 1,
+                            )?;
+                            match nested {
+                                RetailRestartOutcome::Restarted(mut report) => {
+                                    respawn_event_failures
+                                        .append(&mut report.respawn_event_failures);
+                                    zone_reports.append(&mut report.zone_reports);
+                                }
+                                RetailRestartOutcome::DifferentLevel { .. } => {
+                                    nested_different_level_requested = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if !recursed {
+                    break;
+                }
+                // The native outer traversal resumes after the recursive call.
+                // Restart the checked live scan for this zone; recursively
+                // mounted entity scans have not run yet, while stale original
+                // pointers are rejected by generation.
+            }
+        }
+
+        // Both counters are ordinary process globals in native. RESPAWN/TERM
+        // handlers (including a synchronous card load) run before the restart
+        // increments them, so their latest words must replace the cached Rust
+        // mirrors at this boundary.
+        if let Ok(value) = self.machine.global_word(RESPAWN_COUNT_GLOBAL) {
+            self.respawn_count = value;
+        }
+        if let Ok(value) = self.machine.global_word(DEATH_COUNT_GLOBAL) {
+            self.death_count = value;
         }
 
         // Native samples the checkpoint globals only after the RESPAWN and
@@ -4460,6 +4793,37 @@ impl RetailRuntime {
                     .map_err(RuntimeError::Vm)?
                     .cast_signed(),
             ];
+        }
+
+        // Ordinary `LevelRestart(&savestate)` aliases the mutable global
+        // structure, so a RESPAWN handler's misc 12/0 write above changes the
+        // remaining restore fields. PBAK passes its distinct header snapshot
+        // here instead and deliberately ignores such global save mutations.
+        let mut snapshot = external_snapshot
+            .or_else(|| self.saved_level_state.clone())
+            .ok_or(RuntimeError::MissingSavedLevelState)?;
+        if snapshot.level != captured_saved_level {
+            if nested_different_level_requested {
+                // A nested different-level `LevelRestart(&savestate)` writes
+                // first_spawn/next_lid=-2 and returns immediately. Native's
+                // outer call then aliases that now cross-stream structure,
+                // which can dereference a ZDAT from the wrong NS stream. Keep
+                // the entry-validated same-level value for the outer restore
+                // while retaining the ordered LoadState effect and remount
+                // request; this is the narrow safe replacement for that C UB.
+                snapshot = ordinary_entry_snapshot.clone().ok_or(
+                    RuntimeError::SavedLevelChangedAfterLoad {
+                        captured: captured_saved_level,
+                        current: snapshot.level,
+                    },
+                )?;
+            } else {
+                return Err(RuntimeError::SavedLevelChangedAfterLoad {
+                    captured: captured_saved_level,
+                    current: snapshot.level,
+                }
+                .into());
+            }
         }
 
         let first_spawn = context.first_spawn;
@@ -4489,20 +4853,61 @@ impl RetailRuntime {
             self.arena.spawn_table_mut().restore(words);
         }
 
-        // Hard restart preserves non-title Crash. It is an explicit checked
-        // boundary if no main object exists; fabricating a program without the
-        // source's handle-six create path would corrupt state silently.
-        let main_arena = self
-            .arena
-            .main_object()
-            .ok_or(RuntimeError::MissingMainObject)?;
-        let main = self
-            .handles
-            .for_arena(main_arena)
-            .ok_or(RuntimeError::MissingMainObject)?;
+        let level_update_flags = u8::from(!first_spawn);
+        let game_state = self
+            .machine
+            .global_word(GAME_STATE_GLOBAL)
+            .map_err(RuntimeError::Vm)?;
+        let effective_level_update_flag = if game_state == GAME_STATE_TITLE {
+            level_update_flags & 2 != 0
+        } else {
+            true
+        };
+        // Native `LevelUpdate` clears the transient first item pool on every
+        // actual zone change, including the null-origin call made by
+        // `LevelRestart`. Publish that write before the platform boundary so
+        // paging/lifecycle observers see the same source state.
+        self.set_mount_global(ITEM_POOL_1_GLOBAL, 0);
+        level_update(
+            self,
+            host,
+            RetailRestartLevelUpdateBoundary {
+                location: snapshot.location,
+                flags: level_update_flags,
+                effective_flag: effective_level_update_flag,
+            },
+        )
+        .map_err(RetailRestartTransactionError::LevelUpdate)?;
+
+        // Hard restart normally preserves non-title Crash. A bonus return,
+        // however, first scans the saved camera zone; that active band can
+        // legitimately omit Crash's entity descriptor. Native then performs
+        // `GoolObjectCreate(&handles[6], 0, 0, ..., 1)` after LevelUpdate and
+        // before restoring the saved transform. Reuse the checked root-program
+        // path for that exact fallback instead of changing which zone was
+        // mounted or inventing an entity/spawn-table owner.
+        let main = if let Some(main_arena) = self.arena.main_object() {
+            self.handles
+                .for_arena(main_arena)
+                .ok_or(RuntimeError::MissingMainObject)?
+        } else {
+            self.create_root_program(
+                MAIN_OBJECT_ROOT.index(),
+                snapshot.location.path.zone,
+                0,
+                0,
+                &[],
+                true,
+                host,
+            )?
+        };
+        let main_arena = main.arena;
         self.arena
             .set_zone(main_arena, snapshot.location.path.zone)
             .map_err(RuntimeError::Tree)?;
+        let restored_solid_environment = host
+            .solid_environment(snapshot.location.path.zone)
+            .map_err(RuntimeError::Program)?;
         // Native clears only Crash's current collider pair. Other surviving
         // objects can retain asymmetric collider links to Crash; DoctC uses
         // exactly that link to accept a mask after a death restart.
@@ -4510,6 +4915,10 @@ impl RetailRuntime {
             .clear_retail_collider_pair(main.vm)
             .map_err(RuntimeError::Vm)?;
         let player = self.machine.object_mut(main.vm).map_err(RuntimeError::Vm)?;
+        if let Some(environment) = restored_solid_environment {
+            player.refresh_retail_object_zone_environment(environment);
+        }
+        player.set_retail_solid_zone_eid(Some(snapshot.location.path.zone));
         for (register, value) in [
             (
                 process_register::TRANSLATION_X,
@@ -4576,6 +4985,15 @@ impl RetailRuntime {
         } else {
             0
         };
+        // A nested different-level `LevelRestart` sets the process-global
+        // `first_spawn` and `next_lid = -2`, then returns to the outer
+        // same-level restart. Native consumes `first_spawn` here after the
+        // outer LevelUpdate while deliberately leaving `next_lid` armed for
+        // CoreFrame. Clear both Rust mirrors of that scalar without removing
+        // the ordered LoadState effect that carries the `-2` handshake.
+        if first_spawn {
+            self.pending_first_spawn = false;
+        }
         self.set_mount_global(BOX_COUNT_GLOBAL, restored_box_count.cast_unsigned());
         if let Some(live_context) = self.level_state_context.as_mut() {
             live_context.location = snapshot.location;
@@ -4589,6 +5007,23 @@ impl RetailRuntime {
         // before its first post-restart entity scan.
         self.reset_retail_box_spawn_state();
         Self::refresh_tree_links(&self.arena, &self.handles, &mut self.machine)?;
+        // Same-level LoadState effects in this slice have already executed as
+        // recursive LevelRestart calls. Publishing them again would make the
+        // browser repeat the transaction; different-level effects remain the
+        // ordered `next_lid = -2` handshake.
+        let effects = self.machine.effects()[effects_start..]
+            .iter()
+            .filter(|effect| {
+                !matches!(
+                    effect,
+                    VmEffect::LoadState {
+                        saved_level: Some(saved_level),
+                        ..
+                    } if *saved_level == current_level
+                )
+            })
+            .cloned()
+            .collect();
 
         Ok(RetailRestartOutcome::Restarted(Box::new(
             RetailRestartReport {
@@ -4596,11 +5031,48 @@ impl RetailRuntime {
                 level_update_flags: u8::from(!first_spawn),
                 respawn_event_failures,
                 zone_reports,
+                effects,
                 respawn_count: self.respawn_count,
                 death_count: self.death_count,
                 restored_box_count,
             },
         )))
+    }
+
+    /// Applies the scalar half of nested `LevelRestart` calls emitted since one
+    /// immediate event boundary and reports whether a recursive same-level
+    /// structural restart is required.
+    fn observe_nested_restart_effects<E>(
+        &mut self,
+        effects_start: usize,
+        current_level: LevelId,
+    ) -> Result<Vec<NestedRestartKind>, RuntimeError<E>> {
+        let saved_levels = self.machine.effects()[effects_start..]
+            .iter()
+            .filter_map(|effect| match effect {
+                VmEffect::LoadState { saved_level, .. } => Some(*saved_level),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut restarts = Vec::with_capacity(saved_levels.len());
+        for saved_level in saved_levels {
+            let saved_level = saved_level.ok_or(RuntimeError::Vm(VmError::MissingHostEffect))?;
+            if saved_level == current_level {
+                restarts.push(NestedRestartKind::SameLevel);
+            } else {
+                // This is the immediate scalar branch at the nested native
+                // call site. GOOL continues after a different-level load; the
+                // retained effect supplies the ordered browser `next_lid=-2`
+                // request once this outer checked transaction commits.
+                self.pending_first_spawn = true;
+                self.level_state_context
+                    .as_mut()
+                    .ok_or(RuntimeError::MissingLevelStateContext)?
+                    .first_spawn = true;
+                restarts.push(NestedRestartKind::DifferentLevel);
+            }
+        }
+        Ok(restarts)
     }
 
     /// Installs one port's complete retail pad history before object
@@ -8132,6 +8604,9 @@ impl RetailRuntime {
                     queue_cleanup_actions,
                     &mut report,
                 )?;
+                if machine.level_restart_requested() {
+                    return Ok(report);
+                }
                 child = sibling;
             }
         }
@@ -8190,6 +8665,9 @@ impl RetailRuntime {
                 queue_cleanup_actions,
                 report,
             )?;
+            if machine.level_restart_requested() {
+                return Ok(());
+            }
             child = sibling;
         }
 
@@ -8281,6 +8759,13 @@ impl RetailRuntime {
             report
                 .event_failures
                 .push(ZoneTerminationEventFailure { object, error });
+        }
+        // misc 12/1 entered LevelRestart synchronously. Leave this live cursor
+        // before killing the caller or visiting another stale sibling; the
+        // owning restart transaction performs the recursive structural call
+        // and then resumes through checked generations.
+        if machine.level_restart_requested() {
+            return Ok(());
         }
         // Nested TERM/misc work may already have reclaimed this exact
         // generation. Native then has no remaining lifecycle work for it.
@@ -9985,6 +10470,21 @@ mod tests {
             | (operand as u32 & 0x0fff)
     }
 
+    const fn control_flow(
+        operation: u32,
+        condition: u32,
+        register: u32,
+        argument_count: u32,
+        target: u32,
+    ) -> u32 {
+        (0x82_u32 << 24)
+            | ((operation & 3) << 22)
+            | ((condition & 3) << 20)
+            | ((register & 0x3f) << 14)
+            | ((argument_count & 0xf) << 10)
+            | (target & 0x03ff)
+    }
+
     const fn event_service_return() -> u32 {
         // Opcode 0x88, guarded-null return used by the synthetic ESR tests.
         0x8880_0000
@@ -10232,6 +10732,43 @@ mod tests {
         context.graphics_flags = 0x0404;
         runtime.set_level_state_context(context);
         assert_eq!(runtime.global_word(CURRENT_ZONE_FLAGS_GLOBAL), Ok(0x0404));
+    }
+
+    #[test]
+    fn restart_level_update_context_preserves_a_pending_first_spawn_remount() {
+        let mut runtime = RetailRuntime::new_for_level(119, LevelId::new_const(0x25));
+        runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+        runtime.pending_first_spawn = true;
+        runtime
+            .set_global_word(CHECKPOINT_ID_GLOBAL, 7 << 8)
+            .unwrap();
+        assert!(runtime.machine.checkpoint_globals_changed_since_context());
+        let mut context = level_context(ZONE_B, false, vec![ZONE_B]);
+        context.graphics_flags = 0x2404;
+
+        runtime.publish_restart_level_update_context(context);
+
+        assert!(
+            runtime.pending_first_spawn,
+            "the checked restart boundary must not consume a nested remount latch"
+        );
+        assert!(
+            !runtime.level_state_context().unwrap().first_spawn,
+            "publishing the synchronous LevelUpdate does not invent a context write"
+        );
+        assert_eq!(runtime.global_word(CURRENT_ZONE_FLAGS_GLOBAL), Ok(0x2404));
+        assert!(
+            runtime.machine.checkpoint_globals_changed_since_context(),
+            "the recursive restart still owns its later checkpoint sample"
+        );
+
+        runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+        assert!(!runtime.pending_first_spawn);
+        assert!(!runtime.machine.checkpoint_globals_changed_since_context());
+        assert!(
+            runtime.level_state_context().unwrap().first_spawn,
+            "the ordinary destination-mount boundary still consumes the latch"
+        );
     }
 
     #[test]
@@ -11206,6 +11743,35 @@ mod tests {
             runtime.take_pause_event_faults(),
             [RuntimePauseEventFault { object: controller }]
         );
+    }
+
+    #[test]
+    fn title_load_state_clears_only_its_pause_gate_before_screen_load_reset() {
+        let mut runtime =
+            RetailRuntime::new_for_level(PBAK_STATE_GLOBAL + 1, LevelId::N_SANITY_BEACH);
+        let mut host = SnapshotHost;
+        let RetailPauseUpdate::Paused { controller } =
+            runtime.update_retail_pause(true, ZONE, &mut host).unwrap()
+        else {
+            unreachable!();
+        };
+        runtime
+            .set_global_word(TITLE_PAUSE_STATE_GLOBAL, 0x55)
+            .unwrap();
+        let pause_before = runtime.retail_pause_state();
+        let pause_object_before = runtime.global_word(PAUSE_OBJECT_GLOBAL).unwrap();
+
+        runtime
+            .reset_retail_title_pause_state_for_load_state()
+            .unwrap();
+
+        assert_eq!(runtime.global_word(TITLE_PAUSE_STATE_GLOBAL), Ok(0));
+        assert_eq!(runtime.retail_pause_state(), pause_before);
+        assert_eq!(
+            runtime.global_word(PAUSE_OBJECT_GLOBAL),
+            Ok(pause_object_before)
+        );
+        assert_eq!(runtime.object_for_vm(controller.vm), Some(controller));
     }
 
     #[test]
@@ -18867,7 +19433,11 @@ mod tests {
             .set_global_word(CHECKPOINT_ID_GLOBAL, 7 << 8)
             .unwrap();
         runtime.set_random_seed_b(0xd3dc_167e);
-        let snapshot = level_snapshot(level);
+        let mut checkpoint_save = level_snapshot(level);
+        checkpoint_save.player_translation = [111, 222, 333];
+        runtime.saved_level_state = Some(checkpoint_save.clone());
+        let mut snapshot = level_snapshot(level);
+        snapshot.player_translation = [444, 555, 666];
         let bound = Bounds3 {
             min: Vec3 {
                 x: -10,
@@ -18885,7 +19455,7 @@ mod tests {
             .install_retail_demo_start(snapshot.clone(), 0x1234_5678, bound)
             .unwrap();
 
-        assert_eq!(runtime.saved_level_state(), Some(&snapshot));
+        assert_eq!(runtime.saved_level_state(), Some(&checkpoint_save));
         assert_eq!(runtime.machine.random_seed(), 0x1234_5678);
         assert_eq!(runtime.random_seed_b(), 0xd3dc_167e);
         assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(u32::MAX));
@@ -19306,8 +19876,9 @@ mod tests {
         }
         runtime.draw_count = 99;
 
+        let mut host = SolidZoneHost::default();
         let RetailRestartOutcome::Restarted(report) =
-            runtime.restart_saved_level(&mut SnapshotHost).unwrap()
+            runtime.restart_saved_level(&mut host).unwrap()
         else {
             panic!("same-level save must restart locally");
         };
@@ -19326,6 +19897,8 @@ mod tests {
         assert_eq!(runtime.object_for_arena(main.arena), Some(main));
         assert_eq!(runtime.arena.get(main.arena).unwrap().zone(), ZONE_B);
         let player = runtime.machine.object(main.vm).unwrap();
+        assert_eq!(player.retail_solid_zone_eid(), Some(ZONE_B));
+        assert_eq!(host.calls, [ZONE_B]);
         for (register, expected) in [
             (process_register::TRANSLATION_X, 100_i32),
             (process_register::TRANSLATION_Y, 200),
@@ -19454,6 +20027,212 @@ mod tests {
     }
 
     #[test]
+    fn first_spawn_restart_creates_the_source_handle_six_crash_fallback() {
+        let level = LevelId::new_const(0x03);
+        let expected_snapshot = level_snapshot(level);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        runtime.saved_level_state = Some(expected_snapshot.clone());
+        runtime.set_level_state_context(level_context(ZONE, true, vec![ZONE]));
+
+        assert!(
+            runtime.arena().main_object().is_none(),
+            "the saved-zone pre-restart scan may legitimately omit Crash"
+        );
+
+        let RetailRestartOutcome::Restarted(report) =
+            runtime.restart_saved_level(&mut SnapshotHost).unwrap()
+        else {
+            panic!("same-level first spawn must restart locally");
+        };
+
+        assert_eq!(report.snapshot, expected_snapshot);
+        assert_eq!(report.level_update_flags, 0);
+        assert_eq!(report.restored_box_count, 0x900);
+        assert!(report.respawn_event_failures.is_empty());
+        assert_eq!(report.zone_reports.len(), 1);
+        assert!(report.zone_reports[0].1.event_failures.is_empty());
+
+        let main_arena = runtime
+            .arena()
+            .main_object()
+            .expect("LevelRestart must create Crash under handle six");
+        assert!(main_arena.is_dedicated_main());
+        let spawned = runtime
+            .arena()
+            .get(main_arena)
+            .expect("the created main arena handle must remain live");
+        assert_eq!(spawned.parent(), TreeParent::Root(MAIN_OBJECT_ROOT));
+        assert_eq!(
+            spawned.origin(),
+            crate::object_arena::ObjectOrigin::Runtime {
+                executable: 0,
+                subtype: 0,
+            }
+        );
+        assert_eq!(spawned.zone(), expected_snapshot.location.path.zone);
+
+        let main = runtime
+            .object_for_arena(main_arena)
+            .expect("the source fallback must have a checked VM mapping");
+        let player = runtime
+            .machine()
+            .object(main.vm)
+            .expect("the source fallback VM must remain live");
+        for (register, expected) in [
+            (
+                process_register::TRANSLATION_X,
+                expected_snapshot.player_translation[0],
+            ),
+            (
+                process_register::TRANSLATION_Y,
+                expected_snapshot.player_translation[1],
+            ),
+            (
+                process_register::TRANSLATION_Z,
+                expected_snapshot.player_translation[2],
+            ),
+            (
+                process_register::ROTATION_Y,
+                expected_snapshot.player_rotation_yxz[0],
+            ),
+            (
+                process_register::ROTATION_X,
+                expected_snapshot.player_rotation_yxz[1],
+            ),
+            (
+                process_register::ROTATION_Z,
+                expected_snapshot.player_rotation_yxz[2],
+            ),
+            (process_register::SCALE_X, expected_snapshot.player_scale[0]),
+            (process_register::SCALE_Y, expected_snapshot.player_scale[1]),
+            (process_register::SCALE_Z, expected_snapshot.player_scale[2]),
+        ] {
+            assert_eq!(
+                player.register(register).unwrap().cast_signed(),
+                expected,
+                "register {register}"
+            );
+        }
+        assert_eq!(
+            runtime.saved_level_state(),
+            Some(&expected_snapshot),
+            "the handle-six fallback must not replace the carried snapshot"
+        );
+        assert!(!runtime.level_state_context().unwrap().first_spawn);
+        assert_eq!(runtime.respawn_count, 0);
+        assert_eq!(runtime.death_count, 0);
+    }
+
+    #[test]
+    fn restart_level_update_boundary_follows_teardown_and_precedes_crash_fallback() {
+        let level = LevelId::new_const(0x03);
+        let mut expected_snapshot = level_snapshot(level);
+        expected_snapshot.spawn_words[42] = 0x1f;
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let old_zone_object = spawn_test_object(&mut runtime, ZONE, 42, 2, 0);
+        runtime.saved_level_state = Some(expected_snapshot.clone());
+        runtime.set_level_state_context(level_context(ZONE, true, vec![ZONE]));
+        runtime.set_global_word(ITEM_POOL_1_GLOBAL, 99).unwrap();
+        let mut boundary_seen = false;
+
+        let outcome = runtime
+            .restart_saved_level_from_effect_with_level_update(
+                &mut SnapshotHost,
+                level,
+                |runtime, _host, boundary| {
+                    boundary_seen = true;
+                    assert_eq!(boundary.location, expected_snapshot.location);
+                    assert_eq!(boundary.flags, 0);
+                    assert_eq!(runtime.global_word(ITEM_POOL_1_GLOBAL), Ok(0));
+                    assert!(
+                        boundary.effective_flag,
+                        "non-title LevelUpdate activates neighbors and drains PSX paging"
+                    );
+                    assert!(
+                        runtime.object_for_arena(old_zone_object.arena).is_none(),
+                        "hard-restart TERM must finish before LevelUpdate"
+                    );
+                    assert!(
+                        runtime.arena().main_object().is_none(),
+                        "handle-six Crash fallback must follow LevelUpdate"
+                    );
+                    assert_eq!(
+                        runtime.arena().spawn_table().flags(42),
+                        Some(0x1e),
+                        "first-spawn restoration must precede LevelUpdate"
+                    );
+                    Ok::<(), ()>(())
+                },
+            )
+            .unwrap();
+
+        assert!(boundary_seen);
+        assert!(matches!(outcome, RetailRestartOutcome::Restarted(_)));
+        assert!(
+            runtime.arena().main_object().is_some(),
+            "the checked LevelUpdate boundary must resume into Crash fallback"
+        );
+    }
+
+    #[test]
+    fn failed_restart_level_update_boundary_stops_before_crash_fallback() {
+        let level = LevelId::new_const(0x03);
+        let expected_snapshot = level_snapshot(level);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        runtime.saved_level_state = Some(expected_snapshot);
+        runtime.set_level_state_context(level_context(ZONE, true, vec![ZONE]));
+
+        let result = runtime.restart_saved_level_from_effect_with_level_update(
+            &mut SnapshotHost,
+            level,
+            |runtime, _host, _boundary| {
+                assert!(runtime.arena().main_object().is_none());
+                Err("checked LevelUpdate failure")
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(RetailRestartTransactionError::LevelUpdate(
+                "checked LevelUpdate failure"
+            ))
+        );
+        assert!(
+            runtime.arena().main_object().is_none(),
+            "a failed platform LevelUpdate must not create fallback Crash"
+        );
+    }
+
+    #[test]
+    fn title_state_restart_exposes_the_suppressed_level_update_flag() {
+        let level = LevelId::new_const(0x03);
+        let expected_snapshot = level_snapshot(level);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        runtime.saved_level_state = Some(expected_snapshot);
+        runtime.set_level_state_context(level_context(ZONE, true, vec![ZONE]));
+        runtime
+            .set_global_word(GAME_STATE_GLOBAL, GAME_STATE_TITLE)
+            .unwrap();
+
+        let outcome = runtime
+            .restart_saved_level_from_effect_with_level_update(
+                &mut SnapshotHost,
+                level,
+                |_runtime, _host, boundary| {
+                    assert_eq!(boundary.flags, 0, "raw first-spawn flag is preserved");
+                    assert!(
+                        !boundary.effective_flag,
+                        "GAME_STATE_TITLE reduces native's local flag to raw flags & 2"
+                    );
+                    Ok::<(), ()>(())
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(outcome, RetailRestartOutcome::Restarted(_)));
+    }
+
+    #[test]
     fn restart_samples_checkpoint_globals_after_respawn_handlers() {
         let level = LevelId::new_const(0x03);
         let mut runtime = RetailRuntime::new_for_level(119, level);
@@ -19498,6 +20277,571 @@ mod tests {
         let context = runtime.level_state_context().unwrap();
         assert_eq!(context.checkpoint_id, 7 << 8);
         assert_eq!(context.checkpoint_translation, [4 << 8, 5 << 8, 6 << 8]);
+    }
+
+    #[test]
+    fn restart_report_retains_ordered_respawn_transition_and_fade_effects() {
+        let level = LevelId::new_const(0x03);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        runtime.set_level_state_context(level_context(ZONE, false, Vec::new()));
+        runtime.save_level_state(main, false).unwrap();
+        let process = runtime.machine.object_mut(main.vm).unwrap();
+        process
+            .configure_test_event_interrupt(
+                RESPAWN_EVENT,
+                vec![misc(12, 9, 0x0e00), misc(12, 5, 0x0be0), RETURN],
+            )
+            .unwrap();
+        process.set_register(0, 0x17 << 8).unwrap();
+
+        let RetailRestartOutcome::Restarted(report) =
+            runtime.restart_saved_level(&mut SnapshotHost).unwrap()
+        else {
+            panic!("same-level save must restart locally");
+        };
+
+        assert_eq!(
+            report.effects,
+            [
+                VmEffect::Transition(0x17),
+                VmEffect::ResetMasterFadeStep { object: main.vm },
+            ]
+        );
+    }
+
+    #[test]
+    fn restart_increments_live_counters_written_by_respawn_handler() {
+        let level = LevelId::new_const(0x03);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        runtime.set_level_state_context(level_context(ZONE, false, Vec::new()));
+        runtime.save_level_state(main, false).unwrap();
+        runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .configure_test_event_interrupt(
+                RESPAWN_EVENT,
+                vec![
+                    Instruction::encode(0x20, 0x0807, 0x0805),
+                    Instruction::encode(0x20, 0x0804, 0x086c),
+                    RETURN,
+                ],
+            )
+            .unwrap();
+
+        let RetailRestartOutcome::Restarted(report) =
+            runtime.restart_saved_level(&mut SnapshotHost).unwrap()
+        else {
+            panic!("same-level save must restart locally");
+        };
+
+        assert_eq!(report.respawn_count, 0x800);
+        assert_eq!(report.death_count, 0x500);
+        assert_eq!(runtime.global_word(RESPAWN_COUNT_GLOBAL), Ok(0x800));
+        assert_eq!(runtime.global_word(DEATH_COUNT_GLOBAL), Ok(0x500));
+    }
+
+    #[test]
+    fn respawn_save_aliases_ordinary_restart_but_not_external_pbak_snapshot() {
+        let level = LevelId::new_const(0x03);
+        let setup = || {
+            let mut runtime = RetailRuntime::new_for_level(119, level);
+            let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+            runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+            runtime
+                .machine
+                .object_mut(main.vm)
+                .unwrap()
+                .set_register(process_register::TRANSLATION_X, 100)
+                .unwrap();
+            runtime.save_level_state(main, false).unwrap();
+            let external = runtime.saved_level_state().unwrap().clone();
+            runtime
+                .machine
+                .object_mut(main.vm)
+                .unwrap()
+                .set_register(process_register::TRANSLATION_X, 900)
+                .unwrap();
+            runtime
+                .machine
+                .object_mut(main.vm)
+                .unwrap()
+                .configure_test_event_interrupt(RESPAWN_EVENT, vec![misc(12, 0, 0x0be0), RETURN])
+                .unwrap();
+            (runtime, main, external)
+        };
+
+        let (mut ordinary, ordinary_main, _) = setup();
+        let RetailRestartOutcome::Restarted(report) =
+            ordinary.restart_saved_level(&mut SnapshotHost).unwrap()
+        else {
+            panic!("ordinary restart must remain in the mounted level");
+        };
+        assert_eq!(report.snapshot.player_translation[0], 900);
+        assert_eq!(
+            ordinary.saved_level_state().unwrap().player_translation[0],
+            900
+        );
+        assert_eq!(
+            ordinary
+                .machine
+                .object(ordinary_main.vm)
+                .unwrap()
+                .register(process_register::TRANSLATION_X),
+            Ok(900)
+        );
+
+        let (mut pbak, pbak_main, external) = setup();
+        let RetailRestartOutcome::Restarted(report) = pbak
+            .restart_external_snapshot_from_effect_with_level_update(
+                &mut SnapshotHost,
+                level,
+                external,
+                |_, _, _| Ok::<(), ()>(()),
+            )
+            .unwrap()
+        else {
+            panic!("PBAK restart must remain in the mounted level");
+        };
+        assert_eq!(report.snapshot.player_translation[0], 100);
+        assert_eq!(
+            pbak.saved_level_state().unwrap().player_translation[0],
+            900,
+            "RESPAWN SaveState still updates the independent global save"
+        );
+        assert_eq!(
+            pbak.machine
+                .object(pbak_main.vm)
+                .unwrap()
+                .register(process_register::TRANSLATION_X),
+            Ok(100),
+            "the immutable PBAK header remains the restart argument"
+        );
+    }
+
+    #[test]
+    fn respawn_load_state_runs_recursive_level_updates_and_consumes_its_marker() {
+        let level = LevelId::new_const(0x03);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        runtime.saved_level_state = Some(level_snapshot(level));
+        runtime.set_level_state_context(level_context(ZONE, false, Vec::new()));
+        runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .configure_test_event_interrupt(
+                RESPAWN_EVENT,
+                vec![
+                    // First invocation jumps over RETURN, marks itself, emits
+                    // one ordered presentation effect, then synchronously
+                    // loads. The recursive RESPAWN sees the retained marker
+                    // and returns without loading again.
+                    control_flow(0, 2, TEST_CONDITION_REGISTER as u32, 0, 1),
+                    RETURN,
+                    Instruction::encode(0x11, 0x0801, 0x0e00 | TEST_CONDITION_REGISTER as u16),
+                    misc(12, 5, 0x0be0),
+                    misc(12, 1, 0x0be0),
+                    Instruction::encode(0x11, 0x0805, TEST_SCALAR_OPERAND_A),
+                    RETURN,
+                ],
+            )
+            .unwrap();
+        let mut level_updates = Vec::new();
+
+        let RetailRestartOutcome::Restarted(report) = runtime
+            .restart_saved_level_from_effect_with_level_update(
+                &mut SnapshotHost,
+                level,
+                |_, _, boundary| {
+                    level_updates.push(boundary);
+                    Ok::<(), ()>(())
+                },
+            )
+            .unwrap()
+        else {
+            panic!("same-level outer restart must complete locally");
+        };
+
+        assert_eq!(
+            level_updates.len(),
+            2,
+            "nested update precedes outer update"
+        );
+        assert!(level_updates.iter().all(|boundary| boundary.flags == 1));
+        assert_eq!(
+            report.effects,
+            [VmEffect::ResetMasterFadeStep { object: main.vm }],
+            "the recursive LoadState marker is consumed exactly once"
+        );
+        assert_eq!(
+            runtime
+                .machine
+                .object(main.vm)
+                .unwrap()
+                .register(TEST_SCALAR_REGISTER_A),
+            Ok(0),
+            "safe recursive replacement does not resume stale handler code after LoadState"
+        );
+        assert!(!runtime.machine.level_restart_requested());
+        assert_eq!(report.respawn_count, 0x200);
+    }
+
+    #[test]
+    fn respawn_nested_restart_publishes_destination_band_before_outer_term_scan() {
+        const NESTED_GRAPHICS_FLAGS: u32 = 0x2468;
+        const OUTER_GRAPHICS_FLAGS: u32 = 0x1357;
+
+        let level = LevelId::new_const(0x03);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let loader = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        let destination_object = spawn_test_object(&mut runtime, ZONE_B, 6, 2, 0);
+        let untouched_object = spawn_test_object(&mut runtime, ZONE_C, 7, 2, 0);
+        let mut snapshot = level_snapshot(level);
+        snapshot.location = level_location(ZONE_B, 2, 0x345);
+        runtime.saved_level_state = Some(snapshot);
+        runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+        runtime
+            .machine
+            .object_mut(loader.vm)
+            .unwrap()
+            .configure_test_event_interrupt(
+                RESPAWN_EVENT,
+                vec![
+                    // The outer RESPAWN synchronously loads once. The nested
+                    // broadcast sees this marker and returns normally.
+                    control_flow(0, 2, TEST_CONDITION_REGISTER as u32, 0, 1),
+                    RETURN,
+                    Instruction::encode(0x11, 0x0801, 0x0e00 | TEST_CONDITION_REGISTER as u16),
+                    misc(12, 1, 0x0be0),
+                    RETURN,
+                ],
+            )
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(destination_object.vm)
+            .unwrap()
+            .configure_test_event_interrupt(
+                TERMINATE_EVENT,
+                vec![
+                    // Snapshot global 30 while the destination TERM handler
+                    // is live and publish it through an observable typed
+                    // effect. The final outer callback publishes a distinct
+                    // value, so this proves the scan happened after the
+                    // nested callback and before the outer one.
+                    Instruction::encode(0x1f, 0x0be0, 0x0800 | CURRENT_ZONE_FLAGS_GLOBAL as u16),
+                    Instruction::encode(0x11, 0x0e1f, TEST_SCALAR_OPERAND_A),
+                    misc(12, 6, TEST_SCALAR_OPERAND_A),
+                    misc(12, 5, 0x0be0),
+                    RETURN,
+                ],
+            )
+            .unwrap();
+        let mut level_update_count = 0_usize;
+
+        let RetailRestartOutcome::Restarted(report) = runtime
+            .restart_saved_level_from_effect_with_level_update(
+                &mut SnapshotHost,
+                level,
+                |runtime, _, boundary| {
+                    level_update_count += 1;
+                    if level_update_count == 2 {
+                        assert_eq!(
+                            runtime.global_word(CURRENT_ZONE_FLAGS_GLOBAL),
+                            Ok(NESTED_GRAPHICS_FLAGS),
+                            "the suspended outer restart must retain nested LevelUpdate graphics"
+                        );
+                    }
+                    let mut context = level_context(ZONE_B, false, vec![ZONE_B]);
+                    context.location = boundary.location;
+                    context.graphics_flags = if level_update_count == 1 {
+                        NESTED_GRAPHICS_FLAGS
+                    } else {
+                        OUTER_GRAPHICS_FLAGS
+                    };
+                    runtime.publish_restart_level_update_context(context);
+                    Ok::<(), ()>(())
+                },
+            )
+            .unwrap()
+        else {
+            panic!("same-level outer restart must complete locally");
+        };
+
+        assert_eq!(level_update_count, 2, "nested update precedes outer update");
+        assert_eq!(
+            report
+                .zone_reports
+                .iter()
+                .map(|(zone, _)| *zone)
+                .collect::<Vec<_>>(),
+            [ZONE, ZONE_B],
+            "the nested restart scans the old band, then the outer restart samples its destination"
+        );
+        assert!(runtime.object_for_arena(destination_object.arena).is_none());
+        assert!(
+            report.effects.contains(&VmEffect::MidiTogglePlayback {
+                object: destination_object.vm,
+                value: NESTED_GRAPHICS_FLAGS,
+            }),
+            "the outer destination TERM observes graphics published by the nested LevelUpdate"
+        );
+        assert!(
+            report.effects.contains(&VmEffect::ResetMasterFadeStep {
+                object: destination_object.vm
+            }),
+            "the destination object's authored TERM handler must run"
+        );
+        assert!(
+            runtime.object_for_arena(untouched_object.arena).is_some(),
+            "a zone outside both disjoint active bands is not terminated"
+        );
+        assert!(
+            report
+                .zone_reports
+                .iter()
+                .all(|(_, report)| report.event_failures.is_empty()),
+            "destination TERM handler faulted: {:?}",
+            report.zone_reports
+        );
+        assert_eq!(
+            runtime.global_word(CURRENT_ZONE_FLAGS_GLOBAL),
+            Ok(OUTER_GRAPHICS_FLAGS),
+            "the final outer LevelUpdate remains authoritative"
+        );
+        assert_eq!(
+            runtime.level_state_context().unwrap().active_neighbor_zones,
+            [ZONE_B]
+        );
+    }
+
+    #[test]
+    fn terminate_load_state_recurses_before_kill_then_resumes_checked_zone_scan() {
+        let level = LevelId::new_const(0x03);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let _main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        let loader = spawn_test_object(&mut runtime, ZONE, 6, 2, 0);
+        runtime.saved_level_state = Some(level_snapshot(level));
+        runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+        runtime
+            .machine
+            .object_mut(loader.vm)
+            .unwrap()
+            .configure_test_event_interrupt(
+                TERMINATE_EVENT,
+                vec![
+                    control_flow(0, 2, TEST_CONDITION_REGISTER as u32, 0, 1),
+                    RETURN,
+                    Instruction::encode(0x11, 0x0801, 0x0e00 | TEST_CONDITION_REGISTER as u16),
+                    misc(12, 5, 0x0be0),
+                    misc(12, 1, 0x0be0),
+                    RETURN,
+                ],
+            )
+            .unwrap();
+        let mut level_updates = Vec::new();
+
+        let RetailRestartOutcome::Restarted(report) = runtime
+            .restart_saved_level_from_effect_with_level_update(
+                &mut SnapshotHost,
+                level,
+                |_, _, boundary| {
+                    level_updates.push(boundary);
+                    Ok::<(), ()>(())
+                },
+            )
+            .unwrap()
+        else {
+            panic!("same-level outer restart must complete locally");
+        };
+
+        assert_eq!(
+            level_updates.len(),
+            2,
+            "nested update precedes outer update"
+        );
+        assert!(runtime.object_for_arena(loader.arena).is_none());
+        assert_eq!(
+            report.effects,
+            [VmEffect::ResetMasterFadeStep { object: loader.vm }]
+        );
+        assert_eq!(
+            report
+                .zone_reports
+                .iter()
+                .flat_map(|(_, zone)| zone.terminated.iter())
+                .filter(|object| **object == loader)
+                .count(),
+            1,
+            "the recursive scan kills the original generation exactly once"
+        );
+        assert!(!runtime.machine.level_restart_requested());
+    }
+
+    #[test]
+    fn nested_different_level_load_arms_remount_before_outer_level_update() {
+        let current = LevelId::new_const(0x03);
+        let saved = LevelId::new_const(0x09);
+        let external = level_snapshot(current);
+        let mut runtime = RetailRuntime::new_for_level(119, current);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        // PBAK owns `external`; the ordinary global save can independently
+        // name another level when a RESPAWN handler executes misc 12/1.
+        runtime.saved_level_state = Some(level_snapshot(saved));
+        runtime.set_level_state_context(level_context(ZONE, false, Vec::new()));
+        runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .configure_test_event_interrupt(
+                RESPAWN_EVENT,
+                vec![
+                    misc(12, 5, 0x0be0),
+                    misc(12, 1, 0x0be0),
+                    Instruction::encode(0x11, 0x0805, TEST_SCALAR_OPERAND_A),
+                    RETURN,
+                ],
+            )
+            .unwrap();
+        let mut level_update_flags = Vec::new();
+
+        let RetailRestartOutcome::Restarted(report) = runtime
+            .restart_external_snapshot_from_effect_with_level_update(
+                &mut SnapshotHost,
+                current,
+                external,
+                |runtime, _, boundary| {
+                    level_update_flags.push(boundary.flags);
+                    assert!(runtime.export_session_carry().first_spawn);
+                    assert!(runtime.level_state_context().unwrap().first_spawn);
+                    Ok::<(), ()>(())
+                },
+            )
+            .unwrap()
+        else {
+            panic!("the outer PBAK restart remains same-level");
+        };
+
+        assert_eq!(level_update_flags, [0]);
+        assert_eq!(
+            report.effects,
+            [
+                VmEffect::ResetMasterFadeStep { object: main.vm },
+                VmEffect::LoadState {
+                    object: main.vm,
+                    saved_level: Some(saved),
+                },
+            ],
+            "the remount marker remains ordered for the browser"
+        );
+        assert_eq!(
+            runtime
+                .machine
+                .object(main.vm)
+                .unwrap()
+                .register(TEST_SCALAR_REGISTER_A),
+            Ok(0x500),
+            "different-level LevelRestart returns to the live GOOL handler"
+        );
+        assert!(
+            !runtime.level_state_context().unwrap().first_spawn,
+            "the successful outer restart consumes native first_spawn"
+        );
+        assert!(
+            !runtime.export_session_carry().first_spawn,
+            "the consumed first_spawn must not leak into the later remount carry"
+        );
+    }
+
+    #[test]
+    fn malformed_recursive_respawn_load_hits_the_checked_restart_budget() {
+        let level = LevelId::new_const(0x03);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        runtime.saved_level_state = Some(level_snapshot(level));
+        runtime.set_level_state_context(level_context(ZONE, false, Vec::new()));
+        runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .configure_test_event_interrupt(RESPAWN_EVENT, vec![misc(12, 1, 0x0be0), RETURN])
+            .unwrap();
+        let mut level_update_count = 0;
+
+        let result = runtime.restart_saved_level_from_effect_with_level_update(
+            &mut SnapshotHost,
+            level,
+            |_, _, _| {
+                level_update_count += 1;
+                Ok::<(), ()>(())
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(RetailRestartTransactionError::Runtime(
+                RuntimeError::LevelRestartRecursionBudgetExhausted {
+                    limit: MAX_SYNCHRONOUS_LEVEL_RESTARTS,
+                }
+            ))
+        );
+        assert_eq!(level_update_count, 0);
+        assert_eq!(
+            runtime
+                .machine
+                .effects()
+                .iter()
+                .filter(|effect| matches!(effect, VmEffect::LoadState { .. }))
+                .count(),
+            MAX_SYNCHRONOUS_LEVEL_RESTARTS
+        );
+    }
+
+    #[test]
+    fn ordinary_restart_rejects_missing_or_invalid_snapshot_before_mutation() {
+        let current = LevelId::new_const(0x03);
+        let different = LevelId::new_const(0x09);
+
+        let mut missing = RetailRuntime::new_for_level(119, current);
+        missing.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+        missing.set_global_word(BONUS_ROUND_GLOBAL, 0x100).unwrap();
+        missing.machine.request_level_restart();
+        let missing_before = missing.clone();
+        assert_eq!(
+            missing.restart_saved_level_from_effect_with_level_update(
+                &mut SnapshotHost,
+                current,
+                |_, _, _| Ok::<(), ()>(()),
+            ),
+            Err(RetailRestartTransactionError::Runtime(
+                RuntimeError::MissingSavedLevelState
+            ))
+        );
+        assert_eq!(missing, missing_before);
+
+        let mut invalid = RetailRuntime::new_for_level(119, current);
+        invalid.saved_level_state = Some(level_snapshot(different));
+        invalid.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+        invalid.set_global_word(BONUS_ROUND_GLOBAL, 0x100).unwrap();
+        invalid.machine.request_level_restart();
+        let invalid_before = invalid.clone();
+        assert_eq!(
+            invalid.restart_saved_level_from_effect_with_level_update(
+                &mut SnapshotHost,
+                current,
+                |_, _, _| Ok::<(), ()>(()),
+            ),
+            Err(RetailRestartTransactionError::Runtime(
+                RuntimeError::SavedLevelChangedAfterLoad {
+                    captured: current,
+                    current: different,
+                }
+            ))
+        );
+        assert_eq!(invalid, invalid_before);
     }
 
     #[test]

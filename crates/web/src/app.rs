@@ -55,17 +55,19 @@ use crust_sim::object_arena::NeighborZone;
 use crust_sim::object_bounds::AnimationBoundSource;
 use crust_sim::paging::{
     PageInvalidations, Pager, PagerCloseOutcome, PagerOpenOutcome, PagerUpdateOutcome, PagingError,
-    TextureFrameSnapshot,
+    RetailCorePagePreloadOutcome, RetailLevelMountOptions, RetailLevelMountPageUpdate,
+    TextureFrameSnapshot, TextureSlotCarrySnapshot,
 };
 use crust_sim::retail_frame::{PresentedFrame, RetailFrameState};
 use crust_sim::retail_runtime::{
     AnimationBoundBinding, CardHostResponse, ISLAND_CAMERA_ROTATION_GLOBAL,
     ISLAND_CAMERA_STATE_GLOBAL, ModelVertexBinding, NsfProgramError, NsfProgramHost,
-    ProgramBinding, ProgramHost, RetailCoreObjects, RetailDemoFinishOutcome,
-    RetailLevelStateContext, RetailPauseUpdate, RetailRestartOutcome, RetailRuntime,
-    RetailSaveStateOutcome, RetailSessionCarry, RetailThunderCue, RetailTitleAction,
-    RetailTraversalBoundary, RetailZoneEnvironment, RuntimeCleanupAction, RuntimeError,
-    RuntimeFrame, RuntimeObjectHandle, StateProgramBinding, ZoneTerminationMode,
+    ProgramBinding, ProgramHost, RetailCoreObjects, RetailDemoFinishOutcome, RetailLevelSnapshot,
+    RetailLevelStateContext, RetailPauseUpdate, RetailRestartLevelUpdateBoundary,
+    RetailRestartOutcome, RetailRestartTransactionError, RetailRuntime, RetailSaveStateOutcome,
+    RetailSessionCarry, RetailThunderCue, RetailTitleAction, RetailTraversalBoundary,
+    RetailZoneEnvironment, RuntimeCleanupAction, RuntimeError, RuntimeFrame, RuntimeObjectHandle,
+    StateProgramBinding, ZoneTerminationMode, ZoneTerminationReport,
 };
 use crust_sim::scheduler::{FRAME_US, FrameDecision, FrameScheduler};
 use crust_sim::zone_lifecycle::{
@@ -90,9 +92,16 @@ use crate::card_persistence::CardPersistIntent;
 use crate::disc_import::discover_disc;
 use crate::display::DisplaySettings;
 use crate::dom::{Dom, window};
+use crate::paging_boundary::{
+    RetailPagingPublication, RetailTitleEntryPlan, drain_retail_level_update_pages,
+    retail_level_update_opens_visibility, stage_retail_level_update_physical_prefix,
+    stage_retail_level_update_physical_suffix, stage_retail_title_entries_close,
+    stage_retail_title_entries_open,
+};
 use crate::pbak_runtime::{
     PbakFrameTiming, RetailPbakPlayback, pbak_event_pad_snapshot, prepare_pair_pbak,
 };
+use crate::restart_transaction::{RestartLevelUpdateAudit, RestartTransactionOwners};
 use crate::retail_clock::advance_retail_shader_clock;
 use crate::retail_scene::{
     RetailMapPathAnimation, RetailSceneBuilder, RetailScenePresentation,
@@ -107,11 +116,12 @@ use crate::title_runtime::{
 use crate::webaudio::WebAudio;
 use crate::webgl::{GlStage, RetailBackgroundFill, VisualState};
 #[cfg(feature = "browser-test-harness")]
-use crate::{BrowserTestClock, BrowserTestPadInput};
+use crate::{BrowserTestClock, BrowserTestCumulativeMetrics, BrowserTestPadInput};
 use crate::{
-    RetailIslandWritebackPhase, apply_all_levels_override, authoritative_save_or_last,
-    core_objects_pad_update, initial_retail_level_state, require_render_object_snapshot,
-    retail_island_state_writeback,
+    RetailIslandWritebackPhase, RetailRestartResume, RetailTickState, apply_all_levels_override,
+    authoritative_save_or_last, core_objects_pad_update, initial_retail_level_state,
+    require_render_object_snapshot, retail_game_state_after_pbak_choose,
+    retail_initial_level_update_is_active, retail_island_state_writeback, retail_ldat_initial_path,
 };
 #[cfg(feature = "browser-test-harness")]
 use crust_sim::gool::{INITIAL_LIFE_COUNT_GLOBAL, LIFE_COUNT_GLOBAL};
@@ -448,6 +458,7 @@ impl App {
 struct OwnedRetailZone {
     eid: Eid,
     graphics: ZoneGraphics,
+    world_count: usize,
     entities: Vec<ZoneEntity>,
 }
 
@@ -466,14 +477,6 @@ struct RetailRuntimeMetrics {
     zone_terminated_objects: u64,
     zone_event_failures: u64,
     camera_save_handshakes: u64,
-}
-
-#[cfg(feature = "browser-test-harness")]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct BrowserTestCumulativeMetrics {
-    hard_restarts: u64,
-    load_states: u64,
-    death_camera_frames: u64,
 }
 
 impl RetailRuntimeMetrics {
@@ -505,14 +508,6 @@ impl RetailRuntimeMetrics {
             .saturating_add(frame.spawned_children.len() as u64);
         self.effects = self.effects.saturating_add(frame.effects.len() as u64);
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RetailTickState {
-    NeedsSpawn,
-    PausedBeforeSpawn,
-    Running,
-    Paused,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -846,6 +841,30 @@ enum PreparedRetailMusic {
     Music(Eid, Box<RetailMusic>),
 }
 
+type RetailRestartTransactionOwners = RestartTransactionOwners<
+    RetailRuntime,
+    RetailAudioEngine,
+    Pager,
+    VirtualCard,
+    Option<StorageState>,
+>;
+
+/// Clones every subsystem reachable from synchronous restart host calls.
+/// Rejected caption/RESPAWN/TERM/paging/card work therefore cannot leak a
+/// partially advanced owner into the mounted browser runtime.
+fn begin_retail_restart_transaction(runtime: &Runtime) -> RetailRestartTransactionOwners {
+    RestartTransactionOwners::begin(
+        &runtime.retail_objects,
+        &runtime.retail_audio,
+        &runtime.retail_zone_pager,
+        &runtime.card,
+        &runtime
+            .storage
+            .as_ref()
+            .map(StorageState::begin_card_transaction),
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PbakArmedPresentation {
     PreviousScene,
@@ -1055,10 +1074,15 @@ impl Runtime {
                 pair.level
             ))
         })?;
+        // LevelInitGlobals seeds game_state zero before the first LdatInit, so
+        // its null-origin LevelUpdate uses the ordinary activation marker even
+        // when the selected pair itself is Title.
+        let initial_level_update_active = retail_initial_level_update_is_active(0);
         let (retail_zones, retail_zone_lifecycle) = parse_retail_zone_catalog(
             &pair,
             &retail_zone_graph,
             retail_camera.location().path.zone,
+            initial_level_update_active,
         )?;
         let initial_zone = retail_camera.location().path.zone;
         let initial_background_fill = retail_background_fill_for_zone(
@@ -1071,7 +1095,15 @@ impl Runtime {
         let initial_next_vram_fill_color =
             retail_zone_transition_color(&retail_zones, initial_zone)
                 .map_err(|error| JsValue::from_str(&error))?;
-        let retail_zone_pager = build_retail_zone_pager(&pair, &retail_zone_lifecycle)?;
+        let retail_zone_pager = build_retail_zone_pager(
+            &pair,
+            &retail_zone_graph,
+            &retail_zones,
+            retail_camera.location(),
+            &retail_zone_lifecycle,
+            initial_level_update_active,
+            None,
+        )?;
         dom.log(
             &format!(
                 "Parsed {} reachable zones with {} owned retail entity descriptors; {} zones are in the initial spawn band.",
@@ -1146,26 +1178,19 @@ impl Runtime {
         )?);
         // Native CoreObjectsCreate begins with PadUpdate. Publish that shifted
         // history before any HUD/root once handler can observe the destination
-        // pad, and retain the same snapshot for the first CoreFrame gate.
+        // pad, and retain the same snapshot for the first CoreFrame gate. A
+        // title mount defers this until TitleLoadNextState finishes init2.
         let mut pad = PlatformPadState::default();
-        let initial_pad = core_objects_pad_update(&mut pad, physical_held, 0, None);
-        retail_objects
-            .set_pad_snapshot(0, retail_pad_snapshot(initial_pad))
-            .map_err(|error| {
-                JsValue::from_str(&format!(
-                    "could not initialize the CoreObjectsCreate pad boundary: {error:?}"
-                ))
-            })?;
-        let retail_core_objects = create_retail_core_objects_for_pair(
-            &mut retail_objects,
-            &pair,
-            retail_camera.location().path.zone,
-        )?;
-        let retail_level_misc_object = create_retail_level_misc_object_for_pair(
-            &mut retail_objects,
-            &pair,
-            retail_camera.location().path.zone,
-        )?;
+        if pair.level != FormatLevelId::TITLE {
+            let initial_pad = core_objects_pad_update(&mut pad, physical_held, 0, None);
+            retail_objects
+                .set_pad_snapshot(0, retail_pad_snapshot(initial_pad))
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not initialize the CoreObjectsCreate pad boundary: {error:?}"
+                    ))
+                })?;
+        }
         apply_level_access(level_access, &mut retail_objects, &mut flow).map_err(|error| {
             JsValue::from_str(&format!(
                 "could not apply temporary all-level access: {error:?}"
@@ -1260,10 +1285,43 @@ impl Runtime {
             last_gl_error: 0,
         };
         runtime.configure_retail_title_authority(true)?;
+        runtime.sync_title_card(dom)?;
+        if runtime.level_assets.level == FormatLevelId::TITLE {
+            let initial_pad = core_objects_pad_update(
+                &mut runtime.pad,
+                runtime.latest_physical_held,
+                runtime.pending_buttons,
+                None,
+            );
+            runtime
+                .retail_objects
+                .set_pad_snapshot(0, retail_pad_snapshot(initial_pad))
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not initialize deferred title CoreObjectsCreate pad boundary: {error:?}"
+                    ))
+                })?;
+        }
+        let initial_zone = runtime.retail_camera.location().path.zone;
+        let retail_core_objects = create_retail_core_objects_for_pair(
+            &mut runtime.retail_objects,
+            &runtime.level_assets,
+            initial_zone,
+        )?;
+        runtime.stage_deferred_title_core_page_preloads()?;
+        let retail_level_misc_object = create_retail_level_misc_object_for_pair(
+            &mut runtime.retail_objects,
+            &runtime.level_assets,
+            initial_zone,
+        )?;
+        runtime.last_authoritative_save =
+            runtime.retail_objects.card_save_data().map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not snapshot initialized retail save globals: {error:?}"
+                ))
+            })?;
         log_retail_core_objects(dom, retail_core_objects);
         log_retail_level_misc_object(dom, retail_level_misc_object);
-        runtime.sync_title_card(dom)?;
-        let initial_zone = runtime.retail_camera.location().path.zone;
         let initial_music = runtime
             .prepare_retail_music(&runtime.level_assets, initial_zone, false)
             .map_err(|error| JsValue::from_str(&error))?;
@@ -1299,6 +1357,18 @@ impl Runtime {
                 "validated stream pair does not match the pending transition",
             ));
         }
+        // NSKill leaves the eight lower-VRAM texture page structs alive for
+        // the following NSInitTexturePages. Carry only their validated EID,
+        // state, and renderer generation; destination page indices belong to
+        // a different stream and are deliberately resolved again below.
+        let texture_slot_carry = self
+            .retail_zone_pager
+            .texture_slot_carry_snapshot()
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not snapshot source texture slots for the destination mount: {error:?}"
+                ))
+            })?;
         let retail_zone_graph = retail_zone_graph(&pair).map_err(|error| {
             JsValue::from_str(&format!(
                 "destination camera graph for {} is invalid: {error}",
@@ -1338,7 +1408,7 @@ impl Runtime {
         } else {
             None
         };
-        let retail_camera = if mount.bonus_return {
+        let bonus_return_location = if mount.bonus_return {
             let snapshot = mount.carry.saved_level_state.as_ref().ok_or_else(|| {
                 JsValue::from_str("bonus return has no carried retail level snapshot")
             })?;
@@ -1348,32 +1418,58 @@ impl Runtime {
                     snapshot.level, pair.level
                 )));
             }
-            RetailCameraRuntime::at_path(
-                &retail_zone_graph,
-                snapshot.location.path,
-                snapshot.location.progress.raw(),
-                mount_game_state,
-            )
+            Some(snapshot.location)
         } else {
-            RetailCameraRuntime::at_path(
-                &retail_zone_graph,
-                retail_zone_graph.spawn_path(),
-                0,
-                mount_game_state,
-            )
-        }
+            None
+        };
+        let initial_path = retail_ldat_initial_path(
+            pair.level,
+            mount_game_state,
+            retail_zone_graph.spawn_path(),
+            bonus_return_location.map(|location| location.path),
+        );
+        let initial_progress = bonus_return_location.map_or(0, |location| location.progress.raw());
+        let retail_camera = RetailCameraRuntime::at_path(
+            &retail_zone_graph,
+            initial_path,
+            initial_progress,
+            mount_game_state,
+        )
         .map_err(|error| {
             JsValue::from_str(&format!(
                 "destination camera state for {} is invalid: {error}",
                 pair.level
             ))
         })?;
+        // LdatInit replaces the ordinary spawn path with the carried
+        // zone/path/progress on a bonus return. The protected spawn scan
+        // therefore starts from the saved camera band; LevelRestart creates
+        // Crash directly under handle six when that band has no descriptor.
+        // A title-state attract mount is the source exception: LdatInit calls
+        // LevelUpdate with raw flags zero, which suppresses both the initial
+        // neighbor marker and PSX's synchronous page drain.
+        let post_pbak_choose_game_state = retail_game_state_after_pbak_choose(
+            mount_game_state,
+            title_attract_mount,
+            prepared_pbak.is_some(),
+        );
+        let initial_level_update_active =
+            retail_initial_level_update_is_active(post_pbak_choose_game_state);
         let (retail_zones, retail_zone_lifecycle) = parse_retail_zone_catalog(
             &pair,
             &retail_zone_graph,
             retail_camera.location().path.zone,
+            initial_level_update_active,
         )?;
-        let retail_zone_pager = build_retail_zone_pager(&pair, &retail_zone_lifecycle)?;
+        let retail_zone_pager = build_retail_zone_pager(
+            &pair,
+            &retail_zone_graph,
+            &retail_zones,
+            retail_camera.location(),
+            &retail_zone_lifecycle,
+            initial_level_update_active,
+            Some(texture_slot_carry),
+        )?;
         let destination_zone = retail_camera.location().path.zone;
         let destination_background_fill = retail_background_fill_for_zone(
             &retail_zones,
@@ -1428,7 +1524,7 @@ impl Runtime {
             retail_objects
                 .set_global_word(
                     GAME_STATE_GLOBAL,
-                    if prepared_pbak.is_some() { 0x600 } else { 0 },
+                    post_pbak_choose_game_state.cast_unsigned(),
                 )
                 .and_then(|()| {
                     retail_objects.set_global_word(
@@ -1497,36 +1593,28 @@ impl Runtime {
         )?);
         // Build the pad boundary transactionally alongside the candidate
         // runtime. If validation fails, neither the live history nor the live
-        // object graph advances. On commit this is the PadUpdate at the start
-        // of native CoreObjectsCreate after NSInit.
+        // object graph advances. A title destination first inherits the
+        // unshifted source snapshot: MDAT initialization runs before the
+        // PadUpdate at the start of CoreObjectsCreate. Other destinations can
+        // publish that CoreObjectsCreate update immediately.
         let mut destination_pad = self.pad;
-        let destination_pad_snapshot = core_objects_pad_update(
-            &mut destination_pad,
-            self.latest_physical_held,
-            self.pending_buttons,
-            prepared_pbak.as_ref().map(|_| 0),
-        );
+        let destination_pad_snapshot = if pair.level == FormatLevelId::TITLE {
+            destination_pad.snapshot()
+        } else {
+            core_objects_pad_update(
+                &mut destination_pad,
+                self.latest_physical_held,
+                self.pending_buttons,
+                prepared_pbak.as_ref().map(|_| 0),
+            )
+        };
         retail_objects
             .set_pad_snapshot(0, retail_pad_snapshot(destination_pad_snapshot))
             .map_err(|error| {
                 JsValue::from_str(&format!(
-                    "could not initialize destination CoreObjectsCreate pad boundary: {error:?}"
+                    "could not initialize destination pad boundary: {error:?}"
                 ))
             })?;
-        // Materialize the destination's process-lifetime roots against the
-        // candidate runtime and candidate stream host. A malformed DispC or
-        // ZDAT therefore fails before the active flow/runtime mount is
-        // committed below.
-        let retail_core_objects = create_retail_core_objects_for_pair(
-            &mut retail_objects,
-            &pair,
-            retail_camera.location().path.zone,
-        )?;
-        let retail_level_misc_object = create_retail_level_misc_object_for_pair(
-            &mut retail_objects,
-            &pair,
-            retail_camera.location().path.zone,
-        )?;
         if self.level_access.all_levels() {
             apply_all_levels_override(&mut retail_objects).map_err(|error| {
                 JsValue::from_str(&format!(
@@ -1651,9 +1739,40 @@ impl Runtime {
             audio.set_retail_master_gain(self.retail_master_fade.normalized_gain());
         }
         self.last_title_state = None;
+        self.sync_title_card(dom)?;
+        if self.level_assets.level == FormatLevelId::TITLE {
+            let destination_pad_snapshot = core_objects_pad_update(
+                &mut self.pad,
+                self.latest_physical_held,
+                self.pending_buttons,
+                self.retail_pbak.as_ref().map(|_| 0),
+            );
+            self.retail_objects
+                .set_pad_snapshot(0, retail_pad_snapshot(destination_pad_snapshot))
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not initialize deferred destination title pad boundary: {error:?}"
+                    ))
+                })?;
+        }
+        let retail_core_objects = create_retail_core_objects_for_pair(
+            &mut self.retail_objects,
+            &self.level_assets,
+            destination_zone,
+        )?;
+        self.stage_deferred_title_core_page_preloads()?;
+        let retail_level_misc_object = create_retail_level_misc_object_for_pair(
+            &mut self.retail_objects,
+            &self.level_assets,
+            destination_zone,
+        )?;
         log_retail_core_objects(dom, retail_core_objects);
         log_retail_level_misc_object(dom, retail_level_misc_object);
-        self.sync_title_card(dom)?;
+        self.last_authoritative_save = self.retail_objects.card_save_data().map_err(|error| {
+            JsValue::from_str(&format!(
+                "could not snapshot mounted retail save globals: {error:?}"
+            ))
+        })?;
         self.apply_prepared_retail_music(destination_music, true, destination_zone, dom)
             .map_err(|error| JsValue::from_str(&error))?;
         if let Some(pbak) = &self.retail_pbak {
@@ -1676,12 +1795,50 @@ impl Runtime {
             // Native creates the destination object infrastructure, performs
             // one protected Crash spawn, then executes LevelRestart against
             // the carried snapshot before the outer frame's normal scan.
+            let expected_snapshot = mount.carry.saved_level_state.clone().ok_or_else(|| {
+                JsValue::from_str("bonus return lost its carried snapshot before protected spawn")
+            })?;
             self.retail_objects.set_initial_crash_save_suppressed(true);
             let protected_spawn = self.spawn_retail_objects(dom, true);
             self.retail_objects.set_initial_crash_save_suppressed(false);
             protected_spawn.map_err(|error| JsValue::from_str(&error))?;
-            self.apply_retail_hard_restart(dom)
+            if self.retail_objects.saved_level_state() != Some(&expected_snapshot) {
+                return Err(JsValue::from_str(
+                    "bonus-return protected spawn changed the carried snapshot before LevelRestart",
+                ));
+            }
+            self.apply_retail_hard_restart(dom, RetailRestartResume::SuspendedFrameTail)
                 .map_err(|error| JsValue::from_str(&error))?;
+            let restored_main = self.retail_objects.arena().main_object().ok_or_else(|| {
+                JsValue::from_str("bonus-return LevelRestart did not restore Crash")
+            })?;
+            let restored_object = self
+                .retail_objects
+                .object_for_arena(restored_main)
+                .ok_or_else(|| {
+                    JsValue::from_str(
+                        "bonus-return LevelRestart restored Crash without an arena-to-VM mapping",
+                    )
+                })?;
+            if self.retail_objects.object_for_vm(restored_object.vm()) != Some(restored_object) {
+                return Err(JsValue::from_str(
+                    "bonus-return LevelRestart restored Crash with inconsistent arena/VM mappings",
+                ));
+            }
+            let restored_vm = self
+                .retail_objects
+                .machine()
+                .object(restored_object.vm())
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "bonus-return LevelRestart restored Crash without a live VM object: {error:?}"
+                    ))
+                })?;
+            if restored_vm.handle() != restored_object.vm() {
+                return Err(JsValue::from_str(
+                    "bonus-return LevelRestart restored Crash with a mismatched VM object",
+                ));
+            }
         }
         self.loading_mount = None;
         self.asset_load_error = None;
@@ -1900,38 +2057,91 @@ impl Runtime {
         }
         let eid = pbak.eid();
         let (snapshot, seed, crash_bound) = pbak.start_payload();
-        let caption = {
-            let current_zone = self.retail_camera.location().path.zone;
-            let mut host = BrowserProgramHost::new(
-                &self.level_assets.nsd,
-                &self.level_assets.nsf,
-                &self.level_assets.nsf_bytes,
-                &mut self.retail_audio,
-                &mut self.retail_zone_pager,
-                &mut self.card,
-                &mut self.storage,
-            );
-            self.retail_objects
-                .create_retail_demo_caption(current_zone, &mut host)
-        }
+        let captured_saved_level = snapshot.level;
+        let transactional_storage = self
+            .storage
+            .as_ref()
+            .map(StorageState::begin_card_transaction);
+        let current_zone = self.retail_camera.location().path.zone;
+        let (transaction, caption) = RestartTransactionOwners::stage(
+            &self.retail_objects,
+            &self.retail_audio,
+            &self.retail_zone_pager,
+            &self.card,
+            &transactional_storage,
+            |transaction| {
+                transaction.pbak_play = true;
+                // Native `PbakPlay` retains a physical count-one NSOpen for
+                // the selected recording before creating the caption or
+                // calling `PbakStart`. Keep that reference in this same staged
+                // owner set so any following failure drops it atomically.
+                let pbak_open = transaction
+                    .retail_zone_pager
+                    .open_eid_with_outcome(eid)
+                    .map_err(|error| {
+                        JsValue::from_str(&format!(
+                            "could not physically open retail PBAK {eid}: {error:?}"
+                        ))
+                    })?;
+                if pbak_open.resolved {
+                    transaction
+                        .retail_objects
+                        .apply_platform_paging_open(pbak_open.page, pbak_open.invalidated)
+                } else {
+                    transaction
+                        .retail_objects
+                        .apply_platform_paging_queued_open(pbak_open.page)
+                }
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not publish retail PBAK {eid} physical open: {error:?}"
+                    ))
+                })?;
+                let caption = {
+                    let mut host = BrowserProgramHost::new(
+                        &self.level_assets.nsd,
+                        &self.level_assets.nsf,
+                        &self.level_assets.nsf_bytes,
+                        &mut transaction.retail_audio,
+                        &mut transaction.retail_zone_pager,
+                        &mut transaction.card,
+                        &mut transaction.storage,
+                    );
+                    transaction
+                        .retail_objects
+                        .create_retail_demo_caption(current_zone, &mut host)
+                }
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not create retail PBAK {eid} caption controller: {error:?}"
+                    ))
+                })?;
+                transaction
+                    .retail_objects
+                    .install_retail_demo_start(snapshot.clone(), seed, crash_bound)
+                    .map_err(|error| {
+                        JsValue::from_str(&format!(
+                            "could not install retail PBAK {eid}: {error:?}"
+                        ))
+                    })?;
+                Ok::<_, JsValue>(caption)
+            },
+        )?;
+        self.apply_retail_hard_restart_transaction(
+            dom,
+            captured_saved_level,
+            transaction,
+            Some(snapshot),
+            RetailRestartResume::NextTransitionGate,
+        )
         .map_err(|error| {
-            JsValue::from_str(&format!(
-                "could not create retail PBAK {eid} caption controller: {error:?}"
-            ))
-        })?;
-        self.drain_retail_reclaim_diagnostics(dom);
-        self.retail_objects
-            .install_retail_demo_start(snapshot, seed, crash_bound)
-            .map_err(|error| {
-                JsValue::from_str(&format!("could not install retail PBAK {eid}: {error:?}"))
-            })?;
-        self.apply_retail_hard_restart(dom).map_err(|error| {
             JsValue::from_str(&format!("could not start retail PBAK {eid}: {error}"))
         })?;
         self.retail_pbak
             .as_mut()
             .expect("PBAK remained mounted through its same-level restart")
             .mark_started();
+        self.drain_retail_reclaim_diagnostics(dom);
         dom.log(
             &format!(
                 "Started retail PBAK {eid}; created caption controller {caption:?} and restored its checked camera/player snapshot and gameplay RNG."
@@ -2121,7 +2331,12 @@ impl Runtime {
             // Native PbakPlay follows the CoreFrame pause gate. Starting an
             // armed recording before that gate would incorrectly publish a
             // nonzero PBAK state one boundary too early.
-            self.start_armed_retail_pbak(dom)?;
+            if let Err(error) = self.start_armed_retail_pbak(dom) {
+                let message = format!("retail PBAK start failed: {}", js_message(&error));
+                dom.log(&message, true);
+                self.retail_runtime_error = Some(message);
+                self.retail_tick_state = RetailTickState::Paused;
+            }
             // Pause/caption/restart handlers above can allocate voices. Native
             // exposes those draws to the same RNG-B word used by lighting and
             // by a following cross-stream transition.
@@ -2203,7 +2418,9 @@ impl Runtime {
             if retail_state && !transition_queued && self.retail_runtime_error.is_none() {
                 let log_spawn_scan = matches!(
                     self.retail_tick_state,
-                    RetailTickState::NeedsSpawn | RetailTickState::PausedBeforeSpawn
+                    RetailTickState::NeedsSpawn
+                        | RetailTickState::RestartedNeedsSpawn
+                        | RetailTickState::PausedBeforeSpawn
                 );
                 if let Err(error) = self.spawn_retail_objects(dom, log_spawn_scan) {
                     let message = format!("retail spawn scan failed: {error}");
@@ -2370,9 +2587,9 @@ impl Runtime {
                     dom.log(&message, true);
                     self.retail_runtime_error = Some(message);
                     self.retail_tick_state = match self.retail_tick_state {
-                        RetailTickState::NeedsSpawn | RetailTickState::PausedBeforeSpawn => {
-                            RetailTickState::PausedBeforeSpawn
-                        }
+                        RetailTickState::NeedsSpawn
+                        | RetailTickState::RestartedNeedsSpawn
+                        | RetailTickState::PausedBeforeSpawn => RetailTickState::PausedBeforeSpawn,
                         RetailTickState::Running | RetailTickState::Paused => {
                             RetailTickState::Paused
                         }
@@ -2527,7 +2744,9 @@ impl Runtime {
         let counts = browser_spawn_counts(&attempts);
         self.retail_metrics.record_spawns(counts);
         self.retail_tick_state = match self.retail_tick_state {
-            RetailTickState::NeedsSpawn | RetailTickState::Running => RetailTickState::Running,
+            RetailTickState::NeedsSpawn
+            | RetailTickState::RestartedNeedsSpawn
+            | RetailTickState::Running => RetailTickState::Running,
             RetailTickState::PausedBeforeSpawn | RetailTickState::Paused => RetailTickState::Paused,
         };
         let unexpected = first_unexpected_browser_spawn(&attempts);
@@ -3002,6 +3221,12 @@ impl Runtime {
     }
 
     fn process_retail_level_transition(&mut self, dom: &Dom) -> Result<bool, JsValue> {
+        // An asynchronous bonus-return mount resumes below native's already
+        // consumed transition branch. Preserve both explicit requests and the
+        // game-state fallback until its pending spawn/camera/GOOL tail has run.
+        if !self.retail_tick_state.can_resolve_core_frame_transition() {
+            return Ok(false);
+        }
         if self.next_lid == -1 && self.level_assets.level != FormatLevelId::TITLE {
             let game_state = self
                 .retail_objects
@@ -3016,11 +3241,13 @@ impl Runtime {
                     .expect("retail title level fits signed 32-bit");
             }
         }
-        if self.next_lid == -1 {
+        let Some(requested_lid) = self
+            .retail_tick_state
+            .explicit_core_frame_transition(self.next_lid)
+        else {
             return Ok(false);
-        }
-
-        let requested_lid = std::mem::replace(&mut self.next_lid, -1);
+        };
+        self.next_lid = -1;
         let title_mdat = self.live_title_mdat_eid();
         let report = {
             let mut host = if let Some(mdat) = title_mdat {
@@ -3186,13 +3413,18 @@ impl Runtime {
         Ok(())
     }
 
-    fn apply_retail_hard_restart(&mut self, dom: &Dom) -> Result<(), String> {
+    fn apply_retail_hard_restart(
+        &mut self,
+        dom: &Dom,
+        resume: RetailRestartResume,
+    ) -> Result<(), String> {
         let saved_level = self
             .retail_objects
             .saved_level_state()
             .map(|snapshot| snapshot.level)
             .ok_or_else(|| "GOOL misc 12/1 has no saved level state".to_owned())?;
-        self.apply_retail_hard_restart_from_effect(dom, saved_level)
+        let transaction = begin_retail_restart_transaction(self);
+        self.apply_retail_hard_restart_transaction(dom, saved_level, transaction, None, resume)
     }
 
     fn apply_retail_hard_restart_from_effect(
@@ -3200,107 +3432,442 @@ impl Runtime {
         dom: &Dom,
         captured_saved_level: FormatLevelId,
     ) -> Result<(), String> {
+        let transaction = begin_retail_restart_transaction(self);
+        self.apply_retail_hard_restart_transaction(
+            dom,
+            captured_saved_level,
+            transaction,
+            None,
+            RetailRestartResume::NextTransitionGate,
+        )
+    }
+
+    fn apply_retail_hard_restart_transaction(
+        &mut self,
+        dom: &Dom,
+        captured_saved_level: FormatLevelId,
+        mut transaction: RetailRestartTransactionOwners,
+        external_restart_snapshot: Option<RetailLevelSnapshot>,
+        resume: RetailRestartResume,
+    ) -> Result<(), String> {
         #[cfg(feature = "browser-test-harness")]
+        self.browser_test_cumulative_metrics
+            .record_hard_restart_call();
+        if external_restart_snapshot.is_none()
+            && transaction.retail_objects.saved_level_state().is_none()
         {
-            self.browser_test_cumulative_metrics.hard_restarts = self
-                .browser_test_cumulative_metrics
-                .hard_restarts
-                .saturating_add(1);
+            return Err("GOOL misc 12/1 has no saved level state".to_owned());
         }
-        let snapshot = self
-            .retail_objects
-            .saved_level_state()
-            .cloned()
-            .ok_or_else(|| "GOOL misc 12/1 has no saved level state".to_owned())?;
         if captured_saved_level != self.level_assets.level {
             let outcome = {
                 let mut host = BrowserProgramHost::new(
                     &self.level_assets.nsd,
                     &self.level_assets.nsf,
                     &self.level_assets.nsf_bytes,
-                    &mut self.retail_audio,
-                    &mut self.retail_zone_pager,
-                    &mut self.card,
-                    &mut self.storage,
+                    &mut transaction.retail_audio,
+                    &mut transaction.retail_zone_pager,
+                    &mut transaction.card,
+                    &mut transaction.storage,
                 );
-                self.retail_objects
+                transaction
+                    .retail_objects
                     .restart_saved_level_from_effect(&mut host, captured_saved_level)
             }
             .map_err(|error| format!("different-level restart failed: {error:?}"))?;
             let RetailRestartOutcome::DifferentLevel { .. } = outcome else {
                 return Err("different-level restart unexpectedly stayed in this stream".to_owned());
             };
+            if let Some(storage) = transaction.storage.as_mut() {
+                storage.commit_card_transaction().map_err(|error| {
+                    format!(
+                        "could not commit different-level card persistence transaction: {}",
+                        js_message(&error)
+                    )
+                })?;
+            }
+            transaction.commit_into(
+                &mut self.retail_objects,
+                &mut self.retail_audio,
+                &mut self.retail_zone_pager,
+                &mut self.card,
+                &mut self.storage,
+            );
             self.next_lid = -2;
             return Ok(());
         }
-        let restored_music =
-            self.prepare_retail_music(&self.level_assets, snapshot.location.path.zone, false)?;
-        let activation_marker = self.level_assets.level != FormatLevelId::TITLE;
-        let plan = self
-            .retail_zone_lifecycle
-            .plan_hard_restart(snapshot.location.path.zone, activation_marker)
-            .map_err(|error| format!("could not plan hard restart: {error}"))?;
-        let mut pager_validation = self.retail_zone_pager.clone();
-        let restored_load_list = self
-            .retail_zone_lifecycle
-            .zone(snapshot.location.path.zone)
-            .ok_or_else(|| "restored texture zone is absent from the lifecycle".to_owned())?
-            .load_list();
-        pager_validation
-            .set_current_texture_load_eids(restored_load_list.entries().iter().copied());
-        for action in plan.actions().iter().copied() {
-            apply_retail_zone_paging_action(&mut pager_validation, action)?;
-        }
+        // Ordinary `LevelRestart(&savestate)` may observe a new snapshot
+        // written by a RESPAWN handler. Only the immutable PBAK-header path
+        // may assert that its pre-broadcast location is unchanged.
+        let immutable_restart_location = external_restart_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.location);
+        transaction
+            .retail_objects
+            .level_state_context()
+            .ok_or_else(|| "hard restart has no level-state context".to_owned())?;
         let mut lifecycle_preview = self.retail_zone_lifecycle.clone();
-        lifecycle_preview
-            .commit_hard_restart(&plan)
-            .map_err(|error| format!("could not preflight hard restart lifecycle: {error}"))?;
-        let expected_level_update_flags = u8::from(
-            !self
-                .retail_objects
-                .level_state_context()
-                .ok_or_else(|| "hard restart has no level-state context".to_owned())?
-                .first_spawn,
-        );
         let mut camera_preview = self.retail_camera;
-        let camera_step = camera_preview
-            .level_update(
-                &self.retail_zone_graph,
-                snapshot.location.path,
-                snapshot.location.progress.raw(),
-                expected_level_update_flags,
-            )
-            .map_err(|error| format!("could not preflight restored camera location: {error}"))?;
-        debug_assert_eq!(camera_step.after, snapshot.location);
-        let restored_path = self
-            .retail_zone_graph
-            .path(snapshot.location.path)
-            .ok_or_else(|| "restored camera path disappeared after validation".to_owned())?;
-        let restored_point_count = NonZeroU16::new(
-            u16::try_from(restored_path.points.len())
-                .map_err(|_| "restored camera path has too many points".to_owned())?,
-        )
-        .ok_or_else(|| "restored camera path is empty".to_owned())?;
+        let mut level_update_audit = RestartLevelUpdateAudit::default();
 
         // RESPAWN and TERM execute while native still exposes the old current
         // zone to texture replacement. Lifecycle close/open actions follow
         // those handlers and switch to destination protection at the same
         // source boundary where LevelUpdate assigns cur_zone.
-        let mut pager_commit = self.retail_zone_pager.clone();
+        let pbak_play = transaction.pbak_play;
+        let mut pager_commit = transaction.retail_zone_pager;
+        let mut retail_objects_commit = transaction.retail_objects;
+        let mut retail_audio_commit = transaction.retail_audio;
+        let mut card_commit = transaction.card;
+        let mut storage_commit = transaction.storage;
+        let mut unavailable_opens = 0_usize;
         let outcome = {
             let mut host = BrowserProgramHost::new(
                 &self.level_assets.nsd,
                 &self.level_assets.nsf,
                 &self.level_assets.nsf_bytes,
-                &mut self.retail_audio,
+                &mut retail_audio_commit,
                 &mut pager_commit,
-                &mut self.card,
-                &mut self.storage,
+                &mut card_commit,
+                &mut storage_commit,
             );
-            self.retail_objects
-                .restart_saved_level_from_effect(&mut host, captured_saved_level)
+            let level_update = |runtime: &mut RetailRuntime,
+                                host: &mut BrowserProgramHost<'_, '_>,
+                                boundary: RetailRestartLevelUpdateBoundary| {
+                let restart_zone = boundary.location.path.zone;
+                let plan = lifecycle_preview
+                    .plan_hard_restart(restart_zone, boundary.effective_flag)
+                    .map_err(|error| format!("could not plan hard restart: {error}"))?;
+                let restored_load_list = lifecycle_preview
+                    .zone(restart_zone)
+                    .ok_or_else(|| {
+                        "restored texture zone is absent from the lifecycle".to_owned()
+                    })?
+                    .load_list()
+                    .clone();
+                let restored_path = self
+                    .retail_zone_graph
+                    .path(boundary.location.path)
+                    .ok_or_else(|| {
+                        "restored camera path disappeared after RESPAWN".to_owned()
+                    })?;
+                let restored_visibility_list = (self
+                    .retail_zones
+                    .get(&restart_zone)
+                    .ok_or_else(|| {
+                        "restored camera zone disappeared after RESPAWN".to_owned()
+                    })?
+                    .world_count
+                    != 0)
+                    .then_some(restored_path.visibility_list);
+                let camera_step = camera_preview
+                    .level_update(
+                        &self.retail_zone_graph,
+                        boundary.location.path,
+                        boundary.location.progress.raw(),
+                        boundary.flags,
+                    )
+                    .map_err(|error| {
+                        format!("could not preflight restored camera location: {error}")
+                    })?;
+                if camera_step.after != boundary.location {
+                    return Err("restored camera preflight changed the snapshot location".to_owned());
+                }
+                {
+                        // RESPAWN and TERM handlers can themselves issue
+                        // paging host calls. Start validation from the exact
+                        // post-handler pager presented at this source
+                        // boundary, not from the pre-restart browser state.
+                        let mut pager_validation = host.pager.clone();
+                        // `LevelRestart` first unloads the old zone list, then
+                        // clears `cur_zone` before its temporary physical
+                        // ZDAT/SLST opens. Only after the SLST close does
+                        // `LevelUpdate` install destination protection and
+                        // virtually open the new load list.
+                        for action in plan.actions().iter().copied().filter(|action| {
+                            matches!(
+                                action,
+                                ZoneTransitionAction::CloseEntry(_)
+                                    | ZoneTransitionAction::ClosePage(_)
+                            )
+                        }) {
+                            apply_retail_zone_paging_action(&mut pager_validation, action)?;
+                        }
+                        pager_validation.clear_current_texture_zone();
+                        pager_validation
+                            .open_eid_with_outcome(restart_zone)
+                            .map_err(|error| {
+                                format!(
+                                    "could not validate temporary restart ZDAT open {restart_zone}: {error:?}"
+                                )
+                            })?;
+                        if let Some(visibility_list) = restored_visibility_list {
+                            pager_validation
+                                .open_eid_with_outcome(visibility_list)
+                                .and_then(|_| {
+                                    pager_validation.close_eid_retail_with_outcome(visibility_list)
+                                })
+                                .map_err(|error| {
+                                    format!(
+                                        "could not validate temporary restart SLST {visibility_list}: {error:?}"
+                                    )
+                                })?;
+                        }
+                        pager_validation.set_current_texture_load_eids(
+                            restored_load_list.entries().iter().copied(),
+                        );
+                        for action in plan.actions().iter().copied().filter(|action| {
+                            matches!(
+                                action,
+                                ZoneTransitionAction::OpenEntry(_)
+                                    | ZoneTransitionAction::OpenPage(_)
+                            )
+                        }) {
+                            apply_retail_zone_paging_action(&mut pager_validation, action)?;
+                        }
+                        if boundary.effective_flag {
+                            drain_retail_level_update_pages(&mut pager_validation, |_| Ok(()))?;
+                        }
+                        pager_validation
+                            .close_eid_retail_with_outcome(restart_zone)
+                            .map_err(|error| {
+                                format!(
+                                    "could not validate temporary restart ZDAT close {restart_zone}: {error:?}"
+                                )
+                            })?;
+                        lifecycle_preview.commit_hard_restart(&plan).map_err(|error| {
+                            format!("could not commit validated hard-restart lifecycle: {error}")
+                        })?;
+
+                        for action in plan.actions().iter().copied().filter(|action| {
+                            matches!(
+                                action,
+                                ZoneTransitionAction::CloseEntry(_)
+                                    | ZoneTransitionAction::ClosePage(_)
+                            )
+                        }) {
+                            let RetailZonePagingOutcome::Close(outcome) =
+                                apply_retail_zone_paging_action(host.pager, action)?
+                            else {
+                                return Err(
+                                    "hard-restart close action produced a non-close outcome"
+                                        .to_owned(),
+                                );
+                            };
+                            runtime
+                                .apply_platform_paging_close(
+                                    outcome.page,
+                                    outcome.decremented,
+                                    outcome.unresolved,
+                                )
+                                .map_err(|error| {
+                                    format!(
+                                        "could not publish hard-restart page close: {error:?}"
+                                    )
+                                })?;
+                        }
+
+                        host.pager.clear_current_texture_zone();
+                        let temporary_zone_open = host
+                            .pager
+                            .open_eid_with_outcome(restart_zone)
+                            .map_err(|error| {
+                                format!(
+                                    "could not temporarily open restart ZDAT {restart_zone}: {error:?}"
+                                )
+                            })?;
+                        if temporary_zone_open.resolved {
+                            runtime.apply_platform_paging_open(
+                                temporary_zone_open.page,
+                                temporary_zone_open.invalidated,
+                            )
+                        } else {
+                            runtime.apply_platform_paging_queued_open(temporary_zone_open.page)
+                        }
+                        .map_err(|error| {
+                            format!(
+                                "could not publish temporary restart ZDAT open: {error:?}"
+                            )
+                        })?;
+
+                        if let Some(visibility_list) = restored_visibility_list {
+                            let slst_open = host
+                                .pager
+                                .open_eid_with_outcome(visibility_list)
+                                .map_err(|error| {
+                                    format!(
+                                        "could not temporarily open restart SLST {visibility_list}: {error:?}"
+                                    )
+                                })?;
+                            if slst_open.resolved {
+                                runtime.apply_platform_paging_open(
+                                    slst_open.page,
+                                    slst_open.invalidated,
+                                )
+                            } else {
+                                runtime.apply_platform_paging_queued_open(slst_open.page)
+                            }
+                            .map_err(|error| {
+                                format!(
+                                    "could not publish temporary restart SLST open: {error:?}"
+                                )
+                            })?;
+                            let slst_close = host
+                                .pager
+                                .close_eid_retail_with_outcome(visibility_list)
+                                .map_err(|error| {
+                                    format!(
+                                        "could not close temporary restart SLST {visibility_list}: {error:?}"
+                                    )
+                                })?;
+                            runtime
+                                .apply_platform_paging_close(
+                                    slst_close.page,
+                                    slst_close.decremented,
+                                    slst_close.unresolved,
+                                )
+                                .map_err(|error| {
+                                    format!(
+                                        "could not publish temporary restart SLST close: {error:?}"
+                                    )
+                                })?;
+                        }
+
+                        host.pager.set_current_texture_load_eids(
+                            restored_load_list.entries().iter().copied(),
+                        );
+                        for action in plan.actions().iter().copied().filter(|action| {
+                            matches!(
+                                action,
+                                ZoneTransitionAction::OpenEntry(_)
+                                    | ZoneTransitionAction::OpenPage(_)
+                            )
+                        }) {
+                            match apply_retail_zone_paging_action(host.pager, action)? {
+                                RetailZonePagingOutcome::Open(outcome) => {
+                                    let published = if outcome.resolved {
+                                        runtime.apply_platform_paging_open(
+                                            outcome.page,
+                                            outcome.invalidated,
+                                        )
+                                    } else {
+                                        runtime.apply_platform_paging_queued_open(outcome.page)
+                                    };
+                                    published.map_err(|error| {
+                                        format!(
+                                            "could not publish hard-restart page resolution: {error:?}"
+                                        )
+                                    })?;
+                                }
+                                RetailZonePagingOutcome::Close(_) => {
+                                    return Err(
+                                        "hard-restart open action produced a close outcome"
+                                            .to_owned(),
+                                    );
+                                }
+                                RetailZonePagingOutcome::OpenUnavailable => {
+                                    unavailable_opens = unavailable_opens.saturating_add(1);
+                                }
+                                RetailZonePagingOutcome::None => {}
+                            }
+                        }
+
+                        if boundary.effective_flag {
+                            drain_retail_level_update_pages(host.pager, |outcome| match outcome {
+                                PagerUpdateOutcome::Invalidated(pages) => runtime
+                                    .apply_platform_paging_evictions(&pages)
+                                    .map_err(|error| {
+                                        format!(
+                                            "could not publish synchronous page evictions: {error:?}"
+                                        )
+                                    }),
+                                PagerUpdateOutcome::Resolved(outcome) => {
+                                    debug_assert!(outcome.resolved);
+                                    runtime
+                                        .apply_platform_paging_resolution(
+                                            outcome.page,
+                                            outcome.invalidated,
+                                        )
+                                        .map_err(|error| {
+                                            format!(
+                                                "could not publish synchronous page resolution: {error:?}"
+                                            )
+                                        })
+                                }
+                            })?;
+                        }
+                        let temporary_zone_close = host
+                            .pager
+                            .close_eid_retail_with_outcome(restart_zone)
+                            .map_err(|error| {
+                                format!(
+                                    "could not close temporary restart ZDAT {restart_zone}: {error:?}"
+                                )
+                            })?;
+                        runtime
+                            .apply_platform_paging_close(
+                                temporary_zone_close.page,
+                                temporary_zone_close.decremented,
+                                temporary_zone_close.unresolved,
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "could not publish temporary restart ZDAT close: {error:?}"
+                                )
+                            })?;
+                        if *host.pager != pager_validation {
+                            return Err(
+                                "hard-restart pager commit diverged from its validated LevelUpdate"
+                                    .to_owned(),
+                            );
+                        }
+                        let existing_context = runtime
+                            .level_state_context()
+                            .cloned()
+                            .ok_or_else(|| {
+                                "restart LevelUpdate lost its authoritative runtime context"
+                                    .to_owned()
+                            })?;
+                        let restart_context = build_retail_level_state_context(
+                            &self.retail_zone_graph,
+                            boundary.location,
+                            &lifecycle_preview,
+                            existing_context.box_count,
+                            existing_context.checkpoint_id,
+                            existing_context.checkpoint_translation,
+                            existing_context.first_spawn,
+                        )?;
+                        // Native publishes `cur_zone`, its active neighbor
+                        // band, and `LevelUpdateMisc` graphics before a
+                        // suspended outer LevelRestart resumes. Keep the
+                        // staged runtime equally live after every recursive
+                        // callback; the specialized API deliberately leaves
+                        // a separately armed first-spawn remount untouched.
+                        runtime.publish_restart_level_update_context(restart_context);
+                }
+                level_update_audit.record(boundary);
+                Ok(())
+            };
+            if let Some(external_snapshot) = external_restart_snapshot {
+                retail_objects_commit.restart_external_snapshot_from_effect_with_level_update(
+                    &mut host,
+                    captured_saved_level,
+                    external_snapshot,
+                    level_update,
+                )
+            } else {
+                retail_objects_commit.restart_saved_level_from_effect_with_level_update(
+                    &mut host,
+                    captured_saved_level,
+                    level_update,
+                )
+            }
         }
-        .map_err(|error| format!("object hard restart failed: {error:?}"))?;
+        .map_err(|error| match error {
+            RetailRestartTransactionError::Runtime(error) => {
+                format!("object hard restart failed: {error:?}")
+            }
+            RetailRestartTransactionError::LevelUpdate(error) => error,
+        })?;
 
         let report = match outcome {
             RetailRestartOutcome::Restarted(report) => report,
@@ -3309,62 +3876,63 @@ impl Runtime {
                 return Ok(());
             }
         };
-
-        let mut destination_selected = false;
-        let mut unavailable_opens = 0_usize;
-        for action in plan.actions().iter().copied() {
-            if !matches!(
-                action,
-                ZoneTransitionAction::CloseEntry(_)
-                    | ZoneTransitionAction::ClosePage(_)
-                    | ZoneTransitionAction::OpenEntry(_)
-                    | ZoneTransitionAction::OpenPage(_)
-            ) {
-                continue;
-            }
-            let is_open = matches!(
-                action,
-                ZoneTransitionAction::OpenEntry(_) | ZoneTransitionAction::OpenPage(_)
-            );
-            if is_open && !destination_selected {
-                pager_commit
-                    .set_current_texture_load_eids(restored_load_list.entries().iter().copied());
-                destination_selected = true;
-            }
-            match apply_retail_zone_paging_action(&mut pager_commit, action)? {
-                RetailZonePagingOutcome::Open(outcome) => {
-                    let published = if outcome.resolved {
-                        self.retail_objects
-                            .apply_platform_paging_open(outcome.page, outcome.invalidated)
-                    } else {
-                        self.retail_objects
-                            .apply_platform_paging_queued_open(outcome.page)
-                    };
-                    published.map_err(|error| {
-                        format!("could not publish hard-restart page resolution: {error:?}")
-                    })?;
+        level_update_audit.validate_final(report.snapshot.location, report.level_update_flags)?;
+        if immutable_restart_location.is_some_and(|expected| report.snapshot.location != expected) {
+            return Err(format!(
+                "immutable PBAK restart location changed after RESPAWN: expected {:?}, got {:?}",
+                immutable_restart_location.expect("checked above"),
+                report.snapshot.location,
+            ));
+        }
+        let restored_music = self.prepare_retail_music(
+            &self.level_assets,
+            report.snapshot.location.path.zone,
+            false,
+        )?;
+        let restored_path = self
+            .retail_zone_graph
+            .path(report.snapshot.location.path)
+            .ok_or_else(|| "restored camera path disappeared after restart".to_owned())?;
+        let restored_point_count = NonZeroU16::new(
+            u16::try_from(restored_path.points.len())
+                .map_err(|_| "restored camera path has too many points".to_owned())?,
+        )
+        .ok_or_else(|| "restored camera path is empty".to_owned())?;
+        if camera_preview.location() != report.snapshot.location {
+            return Err("committed restart camera does not match the final snapshot".to_owned());
+        }
+        let mut next_lid_commit = self.next_lid;
+        let mut master_fade_commit = self.retail_master_fade;
+        let mut midi_toggle_effects = Vec::new();
+        for effect in &report.effects {
+            match *effect {
+                VmEffect::Transition(level) => next_lid_commit = level,
+                VmEffect::ResetMasterFadeStep { .. } => master_fade_commit.reset_step(),
+                VmEffect::MidiTogglePlayback { object, value } => {
+                    midi_toggle_effects.push((object, value));
                 }
-                RetailZonePagingOutcome::Close(outcome) => self
-                    .retail_objects
-                    .apply_platform_paging_close(
-                        outcome.page,
-                        outcome.decremented,
-                        outcome.unresolved,
-                    )
-                    .map_err(|error| {
-                        format!("could not publish hard-restart page close: {error:?}")
-                    })?,
-                RetailZonePagingOutcome::OpenUnavailable => {
-                    unavailable_opens = unavailable_opens.saturating_add(1);
+                VmEffect::LoadState {
+                    saved_level: Some(saved_level),
+                    ..
+                } if saved_level != self.level_assets.level => {
+                    next_lid_commit = -2;
                 }
-                RetailZonePagingOutcome::None => {}
+                VmEffect::LoadState { .. } => {
+                    return Err(
+                        "nested same-level LoadState during restart requires a recursive native restart"
+                            .to_owned(),
+                    );
+                }
+                _ => {
+                    // SaveState, reparenting, paging, and audio-host requests
+                    // were already applied synchronously to the staged owners.
+                }
             }
         }
-
         for (_, zone_report) in &report.zone_reports {
             for cleanup in &zone_report.cleanup_actions {
                 let RuntimeCleanupAction::FreeObjectAudio(object) = *cleanup;
-                self.retail_audio.free_owner(object.vm());
+                retail_audio_commit.free_owner(object.vm());
             }
         }
         let termination_failures = report
@@ -3373,32 +3941,94 @@ impl Runtime {
             .map(|(_, report)| report.event_failures.len())
             .sum::<usize>();
         let respawn_failures = report.respawn_event_failures.len();
-        if report.level_update_flags != expected_level_update_flags {
-            return Err(format!(
-                "hard restart LevelUpdate flags changed after preflight: expected {expected_level_update_flags}, got {}",
-                report.level_update_flags
-            ));
-        }
         let restored_vram_fill_color =
             retail_zone_transition_color(&self.retail_zones, report.snapshot.location.path.zone)?;
-        self.retail_zone_pager = pager_commit;
+        retail_objects_commit.set_next_vram_fill_color(restored_vram_fill_color);
+        let existing_context = retail_objects_commit
+            .level_state_context()
+            .cloned()
+            .ok_or_else(|| {
+                "hard-restart result has no authoritative level-state context".to_owned()
+            })?;
+        let restored_context = build_retail_level_state_context(
+            &self.retail_zone_graph,
+            report.snapshot.location,
+            &lifecycle_preview,
+            existing_context.box_count,
+            existing_context.checkpoint_id,
+            existing_context.checkpoint_translation,
+            existing_context.first_spawn,
+        )?;
+        retail_objects_commit.set_level_state_context(restored_context);
+        if let Some(storage) = storage_commit.as_mut() {
+            storage.commit_card_transaction().map_err(|error| {
+                format!(
+                    "could not commit hard-restart card persistence transaction: {}",
+                    js_message(&error)
+                )
+            })?;
+        }
+
+        // Nothing fallible remains in the restart transaction after the
+        // deferred card record is published. Commit every cloned host owner
+        // together so a rejected RESPAWN/TERM/pager/fallback step cannot leave
+        // audio, card, storage, pager, and GOOL state from different worlds.
+        RetailRestartTransactionOwners {
+            retail_objects: retail_objects_commit,
+            retail_audio: retail_audio_commit,
+            retail_zone_pager: pager_commit,
+            card: card_commit,
+            storage: storage_commit,
+            pbak_play,
+        }
+        .commit_into(
+            &mut self.retail_objects,
+            &mut self.retail_audio,
+            &mut self.retail_zone_pager,
+            &mut self.card,
+            &mut self.storage,
+        );
         self.retail_zone_lifecycle = lifecycle_preview;
         self.retail_camera = camera_preview;
+        self.next_lid = next_lid_commit;
+        self.retail_master_fade = master_fade_commit;
         self.retail_camera_pose_override = None;
-        self.retail_objects
-            .set_next_vram_fill_color(restored_vram_fill_color);
-        self.refresh_retail_level_state_context(report.snapshot.location)?;
-        self.retail_frame = RetailFrameState::ready(
+        let mut retail_frame_commit = self.retail_frame;
+        retail_frame_commit.apply_level_restart(
             restored_point_count,
             report.snapshot.location.progress.raw(),
+            pbak_play,
         );
-        self.retail_tick_state = RetailTickState::NeedsSpawn;
-        self.apply_prepared_retail_music(
+        self.retail_frame = retail_frame_commit;
+        self.retail_tick_state = resume.tick_state();
+        for (object, value) in midi_toggle_effects {
+            if let Some(audio) = &mut self.audio {
+                let change = audio.toggle_retail_music(value);
+                if change != RetailMusicChange::Unchanged {
+                    dom.log(
+                        &format!(
+                            "Restart handler {object:?} toggled MIDI playback with {value:#x} ({change:?})."
+                        ),
+                        false,
+                    );
+                }
+            }
+        }
+        if let Err(error) = self.apply_prepared_retail_music(
             restored_music,
             false,
             report.snapshot.location.path.zone,
             dom,
-        )?;
+        ) {
+            // The source restart has committed at this point. WebAudio output
+            // is presentation-only, so retain the coherent game transaction,
+            // finish PBAK bookkeeping, and surface a retryable warning instead
+            // of rearming the same LevelRestart on the next frame.
+            let warning =
+                format!("Hard restart committed, but retail music could not resume: {error}");
+            dom.log(&warning, true);
+            self.retail_runtime_warning = Some(warning);
+        }
         dom.log(
             &format!(
                 "Hard restart restored {}:{} progress {:#x}; {} objects terminated, {respawn_failures} RESPAWN and {termination_failures} TERM handler failures, {unavailable_opens} ignored native load-list opens.",
@@ -3414,6 +4044,9 @@ impl Runtime {
             respawn_failures != 0 || termination_failures != 0,
         );
         self.sync_completed_card_load(dom);
+        #[cfg(feature = "browser-test-harness")]
+        self.browser_test_cumulative_metrics
+            .record_completed_same_level_hard_restart();
         Ok(())
     }
 
@@ -3702,6 +4335,18 @@ impl Runtime {
         step: &RetailCameraStep,
         dom: &Dom,
     ) -> Result<(), String> {
+        self.apply_retail_camera_effects_with_physical_zdat(step, None, dom)
+    }
+
+    /// Applies the ordered host side of one camera step. `physical_zdat` is
+    /// used only by `TitleLoadScreen`, whose source sequence physically opens
+    /// the target ZDAT around its explicit flag-two `LevelUpdate`.
+    fn apply_retail_camera_effects_with_physical_zdat(
+        &mut self,
+        step: &RetailCameraStep,
+        mut physical_zdat: Option<Eid>,
+        dom: &Dom,
+    ) -> Result<(), String> {
         for effect in &step.effects {
             match *effect {
                 RetailCameraEffect::GameStateWrite { value } => self
@@ -3713,10 +4358,25 @@ impl Runtime {
                     after,
                     flags,
                 } => {
-                    if before.path.zone != after.path.zone {
-                        self.apply_retail_zone_transition(after.path.zone, flags, dom)?;
+                    let title_zdat = physical_zdat.take();
+                    let visibility_list =
+                        self.retail_level_update_visibility_list(before, after)?;
+                    if before.path.zone == after.path.zone {
+                        self.apply_retail_same_zone_level_update_paging(
+                            visibility_list,
+                            title_zdat,
+                        )?;
+                    } else {
+                        self.apply_retail_zone_transition(
+                            after.path.zone,
+                            flags,
+                            visibility_list,
+                            title_zdat,
+                            dom,
+                        )?;
                     }
                     self.refresh_retail_level_state_context(after)?;
+                    self.close_retail_title_zdat_after_level_update(title_zdat)?;
                 }
                 RetailCameraEffect::SaveStateHandshake { location } => {
                     self.retail_metrics.camera_save_handshakes =
@@ -3753,6 +4413,99 @@ impl Runtime {
                 }
             }
         }
+        if physical_zdat.is_some() {
+            return Err("physical title ZDAT was not consumed by a LevelUpdate".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Returns the temporary SLST selected by native's exact `change &&
+    /// world_count` predicate. Fractional progress alone does not reopen the
+    /// visibility entry.
+    fn retail_level_update_visibility_list(
+        &self,
+        before: RetailCameraLocation,
+        after: RetailCameraLocation,
+    ) -> Result<Option<Eid>, String> {
+        let target_zone = self.retail_zones.get(&after.path.zone).ok_or_else(|| {
+            format!(
+                "retail LevelUpdate target zone {} is absent",
+                after.path.zone
+            )
+        })?;
+        if !retail_level_update_opens_visibility(before, after, target_zone.world_count) {
+            return Ok(None);
+        }
+        let target_path = self.retail_zone_graph.path(after.path).ok_or_else(|| {
+            format!(
+                "retail LevelUpdate target path {}:{} is absent",
+                after.path.zone, after.path.index
+            )
+        })?;
+        Ok(Some(target_path.visibility_list))
+    }
+
+    /// Applies a changed same-zone/path-point visibility update. This path has
+    /// no load-list transition or `NSUpdate2`; only `TitleLoadScreen` can add an
+    /// enclosing physical ZDAT lifetime.
+    fn apply_retail_same_zone_level_update_paging(
+        &mut self,
+        visibility_list: Option<Eid>,
+        physical_zdat: Option<Eid>,
+    ) -> Result<(), String> {
+        if visibility_list.is_none() && physical_zdat.is_none() {
+            return Ok(());
+        }
+
+        let mut pager_validation = self.retail_zone_pager.clone();
+        stage_retail_level_update_physical_prefix(
+            &mut pager_validation,
+            physical_zdat,
+            visibility_list,
+            |_| Ok(()),
+        )?;
+        let mut pager_full_validation = pager_validation.clone();
+        stage_retail_level_update_physical_suffix(
+            &mut pager_full_validation,
+            physical_zdat,
+            |_| Ok(()),
+        )?;
+
+        let mut pager_commit = self.retail_zone_pager.clone();
+        stage_retail_level_update_physical_prefix(
+            &mut pager_commit,
+            physical_zdat,
+            visibility_list,
+            |publication| publish_retail_paging_publication(&mut self.retail_objects, publication),
+        )?;
+        if pager_commit != pager_validation {
+            return Err("same-zone LevelUpdate pager commit diverged from validation".to_owned());
+        }
+        self.retail_zone_pager = pager_commit;
+        Ok(())
+    }
+
+    /// Completes `TitleLoadScreen`'s enclosing physical ZDAT lifetime only
+    /// after the explicit `LevelUpdate` has published its camera/context and
+    /// graphics state.
+    fn close_retail_title_zdat_after_level_update(
+        &mut self,
+        physical_zdat: Option<Eid>,
+    ) -> Result<(), String> {
+        let Some(zone) = physical_zdat else {
+            return Ok(());
+        };
+        let mut pager_validation = self.retail_zone_pager.clone();
+        stage_retail_level_update_physical_suffix(&mut pager_validation, Some(zone), |_| Ok(()))?;
+
+        let mut pager_commit = self.retail_zone_pager.clone();
+        stage_retail_level_update_physical_suffix(&mut pager_commit, Some(zone), |publication| {
+            publish_retail_paging_publication(&mut self.retail_objects, publication)
+        })?;
+        if pager_commit != pager_validation {
+            return Err("title ZDAT close diverged from validation".to_owned());
+        }
+        self.retail_zone_pager = pager_commit;
         Ok(())
     }
 
@@ -3784,11 +4537,15 @@ impl Runtime {
         &mut self,
         next_zone: Eid,
         flags: u8,
+        visibility_list: Option<Eid>,
+        physical_zdat: Option<Eid>,
         dom: &Dom,
     ) -> Result<(), String> {
-        let activation_marker = (self.retail_zone_lifecycle.current_zone().is_none()
-            && self.level_assets.level != FormatLevelId::TITLE)
-            || flags & 2 != 0;
+        let activation_marker = if self.retail_zone_lifecycle.current_zone().is_some() {
+            flags & 2 != 0
+        } else {
+            self.level_assets.level != FormatLevelId::TITLE || flags & 2 != 0
+        };
         let plan = self
             .retail_zone_lifecycle
             .plan_transition_with_marker(next_zone, activation_marker)
@@ -3799,19 +4556,37 @@ impl Runtime {
         let next_vram_fill_color = retail_zone_transition_color(&self.retail_zones, next_zone)?;
         let prepared_music = self.prepare_retail_music(&self.level_assets, next_zone, false)?;
 
-        // Validate every fallible page/entry operation before the first TERM
-        // event can irreversibly mutate the live object forest.
+        // Validate the complete source pager order before the first TERM event
+        // can irreversibly mutate the live object forest. The physical title
+        // ZDAT and changed-world SLST still run under the old texture-zone
+        // protection; LevelUpdate installs the destination immediately before
+        // unloading/opening its load lists.
         let mut pager_validation = self.retail_zone_pager.clone();
         let destination_load_list = self
             .retail_zone_lifecycle
             .zone(next_zone)
             .ok_or_else(|| "destination texture zone is absent from the lifecycle".to_owned())?
-            .load_list();
+            .load_list()
+            .clone();
+        stage_retail_level_update_physical_prefix(
+            &mut pager_validation,
+            physical_zdat,
+            visibility_list,
+            |_| Ok(()),
+        )?;
         pager_validation
             .set_current_texture_load_eids(destination_load_list.entries().iter().copied());
         for action in plan.actions().iter().copied() {
             apply_retail_zone_paging_action(&mut pager_validation, action)?;
         }
+        if activation_marker {
+            drain_retail_level_update_pages(&mut pager_validation, |_| Ok(()))?;
+        }
+        stage_retail_level_update_physical_suffix(
+            &mut pager_validation,
+            physical_zdat,
+            |_| Ok(()),
+        )?;
         let mut lifecycle_preview = self.retail_zone_lifecycle.clone();
         lifecycle_preview
             .commit_transition(&plan)
@@ -3823,14 +4598,51 @@ impl Runtime {
         // destination protection set before any destination open can allocate
         // a texture slot.
         let mut pager_commit = self.retail_zone_pager.clone();
+        stage_retail_level_update_physical_prefix(
+            &mut pager_commit,
+            physical_zdat,
+            visibility_list,
+            |publication| publish_retail_paging_publication(&mut self.retail_objects, publication),
+        )?;
 
         let previous_zone = plan.previous_zone();
         let mut terminated = 0_usize;
         let mut cleanup_actions = 0_usize;
-        let mut destination_selected = false;
         let mut unavailable_opens = 0_usize;
         let mut event_failures = Vec::new();
-        for action in plan.actions().iter().copied() {
+        let destination_neighbors = self
+            .retail_zone_lifecycle
+            .zone(next_zone)
+            .expect("destination was checked above")
+            .neighbors();
+        let destination_flags_start = plan
+            .actions()
+            .iter()
+            .position(|action| {
+                matches!(
+                    action,
+                    ZoneTransitionAction::SetDisplayFlags { zone, .. }
+                        if destination_neighbors.contains(zone)
+                )
+            })
+            .unwrap_or(plan.actions().len());
+        let paging_start = plan
+            .actions()
+            .iter()
+            .position(|action| {
+                matches!(
+                    action,
+                    ZoneTransitionAction::CloseEntry(_)
+                        | ZoneTransitionAction::ClosePage(_)
+                        | ZoneTransitionAction::OpenEntry(_)
+                        | ZoneTransitionAction::OpenPage(_)
+                )
+            })
+            .unwrap_or(destination_flags_start);
+
+        // Native performs departed-zone TERM and its paired display-bit clear
+        // before assigning cur_zone and unloading the old load list.
+        for action in plan.actions()[..paging_start].iter().copied() {
             match action {
                 ZoneTransitionAction::TerminateZoneObjects(zone) => {
                     let report = {
@@ -3872,52 +4684,88 @@ impl Runtime {
                 | ZoneTransitionAction::ClosePage(_)
                 | ZoneTransitionAction::OpenEntry(_)
                 | ZoneTransitionAction::OpenPage(_) => {
-                    if !destination_selected {
-                        pager_commit.set_current_texture_load_eids(
-                            destination_load_list.entries().iter().copied(),
-                        );
-                        destination_selected = true;
-                    }
-                    match apply_retail_zone_paging_action(&mut pager_commit, action)? {
-                        RetailZonePagingOutcome::Open(outcome) => {
-                            let published = if outcome.resolved {
-                                self.retail_objects
-                                    .apply_platform_paging_open(outcome.page, outcome.invalidated)
-                            } else {
-                                self.retail_objects
-                                    .apply_platform_paging_queued_open(outcome.page)
-                            };
-                            published.map_err(|error| {
-                                format!(
-                                    "could not publish zone-transition page resolution: {error:?}"
-                                )
-                            })?;
-                        }
-                        RetailZonePagingOutcome::Close(outcome) => self
-                            .retail_objects
-                            .apply_platform_paging_close(
-                                outcome.page,
-                                outcome.decremented,
-                                outcome.unresolved,
-                            )
-                            .map_err(|error| {
-                                format!("could not publish zone-transition page close: {error:?}")
-                            })?,
-                        RetailZonePagingOutcome::OpenUnavailable => {
-                            unavailable_opens = unavailable_opens.saturating_add(1);
-                        }
-                        RetailZonePagingOutcome::None => {}
-                    }
+                    return Err(
+                        "retail transition paging action preceded the source cur_zone boundary"
+                            .to_owned(),
+                    );
                 }
             }
+        }
+
+        // TERM handlers can perform their own host paging. Revalidate the
+        // remaining close/open/drain/ZDAT-close suffix from that exact state,
+        // then publish the identical outcomes to the GOOL paging mirror.
+        let mut post_term_validation = pager_commit.clone();
+        post_term_validation
+            .set_current_texture_load_eids(destination_load_list.entries().iter().copied());
+        for action in plan.actions()[paging_start..destination_flags_start]
+            .iter()
+            .copied()
+        {
+            apply_retail_zone_paging_action(&mut post_term_validation, action)?;
+        }
+        if activation_marker {
+            drain_retail_level_update_pages(&mut post_term_validation, |_| Ok(()))?;
+        }
+        let pager_before_zdat_close = post_term_validation.clone();
+        stage_retail_level_update_physical_suffix(
+            &mut post_term_validation,
+            physical_zdat,
+            |_| Ok(()),
+        )?;
+
+        pager_commit.set_current_texture_load_eids(destination_load_list.entries().iter().copied());
+        for action in plan.actions()[paging_start..destination_flags_start]
+            .iter()
+            .copied()
+        {
+            match apply_retail_zone_paging_action(&mut pager_commit, action)? {
+                RetailZonePagingOutcome::Open(outcome) => {
+                    let publication = RetailPagingPublication::Open(outcome);
+                    publish_retail_paging_publication(&mut self.retail_objects, publication)?;
+                }
+                RetailZonePagingOutcome::Close(outcome) => {
+                    let publication = RetailPagingPublication::Close(outcome);
+                    publish_retail_paging_publication(&mut self.retail_objects, publication)?;
+                }
+                RetailZonePagingOutcome::OpenUnavailable => {
+                    unavailable_opens = unavailable_opens.saturating_add(1);
+                }
+                RetailZonePagingOutcome::None => {}
+            }
+        }
+        if activation_marker {
+            drain_retail_level_update_pages(&mut pager_commit, |outcome| {
+                publish_retail_paging_publication(
+                    &mut self.retail_objects,
+                    RetailPagingPublication::SynchronousUpdate(outcome),
+                )
+            })?;
+        }
+
+        // Destination neighbor activation follows NSUpdate2. This ordering is
+        // observable by the next spawn pass and matches the source loop.
+        for action in plan.actions()[destination_flags_start..].iter().copied() {
+            let ZoneTransitionAction::SetDisplayFlags { before, after, .. } = action else {
+                return Err("retail transition has paging after destination activation".to_owned());
+            };
+            if before & ZONE_OBJECTS_ACTIVE == 0 && after & ZONE_OBJECTS_ACTIVE != 0 {
+                self.retail_objects.reset_retail_box_spawn_state();
+            }
+        }
+        // LevelUpdateMisc publishes destination graphics and stops/retargets
+        // the MIDI owner while TitleLoadScreen's physical ZDAT reference is
+        // still live. Its matching NSClose follows the complete LevelUpdate.
+        self.retail_objects
+            .set_next_vram_fill_color(next_vram_fill_color);
+        self.apply_prepared_retail_music(prepared_music, false, next_zone, dom)?;
+        if pager_commit != pager_before_zdat_close {
+            return Err("zone LevelUpdate pager commit diverged from validation".to_owned());
         }
         // Publish the candidate only after the final TERM delivery and checked
         // lifecycle action succeeds. Until here, the live pager is untouched.
         self.retail_zone_pager = pager_commit;
         self.retail_zone_lifecycle = lifecycle_preview;
-        self.retail_objects
-            .set_next_vram_fill_color(next_vram_fill_color);
-        self.apply_prepared_retail_music(prepared_music, false, next_zone, dom)?;
 
         self.retail_metrics.zone_transitions =
             self.retail_metrics.zone_transitions.saturating_add(1);
@@ -4001,6 +4849,51 @@ impl Runtime {
             .as_deref()
             .or(self.retail_runtime_warning.as_deref())
             .unwrap_or(normal)
+    }
+
+    /// Completes the title-only `CoreObjectsCreate` pager suffix after
+    /// `TitleLoadNextState`/`TitleLoadEntries` has run during subsystem init2.
+    fn stage_deferred_title_core_page_preloads(&mut self) -> Result<(), JsValue> {
+        if self.level_assets.level != FormatLevelId::TITLE {
+            return Ok(());
+        }
+        let mut pager = self.retail_zone_pager.clone();
+        let mut runtime = self.retail_objects.clone();
+        let outcomes = pager
+            .stage_retail_core_page_preloads(&self.level_assets.nsd, self.level_assets.level)
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not stage deferred title core page preloads: {error:?}"
+                ))
+            })?;
+        for outcome in outcomes {
+            match outcome {
+                RetailCorePagePreloadOutcome::Materialize(outcome) => {
+                    if outcome.resolved {
+                        runtime
+                            .apply_platform_paging_materialization(
+                                outcome.page,
+                                outcome.invalidated,
+                            )
+                            .map_err(|error| {
+                                JsValue::from_str(&format!(
+                                    "could not publish title core materialization: {error:?}"
+                                ))
+                            })?;
+                    }
+                }
+                RetailCorePagePreloadOutcome::Open(outcome) => {
+                    publish_retail_paging_publication(
+                        &mut runtime,
+                        RetailPagingPublication::Open(outcome),
+                    )
+                    .map_err(|error| JsValue::from_str(&error))?;
+                }
+            }
+        }
+        self.retail_zone_pager = pager;
+        self.retail_objects = runtime;
+        Ok(())
     }
 
     fn sync_title_card(&mut self, dom: &Dom) -> Result<(), JsValue> {
@@ -4099,44 +4992,13 @@ impl Runtime {
         Ok(())
     }
 
-    fn apply_retail_title_level_update(
+    fn terminate_retail_title_objects(
         &mut self,
-        screen: TitleScreen,
-        dom: &Dom,
-    ) -> Result<(), JsValue> {
-        let profile = retail_title_screen_profile(screen, self.flow.progress.current_map_level);
-        self.retail_objects
-            .set_global_word(NEXT_DISPLAY_GLOBAL, profile.display_mask())
-            .map_err(|error| {
-                JsValue::from_str(&format!("could not publish title display mask: {error:?}"))
-            })?;
-        let zone_name = profile.zone_name;
-        let zone = Eid::from_name(zone_name).map_err(|error| {
-            JsValue::from_str(&format!("retail title zone {zone_name}: {error}"))
-        })?;
-        let path = RetailPathId { zone, index: 0 };
-        if self.retail_zone_graph.path(path).is_none() {
-            return Err(JsValue::from_str(&format!(
-                "retail title state {} references absent path {zone}:0",
-                screen as u8
-            )));
-        }
-        let previous_title_mdat = self
-            .last_title_state
-            .filter(|state| title_state_number_uses_image(*state))
-            .and_then(|state| title_mdat_eid(state).ok());
-
-        // TitleLoadScreen kills every old title/MDAT object before its
-        // explicit flag-two LevelUpdate, without zone immunity gates.
-        self.retail_objects
-            .reset_retail_pause_for_screen_load()
-            .map_err(|error| {
-                JsValue::from_str(&format!(
-                    "could not reset retail pause state for the title screen: {error:?}"
-                ))
-            })?;
+        title_mdat: Option<Eid>,
+        phase: &str,
+    ) -> Result<ZoneTerminationReport<BrowserProgramError>, JsValue> {
         let report = {
-            let mut host = if let Some(mdat) = previous_title_mdat {
+            let mut host = if let Some(mdat) = title_mdat {
                 BrowserProgramHost::for_title_mdat(
                     &self.level_assets.nsd,
                     &self.level_assets.nsf,
@@ -4161,14 +5023,113 @@ impl Runtime {
             self.retail_objects.terminate_all_objects(&mut host)
         }
         .map_err(|error| {
-            JsValue::from_str(&format!("retail title object teardown failed: {error:?}"))
+            JsValue::from_str(&format!(
+                "retail title {phase} object teardown failed: {error:?}"
+            ))
         })?;
         for cleanup in &report.cleanup_actions {
             let RuntimeCleanupAction::FreeObjectAudio(object) = *cleanup;
             self.retail_audio.free_owner(object.vm());
         }
+        Ok(report)
+    }
+
+    fn apply_retail_title_level_update(
+        &mut self,
+        screen: TitleScreen,
+        dom: &Dom,
+    ) -> Result<(), JsValue> {
+        let profile = retail_title_screen_profile(screen, self.flow.progress.current_map_level);
+        let zone_name = profile.zone_name;
+        let zone = Eid::from_name(zone_name).map_err(|error| {
+            JsValue::from_str(&format!("retail title zone {zone_name}: {error}"))
+        })?;
+        let path = RetailPathId { zone, index: 0 };
+        if self.retail_zone_graph.path(path).is_none() {
+            return Err(JsValue::from_str(&format!(
+                "retail title state {} references absent path {zone}:0",
+                screen as u8
+            )));
+        }
+        let previous_title_mdat = self
+            .last_title_state
+            .filter(|state| title_state_number_uses_image(*state))
+            .and_then(|state| title_mdat_eid(state).ok());
+
+        // A same-stream TitleUpdate performs an outer termination before it
+        // releases the fading-out MDAT ownership. Initial TitleLoadNextState
+        // enters TitleLoadState directly and therefore has no outer pass.
+        // Keep the current pause and display state visible to these handlers.
+        let outer_report = self
+            .last_title_state
+            .is_some()
+            .then(|| self.terminate_retail_title_objects(previous_title_mdat, "fading-out outer"))
+            .transpose()?;
+        if let Some(previous_state) = self
+            .last_title_state
+            .filter(|state| title_state_number_uses_image(*state))
+        {
+            let previous = load_title_mdat(
+                &self.level_assets.nsd,
+                &self.level_assets.nsf,
+                &self.level_assets.nsf_bytes,
+                previous_state,
+            )
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not parse fading-out title MDAT state {previous_state}: {error}"
+                ))
+            })?;
+            let plan = RetailTitleEntryPlan::from_mdat(&previous).map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not plan fading-out title MDAT state {previous_state}: {error}"
+                ))
+            })?;
+            stage_retail_title_entries_close(&mut self.retail_zone_pager, &plan, |publication| {
+                publish_retail_paging_publication(&mut self.retail_objects, publication)
+            })
+            .map_err(|error| JsValue::from_str(&error))?;
+        }
+        // TitleLoadState clears its authored pause gate after releasing the
+        // fading-out entry graph, but before Main Menu's LevelResetGlobals and
+        // the later TitleLoadScreen host-pause reset/inner TERM boundary.
+        self.retail_objects
+            .reset_retail_title_pause_state_for_load_state()
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not reset the title load-state pause global: {error:?}"
+                ))
+            })?;
         if screen == TitleScreen::MainMenu {
             self.apply_protected_title_reset(dom)?;
+        }
+        // TitleLoadScreen resets pause, then performs its own unconditional
+        // termination pass. This second boundary removes any object spawned
+        // by the outer TERM handlers or the protected Main Menu reset before
+        // the destination screen publishes its display mask and ZDAT.
+        self.retail_objects
+            .reset_retail_pause_for_screen_load()
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not reset retail pause state for the title screen: {error:?}"
+                ))
+            })?;
+        let inner_report =
+            self.terminate_retail_title_objects(previous_title_mdat, "screen-load inner")?;
+
+        // TitleLoadScreen publishes the new type-specific display mask only
+        // after both applicable termination boundaries (and after Main Menu's
+        // protected LevelResetGlobals). Old handlers therefore observe the
+        // fading-out state's mask, exactly as in the source.
+        self.retail_objects
+            .set_global_word(NEXT_DISPLAY_GLOBAL, profile.display_mask())
+            .map_err(|error| {
+                JsValue::from_str(&format!("could not publish title display mask: {error:?}"))
+            })?;
+        if profile.screen_type == RetailTitleScreenType::WorldObjectsAndCamera {
+            // Type-one TitleLoadScreen releases only state-30 slots 8..14
+            // before its physical ZDAT open. Slot 15 remains untouched.
+            self.retail_zone_pager.release_title_clut_texture_slots();
         }
         let step = self
             .retail_camera
@@ -4176,20 +5137,48 @@ impl Runtime {
             .map_err(|error| {
                 JsValue::from_str(&format!("retail title LevelUpdate failed: {error}"))
             })?;
-        self.apply_retail_camera_effects(&step, dom)
+        self.apply_retail_camera_effects_with_physical_zdat(&step, Some(zone), dom)
             .map_err(|error| JsValue::from_str(&error))?;
         if profile.uses_image() {
+            let mdat = load_title_mdat(
+                &self.level_assets.nsd,
+                &self.level_assets.nsf,
+                &self.level_assets.nsf_bytes,
+                screen as u8,
+            )
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not parse title MDAT state {}: {error}",
+                    screen as u8
+                ))
+            })?;
+            let plan = RetailTitleEntryPlan::from_mdat(&mdat).map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not plan title MDAT state {}: {error}",
+                    screen as u8
+                ))
+            })?;
+            stage_retail_title_entries_open(&mut self.retail_zone_pager, &plan, |publication| {
+                publish_retail_paging_publication(&mut self.retail_objects, publication)
+            })
+            .map_err(|error| JsValue::from_str(&error))?;
             self.spawn_retail_title_mdat(screen as u8, dom)?;
         }
         self.retail_tick_state = RetailTickState::NeedsSpawn;
+        let outer_terminated = outer_report
+            .as_ref()
+            .map_or(0, |report| report.terminated.len());
+        let outer_failures = outer_report
+            .as_ref()
+            .map_or(0, |report| report.event_failures.len());
         dom.log(
             &format!(
-                "Title state {} applied a type-{:?} flag-two LevelUpdate to {zone}:0 after terminating {} objects.",
+                "Title state {} applied a type-{:?} flag-two LevelUpdate to {zone}:0 after terminating {outer_terminated} outer and {} inner objects.",
                 screen as u8,
                 profile.screen_type,
-                report.terminated.len(),
+                inner_report.terminated.len(),
             ),
-            !report.event_failures.is_empty(),
+            outer_failures != 0 || !inner_report.event_failures.is_empty(),
         );
         self.sync_completed_card_load(dom);
         Ok(())
@@ -5740,6 +6729,12 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
             runtime.browser_test_cumulative_metrics.hard_restarts,
         ),
         (
+            "retailCompletedSameLevelHardRestarts",
+            runtime
+                .browser_test_cumulative_metrics
+                .completed_same_level_hard_restarts,
+        ),
+        (
             "retailLoadStates",
             runtime.browser_test_cumulative_metrics.load_states,
         ),
@@ -5967,10 +6962,50 @@ fn retail_background_fill_for_zone(
     .map_err(|error| format!("retail background zone {zone}: {error}"))
 }
 
+/// Publishes one already-committed pager operation to the pointer-free GOOL
+/// paging mirror. Keeping all three operation kinds at one boundary prevents
+/// a physical SLST/ZDAT open, a virtual load-list open, or an `NSUpdate2`
+/// promotion from advancing the pager without the matching generation state.
+fn publish_retail_paging_publication(
+    runtime: &mut RetailRuntime,
+    publication: RetailPagingPublication,
+) -> Result<(), String> {
+    match publication {
+        RetailPagingPublication::Open(outcome) => {
+            let result = if outcome.resolved {
+                runtime.apply_platform_paging_open(outcome.page, outcome.invalidated)
+            } else {
+                runtime.apply_platform_paging_queued_open(outcome.page)
+            };
+            result.map_err(|error| format!("could not publish retail page open: {error:?}"))
+        }
+        RetailPagingPublication::Close(outcome) => runtime
+            .apply_platform_paging_close(outcome.page, outcome.decremented, outcome.unresolved)
+            .map_err(|error| format!("could not publish retail page close: {error:?}")),
+        RetailPagingPublication::SynchronousUpdate(PagerUpdateOutcome::Invalidated(pages)) => {
+            runtime
+                .apply_platform_paging_evictions(&pages)
+                .map_err(|error| format!("could not publish synchronous page evictions: {error:?}"))
+        }
+        RetailPagingPublication::SynchronousUpdate(PagerUpdateOutcome::Resolved(outcome)) => {
+            debug_assert!(outcome.resolved);
+            runtime
+                .apply_platform_paging_resolution(outcome.page, outcome.invalidated)
+                .map_err(|error| {
+                    format!("could not publish synchronous page resolution: {error:?}")
+                })
+        }
+        RetailPagingPublication::TitleTextureReservations(pages) => runtime
+            .apply_platform_title_texture_reservations(&pages)
+            .map_err(|error| format!("could not publish title texture reservations: {error:?}")),
+    }
+}
+
 fn parse_retail_zone_catalog(
     pair: &ValidatedPair,
     graph: &RetailZoneGraph,
     initial_zone: Eid,
+    initial_activation_marker: bool,
 ) -> Result<(BTreeMap<Eid, OwnedRetailZone>, ZoneLifecycle), JsValue> {
     let mut zones = BTreeMap::new();
     let mut lifecycle_zones = Vec::with_capacity(graph.zone_count());
@@ -6017,6 +7052,7 @@ fn parse_retail_zone_catalog(
                 OwnedRetailZone {
                     eid,
                     graphics: header.graphics,
+                    world_count: header.worlds.len(),
                     entities,
                 },
             )
@@ -6030,7 +7066,7 @@ fn parse_retail_zone_catalog(
     let mut lifecycle = ZoneLifecycle::new(lifecycle_zones)
         .map_err(|error| JsValue::from_str(&format!("retail zone lifecycle: {error}")))?;
     lifecycle
-        .transition_with_marker(initial_zone, pair.level != FormatLevelId::TITLE)
+        .transition_with_marker(initial_zone, initial_activation_marker)
         .map_err(|error| JsValue::from_str(&format!("initial retail zone activation: {error}")))?;
     Ok((zones, lifecycle))
 }
@@ -6066,22 +7102,62 @@ fn build_retail_level_state_context(
 
 fn build_retail_zone_pager(
     pair: &ValidatedPair,
+    graph: &RetailZoneGraph,
+    zones: &BTreeMap<Eid, OwnedRetailZone>,
+    initial_location: RetailCameraLocation,
     lifecycle: &ZoneLifecycle,
+    initial_level_update_active: bool,
+    texture_slot_carry: Option<TextureSlotCarrySnapshot>,
 ) -> Result<Pager, JsValue> {
     let current_zone = lifecycle
         .current_zone()
         .ok_or_else(|| JsValue::from_str("retail zone lifecycle has no initial current zone"))?;
+    if initial_location.path.zone != current_zone {
+        return Err(JsValue::from_str(
+            "initial retail camera and lifecycle zones disagree",
+        ));
+    }
     let load_list = lifecycle
         .zone(current_zone)
         .ok_or_else(|| JsValue::from_str("retail lifecycle current zone is absent"))?
         .load_list();
-    Pager::mount_retail_level(
+    let page_update = if initial_level_update_active {
+        RetailLevelMountPageUpdate::Drain
+    } else {
+        RetailLevelMountPageUpdate::Defer
+    };
+    let initial_visibility_list = if zones
+        .get(&current_zone)
+        .ok_or_else(|| JsValue::from_str("retail pager current zone is absent"))?
+        .world_count
+        != 0
+    {
+        Some(
+            graph
+                .path(initial_location.path)
+                .ok_or_else(|| JsValue::from_str("initial retail camera path is absent"))?
+                .visibility_list,
+        )
+    } else {
+        None
+    };
+    let mut options = RetailLevelMountOptions::new(pair.level)
+        .with_page_update(page_update)
+        .with_initial_visibility_list(initial_visibility_list)
+        .with_core_page_preloads(pair.level != FormatLevelId::TITLE);
+    if let Some(carry) = texture_slot_carry {
+        // `mount_retail_level_with_options` imports this into a fresh pager
+        // before the physical spawn ZDAT/SLST or any virtual load-list open.
+        options = options.with_texture_slot_carry(carry);
+    }
+    Pager::mount_retail_level_with_options(
         &pair.nsd,
         &pair.nsf,
         pair.level,
         current_zone,
         load_list.entries().iter().copied(),
         load_list.pages().iter().copied(),
+        options,
     )
     .map_err(|error| {
         JsValue::from_str(&format!(

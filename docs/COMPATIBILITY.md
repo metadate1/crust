@@ -1,9 +1,17 @@
 # Compatibility and known limits
 
-`crust` is a runnable Rust/Wasm interoperability implementation. It is not a complete replacement
-for the retail executable and does not claim full-playthrough parity. The distinction below is
-intentional: a subsystem can be parsed and unit-tested without being connected to the live browser
-gameplay path.
+`crust` is a runnable Rust/Wasm interoperability implementation. Its ordinary NTSC-U campaign now
+has a complete owned-BIN browser proof, but the project does not yet claim parity for every secret,
+alternate-completion, damaged-save, demo, hardware, SPU, or mechanical-CD edge case. The
+distinction below is intentional: a subsystem can be parsed and unit-tested without being
+connected to the live browser gameplay path.
+
+The current native canonical regression starts at the retail publisher/title opening, carries the
+same process/session and physical-pad history through the main-map campaign, defeats Dr. Neo
+Cortex, executes Ending, and remounts Title. The matching real-browser proof now completes that
+ordinary route across all 44 mounted pairs and 141,776 replay frames with no skipped frame or
+failed checkpoint. Stormy Ascent separately reaches its authored end warp from a direct boot;
+secret-key integration and a browser-driven Stormy Ascent route remain separate checks.
 
 ## What is connected in the browser
 
@@ -513,14 +521,15 @@ gameplay path.
   restored Crash transform, camera location, box count, and every saved spawn word. Separate
   controlled regressions cover all three authentic `BoxsC` → `FruiC` → `DispC` Tawna-token routes,
   the third-token save/fade/status/`0x24` transition, and WarpC's parsed proximity/status gate at
-  its exact quantized boundaries. Newer legally local ordinary-pad routes now join those boundaries
-  physically: Jungle Rollers enters Tawna Bonus `0x24`, Rolling Stones enters Brio Bonus `0x25`,
-  carried Great Gate enters the second Tawna layout `0x33`, and Sunset Vista enters Cortex Bonus
-  `0x34`. Each tested layout reaches its authored portal/`LoadState`, resolves `-2`, and preserves
-  the exact parent snapshot through the return carry; the Jungle and Great Gate routes additionally
-  remount and resume the protected parent. Bonus `0x26` remains a valid direct-boot stream but has
-  no authored parent selector. Other parent-specific selector/layout variants and an uninterrupted
-  browser bonus playthrough remain open.
+  its exact quantized boundaries. Current legally local ordinary-pad routes join those boundaries
+  physically for Jungle Rollers/Tawna Bonus `0x24`, carried Great Gate/Bonus 2 `0x33`, and Sunset
+  Vista/Cortex Bonus `0x34`. Each current layout reaches its authored portal/`LoadState`, resolves
+  `-2`, and preserves the exact parent snapshot through the return carry; the Jungle and Great Gate
+  routes additionally remount and resume the protected parent. Rolling Stones/Brio Bonus `0x25`
+  now also has a passing FreshBoot exact-parent-snapshot round trip and an ordinary-input traversal
+  through the authored portal and return. Bonus `0x26` remains a valid direct-boot stream but has no
+  authored parent selector. Other parent-specific selector/layout variants outside the canonical
+  browser campaign remain open.
   The authentic first-completion carry into Jungle Rollers retains source RNG-A and `draw_count`,
   which independently alter its hazard/animation phase; resetting either at mount would be source
   incompatible. The former fresh-boot controller entered Crash state 23 at frame 532 and restarted
@@ -664,17 +673,10 @@ gameplay path.
   `0xa2cc489a`/`0x654cb6a6`, and draw is 10,239. This is deterministic native integration over
   user-supplied local data, not browser execution or full-game parity.
 
-  A separate legally local Rolling Stones direct-boot controller reaches the same normal end. It
-  avoids the `0x1900` squash paths from JunOC entities 75/77/52 with ordinary neutral/run/jump
-  windows and breaks BoxsC entity 92 on frame 1,860. Three terrain jumps continue `0M -> 0O`
-  without taking alternate `0N`; a short right-jump enters end `WarpC`, which executes states zero
-  through four and requests Level Complete on frame 2,447. The route records 117 successful spawns,
-  55,122 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes,
-  while retaining checkpoint `0x0800`, saved translation
-  `[2815232, 2979072, 17458688]`, saved boxes `0x0900`, and live boxes `0x0b00`. It has no restart,
-  state-31 squash, fall, fault, execution error, or LoadState. Its final camera is
-  `0O_lZ:0@9984`, Crash is `[2235680, 9256244, -1821440]`, and RNG is `0xfb2e6e83` at draw 2,447.
-  The uninterrupted campaign carry reaches the same authored transition 18 frames later.
+  Rolling Stones' exact current and session-carried normal routes reach the authored transition and
+  remain the active campaign coverage for that level. The FreshBoot direct-completion fixture now
+  reaches Level Complete at frame 2,656, while the short Brio-token snapshot and longer
+  Rolling Stones/Brio Bonus round trip both pass against the current scheduler/controller phase.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC
@@ -689,7 +691,10 @@ gameplay path.
   113 authored credits-child spawns, reuses arena slots through generation three, peaks at 82 live
   objects, and requests Title `0x19` on frame 3,396 without a VM fault. This replaces the broken
   97-slot saturation at frame 1,437 and covers the authored Ending-to-Title request. Its clean
-  `LEVEL_END` exports a session carry that a fresh Title runtime imports with the same draw phase;
+  `LEVEL_END` exports a session carry that a fresh Title runtime imports with the same draw phase.
+  The pre-`LEVEL_END` Ending runtime and freshly mounted frame-zero Title both retain
+  `GAME_STATE=0x600`; Title clears it only on its first authored tick. This exact boundary is
+  distinct from the earlier bounded 3,600-frame credits characterization.
   Ending's real ID-one main entity also triggers the native initial `LevelSaveState` through its
   dedicated main allocation. Special ID one through four and subtype-zero executable `0x2c`/`0x30`
   selectors share that checked behavior instead of retaining a prior stream's snapshot. The
@@ -802,9 +807,11 @@ gameplay path.
   completes that real operation-two handshake, and the shared `0e` Password selection bypasses it
   as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
-- Independent deterministic routes now reach the real authored exits throughout the retail
+- The canonical legally local native session-carry regression begins at the retail
+  publisher/title opening and reaches Cortex, Ending, and the final Title remount without a process
+  reset. Independent deterministic routes also reach authored exits throughout the retail
   campaign, including N. Sanity Beach, Jungle Rollers, Hog Wild, Whole Hog, Boulder Dash, Native
-  Fortress, and Rolling Stones. N. Sanity's fresh ordinary-pad golden
+  Fortress, and current-phase Rolling Stones. N. Sanity's fresh ordinary-pad golden
   activates checkpoint 19, reaches `0xa00` counted boxes, executes `WarpC` states zero through four,
   and resolves the checked Level Complete handoff at frame 1,900 without a restart or fault. The
   carried chain executes the complete legally local Upstream PBAK input, completes Upstream's
@@ -819,9 +826,10 @@ gameplay path.
   retains the exact inherited Jaws, Castle Machinery, and Lab phases, crosses Great Hall, defeats
   Cortex, executes Ending, and remounts Title with level 32 unlocked. This complete native
   main-map chain still includes its documented legally local PBAK-assisted sections and Lost
-  City's six recovery restarts; it is not a zero-recovery browser-playthrough claim. The independent
-  Rolling Stones direct boot reaches the same end on its own deterministic phase, and the exact
-  raw-BIN browser-derived post-Papu carry now reaches it independently. A later owned-raw-BIN
+  City's six recovery restarts; it is not a zero-recovery browser-playthrough claim. Current exact,
+  session-carried, raw-BIN browser-derived post-Papu, and FreshBoot Rolling phases reach the
+  authored normal end. The Brio snapshot and bonus round trip also pass on the current tree. A
+  later owned-raw-BIN
   Chromium run joined the publisher/title-to-Rolling mount, exact Rolling route, 425-frame Level
   Complete graph, authored Title Map handoff, exact Hog Wild route and its completion acknowledgement
   in one browser session. The following authored Map selection mounted Native Fortress at draw
@@ -833,16 +841,23 @@ gameplay path.
   failure, or WebGL error. The route uses ordinary exported pad words and conditionally omits only
   replay segments whose destination mount has already completed; no skipped segment advances the
   simulation. The same zero-recovery owned-BIN session then completes Up the Creek and Ripper Roo
-  before visibly mounting The Lost City at draw 37,277. Across the resulting 37,313 executed
-  harness frames, every cumulative recovery and fault counter remains zero. The Lost City's
-  existing deterministic route intentionally uses six authored death/LoadState recoveries, so a
-  separate zero-recovery carried route and browser progression beyond that mount remain open.
-  Representative Tawna, Brio, second-Tawna, and Cortex bonus layouts have complete ordinary-pad
-  native parent-entry/portal/return coverage, including protected parent remounts where asserted.
-  Other parent-specific bonus layouts and an uninterrupted browser bonus round trip remain open.
-  Remaining gates include Stormy Ascent, carried key-unlock integration for the secret levels,
-  every unfinished bonus-layout variant, broader death/checkpoint sequences, a complete
-  browser-driven endgame, long soak, mobile audio sessions, and a multiple physical-gamepad matrix.
+  before visibly mounting The Lost City at draw 37,277. That historical 37,313-frame checkpoint
+  has since been superseded by the completed 141,776-frame Title-to-Title browser replay. The final
+  run crosses every later campaign mount, Cortex, Ending, and the return to Title with no skipped
+  replay frame, death-camera frame, or failed runtime/checkpoint assertion. Its three hard-restart
+  and two LoadState calls are expected authored bonus-return transactions.
+  Representative Tawna, second-Tawna, and Cortex bonus layouts have complete ordinary-pad native
+  parent-entry/portal/return coverage, including protected parent remounts where asserted. Rolling
+  Stones/Brio now passes direct completion, exact parent-snapshot round trip, and ordinary-input
+  Brio-bonus traversal checks. Other parent-specific bonus layouts remain explicit edge gates.
+  Stormy Ascent's direct ordinary-pad route now reaches its
+  authored end warp within the 9,500-frame budget with no restart, death-camera frame, terminal
+  fall, or checked issue. Castle Machinery's corrected exact carried route also passes at 6,071
+  frames without the former impossible opposing-direction fallback. Carried key-unlock integration
+  for the secret levels remains separate.
+  Other remaining gates include unfinished bonus-layout variants, broader death/checkpoint
+  sequences, alternate completion, long soak, mobile audio sessions, and a multiple physical-
+  gamepad matrix.
 
 ## Automated coverage
 

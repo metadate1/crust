@@ -5,6 +5,10 @@
 use wasm_bindgen::prelude::*;
 
 #[cfg(any(target_arch = "wasm32", test))]
+use crust_formats::binary::Eid;
+#[cfg(any(target_arch = "wasm32", test))]
+use crust_formats::stream::{LevelId as FormatLevelId, RetailPathId};
+#[cfg(any(target_arch = "wasm32", test))]
 use crust_sim::card::SaveData;
 #[cfg(any(target_arch = "wasm32", test))]
 use crust_sim::gool::{
@@ -31,9 +35,13 @@ mod display;
 #[cfg(target_arch = "wasm32")]
 mod dom;
 #[cfg(any(target_arch = "wasm32", test))]
+mod paging_boundary;
+#[cfg(any(target_arch = "wasm32", test))]
 mod pbak_runtime;
 #[cfg(any(target_arch = "wasm32", test))]
 pub mod renderer_backend;
+#[cfg(any(target_arch = "wasm32", test))]
+mod restart_transaction;
 #[cfg(any(target_arch = "wasm32", test))]
 mod retail_clock;
 pub mod retail_scene;
@@ -55,6 +63,151 @@ mod webgl;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct BrowserTestClock {
     next_timestamp_ms: f64,
+}
+
+/// Cumulative recovery diagnostics exposed only by the deterministic browser
+/// harness. Ordinary per-level runtime metrics reset on each stream mount;
+/// these counters instead span the complete browser session.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser-test-harness")))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BrowserTestCumulativeMetrics {
+    /// Legacy schema-one counter: every observed `LevelRestart` call,
+    /// including a call that names a different stream or later fails.
+    pub(crate) hard_restarts: u64,
+    /// Successful same-level restart transactions. Kept separate so adding a
+    /// commit-boundary diagnostic cannot change schema-one checkpoints.
+    pub(crate) completed_same_level_hard_restarts: u64,
+    pub(crate) load_states: u64,
+    pub(crate) death_camera_frames: u64,
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser-test-harness")))]
+impl BrowserTestCumulativeMetrics {
+    pub(crate) fn record_hard_restart_call(&mut self) {
+        self.hard_restarts = self.hard_restarts.saturating_add(1);
+    }
+
+    pub(crate) fn record_completed_same_level_hard_restart(&mut self) {
+        self.completed_same_level_hard_restarts =
+            self.completed_same_level_hard_restarts.saturating_add(1);
+    }
+}
+
+/// Browser-side progress through the source `CoreFrame` tail for the currently
+/// mounted stream. Kept outside `app` so the asynchronous mount ordering is
+/// directly testable on native targets.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RetailTickState {
+    NeedsSpawn,
+    /// A synchronous `LevelRestart` completed during the preceding source
+    /// frame. The next `CoreFrame` must inspect the restored game state before
+    /// respawning, while retaining the ordinary spawn/camera/GOOL tail when no
+    /// transition is requested.
+    RestartedNeedsSpawn,
+    PausedBeforeSpawn,
+    Running,
+    Paused,
+}
+
+/// Source position at which a synchronous `LevelRestart` returns to
+/// `CoreFrame`.
+///
+/// An ordinary GOOL or PBAK restart reaches the transition gate next. A
+/// bonus-return restart is different: it runs inside the already-consumed
+/// cross-stream transition branch, so native continues with that same
+/// frame's outer spawn/camera/GOOL tail before it may inspect game state at
+/// the following transition gate.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RetailRestartResume {
+    NextTransitionGate,
+    SuspendedFrameTail,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl RetailRestartResume {
+    pub(crate) const fn tick_state(self) -> RetailTickState {
+        match self {
+            Self::NextTransitionGate => RetailTickState::RestartedNeedsSpawn,
+            Self::SuspendedFrameTail => RetailTickState::NeedsSpawn,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl RetailTickState {
+    /// A synchronous source mount completes spawn, camera, and GOOL work in
+    /// the preceding `CoreFrame`. An asynchronous browser destination may not
+    /// consume a carried game-state transition before that tail has run.
+    pub(crate) const fn can_resolve_core_frame_transition(self) -> bool {
+        matches!(self, Self::RestartedNeedsSpawn | Self::Running)
+    }
+
+    /// Returns an explicit transition only at a source `CoreFrame` gate.
+    ///
+    /// The request remains owned by the runtime while an asynchronous mount is
+    /// completing the suspended spawn/camera/GOOL tail. This applies equally
+    /// to a concrete LID and native's `-2` saved-level sentinel.
+    pub(crate) const fn explicit_core_frame_transition(self, next_lid: i32) -> Option<i32> {
+        if self.can_resolve_core_frame_transition() && next_lid != -1 {
+            Some(next_lid)
+        } else {
+            None
+        }
+    }
+}
+
+/// `PbakChoose` runs before the destination's initial `LevelUpdate`. When a
+/// title-attract destination has no usable recording it changes native's game
+/// state from title (`0x600`) to cutscene (`0`) immediately; that makes the
+/// subsequent null-origin `LevelUpdate` active and drains pending PSX pages.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) const fn retail_game_state_after_pbak_choose(
+    game_state: i32,
+    title_attract_mount: bool,
+    playback_selected: bool,
+) -> i32 {
+    if title_attract_mount && !playback_selected {
+        0
+    } else {
+        game_state
+    }
+}
+
+/// Native `LevelUpdate` starts a null-origin zone change with local flag one,
+/// except while the shared game state still denotes the title/attract flow.
+/// Its raw `LdatInit` flags are zero there, so both initial neighbor activation
+/// and the PSX `NSUpdate2` drain are suppressed.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) const fn retail_initial_level_update_is_active(game_state: i32) -> bool {
+    game_state != 0x600
+}
+
+/// Reconstructs the path selected by `LdatInit` before its initial
+/// null-origin `LevelUpdate`.
+///
+/// The Title stream normally uses its LDAT spawn (`0a_pZ`), but retail
+/// substitutes the Game Over world (`0b_pZ:0`) when the carried game state is
+/// `0x200`. A bonus return is applied afterward in native and therefore wins
+/// over both ordinary choices.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn retail_ldat_initial_path(
+    level: FormatLevelId,
+    game_state: i32,
+    ldat_spawn: RetailPathId,
+    bonus_return: Option<RetailPathId>,
+) -> RetailPathId {
+    bonus_return.unwrap_or_else(|| {
+        if level == FormatLevelId::TITLE && game_state == 0x200 {
+            RetailPathId {
+                zone: Eid::from_name("0b_pZ").expect("fixed Title Game Over EID is valid"),
+                index: 0,
+            }
+        } else {
+            ldat_spawn
+        }
+    })
 }
 
 #[cfg(any(test, all(target_arch = "wasm32", feature = "browser-test-harness")))]
@@ -333,6 +486,138 @@ mod tests {
         assert_eq!(clock.take_timestamp_ms(), 0.0);
         assert_eq!(clock.take_timestamp_ms(), 34.0);
         assert_eq!(clock.take_timestamp_ms(), 68.0);
+    }
+
+    #[test]
+    fn browser_hard_restart_metrics_preserve_calls_and_separate_same_level_commits() {
+        let mut metrics = BrowserTestCumulativeMetrics::default();
+
+        metrics.record_hard_restart_call();
+        metrics.record_completed_same_level_hard_restart();
+        assert_eq!(
+            metrics.hard_restarts, 1,
+            "an ordinary death contributes one LevelRestart call"
+        );
+        assert_eq!(
+            metrics.completed_same_level_hard_restarts, 1,
+            "the ordinary death completes its same-level restore"
+        );
+
+        metrics.record_hard_restart_call();
+        assert_eq!(
+            metrics.hard_restarts, 2,
+            "a bonus's different-level LevelRestart call remains observable"
+        );
+        assert_eq!(
+            metrics.completed_same_level_hard_restarts, 1,
+            "a different-level call is not a completed same-level restore"
+        );
+
+        metrics.record_hard_restart_call();
+        metrics.record_completed_same_level_hard_restart();
+        assert_eq!(
+            metrics.hard_restarts, 3,
+            "the protected parent mount contributes the third call"
+        );
+        assert_eq!(
+            metrics.completed_same_level_hard_restarts, 2,
+            "the protected mount is the second completed same-level restore"
+        );
+    }
+
+    #[test]
+    fn game_state_transition_waits_for_the_post_mount_frame_tail() {
+        assert!(!RetailTickState::NeedsSpawn.can_resolve_core_frame_transition());
+        assert!(RetailTickState::RestartedNeedsSpawn.can_resolve_core_frame_transition());
+        assert!(!RetailTickState::PausedBeforeSpawn.can_resolve_core_frame_transition());
+        assert!(RetailTickState::Running.can_resolve_core_frame_transition());
+        assert!(!RetailTickState::Paused.can_resolve_core_frame_transition());
+    }
+
+    #[test]
+    fn bonus_return_restart_resumes_the_suspended_mount_frame_tail() {
+        let ordinary = RetailRestartResume::NextTransitionGate.tick_state();
+        assert_eq!(ordinary, RetailTickState::RestartedNeedsSpawn);
+        assert!(ordinary.can_resolve_core_frame_transition());
+
+        let bonus_return = RetailRestartResume::SuspendedFrameTail.tick_state();
+        assert_eq!(bonus_return, RetailTickState::NeedsSpawn);
+        assert!(
+            !bonus_return.can_resolve_core_frame_transition(),
+            "the carried 0x300 continue state must survive until the suspended parent frame's camera/GOOL tail has run"
+        );
+        for request in [-2, 0x09] {
+            assert_eq!(bonus_return.explicit_core_frame_transition(request), None);
+            assert_eq!(
+                RetailTickState::Running.explicit_core_frame_transition(request),
+                Some(request),
+                "the same request becomes consumable at the following CoreFrame gate"
+            );
+        }
+    }
+
+    #[test]
+    fn initial_level_update_suppresses_activation_only_for_title_attract_state() {
+        assert!(retail_initial_level_update_is_active(0));
+        assert!(retail_initial_level_update_is_active(0x100));
+        assert!(!retail_initial_level_update_is_active(0x600));
+    }
+
+    #[test]
+    fn title_game_over_replaces_the_ldat_spawn_before_initial_level_update() {
+        let ldat_spawn = RetailPathId {
+            zone: Eid::from_name("0a_pZ").unwrap(),
+            index: 3,
+        };
+
+        let selected = retail_ldat_initial_path(FormatLevelId::TITLE, 0x200, ldat_spawn, None);
+
+        assert_eq!(selected.zone, Eid::from_name("0b_pZ").unwrap());
+        assert_eq!(selected.index, 0);
+        assert_eq!(
+            retail_ldat_initial_path(FormatLevelId::TITLE, 0, ldat_spawn, None),
+            ldat_spawn,
+            "other Title states retain the serialized LDAT spawn"
+        );
+        assert_eq!(
+            retail_ldat_initial_path(FormatLevelId::N_SANITY_BEACH, 0x200, ldat_spawn, None,),
+            ldat_spawn,
+            "the game-over override is scoped to the Title stream"
+        );
+    }
+
+    #[test]
+    fn bonus_return_path_wins_over_the_title_game_over_override() {
+        let ldat_spawn = RetailPathId {
+            zone: Eid::from_name("0a_pZ").unwrap(),
+            index: 0,
+        };
+        let saved_path = RetailPathId {
+            zone: Eid::from_name("saveZ").unwrap(),
+            index: 7,
+        };
+
+        assert_eq!(
+            retail_ldat_initial_path(FormatLevelId::TITLE, 0x200, ldat_spawn, Some(saved_path),),
+            saved_path,
+            "native applies bonus_return after its Title-specific LDAT write"
+        );
+    }
+
+    #[test]
+    fn missing_title_attract_recording_activates_the_initial_level_update() {
+        let selected = retail_game_state_after_pbak_choose(0x600, true, true);
+        assert_eq!(selected, 0x600);
+        assert!(!retail_initial_level_update_is_active(selected));
+
+        let unavailable = retail_game_state_after_pbak_choose(0x600, true, false);
+        assert_eq!(unavailable, 0);
+        assert!(retail_initial_level_update_is_active(unavailable));
+
+        assert_eq!(
+            retail_game_state_after_pbak_choose(0x300, false, false),
+            0x300
+        );
     }
 
     #[test]
@@ -679,6 +964,28 @@ mod tests {
         assert_eq!(mounted.tapped, u32::from(PAD_START));
         assert_eq!(mounted.held_previous, 0);
         assert_eq!(mounted.held_previous_2, u32::from(PAD_CROSS));
+    }
+
+    #[test]
+    fn title_mount_keeps_the_source_pad_snapshot_until_deferred_core_objects_update() {
+        use crust_platform::input::{PAD_CROSS, PAD_START, PadState};
+
+        let mut pad = PadState::default();
+        pad.update(PAD_CROSS, 0, None);
+        let source_snapshot = pad.snapshot();
+
+        // TitleLoadNextState and its MDAT initializers run before
+        // CoreObjectsCreate. Importing the source snapshot must not shift the
+        // history or synthesize the destination's pending START edge early.
+        let title_init_snapshot = pad.snapshot();
+        assert_eq!(title_init_snapshot, source_snapshot);
+        assert_eq!(title_init_snapshot.held, u32::from(PAD_CROSS));
+        assert_eq!(title_init_snapshot.held_previous, 0);
+
+        let core_objects_snapshot = core_objects_pad_update(&mut pad, PAD_START, 0, None);
+        assert_eq!(core_objects_snapshot.held, u32::from(PAD_START));
+        assert_eq!(core_objects_snapshot.tapped, u32::from(PAD_START));
+        assert_eq!(core_objects_snapshot.held_previous, u32::from(PAD_CROSS));
     }
 
     #[test]

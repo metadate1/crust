@@ -596,8 +596,8 @@ The focused checks below were also completed:
   with zero faulted objects. Live population peaked at 82, below the regression bound of 89;
   before the fix, returned children remained at PC 54 and filled all 97 slots at frame 1,437. This
   verifies no-TERM reclamation, a clean `LEVEL_END`, and a session carry imported into a fresh
-  Title runtime without losing draw phase; it does not exercise the subsequent browser graph
-  remount in the same run.
+  Title runtime without losing draw phase or its frame-zero `GAME_STATE=0x600`; it does not
+  exercise Title's following authored tick or the subsequent browser graph remount in the same run.
 - The legally local N. Sanity → Level Complete → Title vertical-flow golden now asserts the native
   process-lifetime `draw_count` at both exported carries, both imported runtimes, and Title's first
   display frame. The observed sequence retained 1,900 into Level Complete, 2,413 into Title, and
@@ -1317,24 +1317,11 @@ is 1,322,866 bytes with SHA-256
   `0xa2cc489a`/`0x654cb6a6`, and draw is 10,239. There is no death, restart, faulted object,
   execution error, or checked issue. This is deterministic native integration over user-supplied
   local data, not a browser playthrough or full-game parity claim.
-- The legally local Rolling Stones (`0x15`) direct-boot route uses only ordinary 30 Hz pad words and
-  requests Level Complete `0x2d` on frame 2,447 with no restart, state-31 squash, death camera,
-  terminal fall, VM fault, execution error, or LoadState. It performs 117 successful spawns from
-  29,168 attempts with 29,051 source-expected rejections and 55,122 clean executions across 32
-  lifecycle zone transitions, 45 camera ranges, and 46 path changes. The route breaks its
-  authored opening wall, defeats PlanC entities 18/49/57 and turtle entities 15/72, times jumps over
-  JunOC entity 69, and avoids JunOC entities 75/77/52's `0x1900` squash paths using ordinary
-  neutral/run/jump windows. BoxsC subtype-four entity eight activates on frame 1,159. The
-  synchronous SaveState records checkpoint `0x0800`, player `[2815232, 2979072, 17458688]`, and
-  pre-increment box count `0x0900`; the live count then becomes `0x0a00` and spawn flags become
-  nine. BoxsC entity 92 breaks on frame 1,860 and advances the live count to `0x0b00`. The route
-  retains `0I -> 0J -> 0K`, avoids category-`0x300` entity 103 with an ordinary right/left lane
-  change, and crosses the successive `0K` pads. Three terrain jumps carry Crash from physical `0M`
-  into normal-route `0O` without entering alternate `0N`; a short right-jump enters end `WarpC`.
-  WarpC executes states zero through four before the transition. The final camera is
-  `0O_lZ:0@9984`, Crash is `[2235680, 9256244, -1821440]` in warp state 32, and RNG is
-  `0xfb2e6e83` at draw 2,447. The uninterrupted campaign carry independently reaches the same
-  authored end 18 frames later.
+- Rolling Stones (`0x15`) FreshBoot now reaches Level Complete on frame 2,656 under the current
+  scheduler/controller phase. The short Brio-token fixture restores the exact parent snapshot, and
+  the longer Rolling Stones/Brio Bonus fixture traverses the authored portal and return with
+  ordinary pad input. These join the exact session-carried normal route as current passing gates;
+  the older frame-2,447 terminal values remain historical characterization only.
 - Hog Wild (`0x11`) now has a complete direct-boot route using ordinary 30 Hz pad words. It
   traverses 67 camera paths/66 changes and 57 lifecycle transitions, activates checkpoints 13 and
   30, advances live boxes to `0x700`, observes WarpC states zero through four, and requests Level
@@ -1464,13 +1451,13 @@ is 1,322,866 bytes with SHA-256
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- The locked all-target workspace currently enumerates 1,096 tests: 958 default-active and 138
-  legally-local ignored tests. The complete 958-test default gate and previously published
-  136-test owned-data sweep pass with zero failures, including the complete Native Fortress and Up
+- The locked all-target workspace currently enumerates 1,295 Rust tests: 1,064 default-active and
+  231 ignored-by-default legally-local tests. The complete default gate and focused owned-data
+  sweeps pass with zero failures, including the complete Native Fortress and Up
   the Creek route goldens; the added N. Sanity completion, owned-disc caption-return, and complete
   `pb0cB` scene goldens pass independently. Rustfmt,
   warnings-denied native all-target Clippy, warnings-denied Wasm Clippy, optimized native/Wasm
-  release builds, all eleven Node distribution tests, `npm run build`, and the distribution verifier
+  release builds, all 51 Node tests, `npm run build`, and the distribution verifier
   pass on the delivery tree.
 - The `5ef328e` Chrome-compatible in-app browser build
   `5ef328ef9bcb-1a72bf618243-87f5283f6472-clean` selected the user's legally local
@@ -1575,8 +1562,9 @@ is 1,322,866 bytes with SHA-256
   `Unmute`, and unmute restored the original state. Browser warning/error logs remained empty
   through publisher, title, cutscene, map, level mount, gameplay input, pause, and audio-control
   checks.
-- This is a live boot/control regression check, not an opening-to-ending completion claim. The
-  uninterrupted owned-data campaign replay remains the authoritative completion gate.
+- This is a live boot/control regression check, not an opening-to-ending browser completion claim.
+  The uninterrupted native owned-data campaign regression is the authoritative completion gate;
+  browser evidence remains bounded separately.
 
 ### Physical-slot local-bound retention (2026-07-29)
 
@@ -1589,6 +1577,40 @@ is 1,322,866 bytes with SHA-256
   initialized bound while source-reset process words are still cleared, and a never-used slot does
   not overwrite a replacement's checked bound with invented data. The dedicated player's extra
   0x100-byte allocation tail remains separately open.
+
+### Current campaign frontier (2026-07-31)
+
+- The legally local native
+  `authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry` regression passes
+  on the current tree. It starts at the retail publisher/title opening, preserves process/session
+  state and physical pad history across the authored main-map mounts, defeats Dr. Neo Cortex,
+  executes Ending, and remounts Title. This is the canonical native campaign proof; it is not a
+  browser playthrough.
+- The canonical Ending boundary requests Title on frame 3,396. `GAME_STATE` is `0x600` both before
+  Ending's checked `LEVEL_END` and in the freshly mounted frame-zero Title carry; the first authored
+  Title tick then clears it to zero. This exact handshake is distinct from the earlier bounded
+  3,600-frame credits characterization.
+- `stormy_ascent_direct_boot_reaches_authored_end_warp` also passes. Its ordinary-pad route reaches
+  Level Complete within the 9,500-frame budget without a restart, death-camera frame, terminal
+  fall, or checked runtime issue. Key-unlock integration and a browser-driven Stormy Ascent run are
+  separate checks.
+- Castle Machinery's current exact carried golden passes at 6,071 frames. Its controller no longer
+  relies on an impossible opposing-direction fallback, so that characterization is not a remaining
+  campaign blocker.
+- The completed owned-BIN browser campaign executes the canonical 89-phase, 141,776-frame
+  Title-to-Title replay from 92 captures plus 96 bounded settle frames. It consumes all 14,429 input
+  runs, excludes three diagnostic alternatives, inserts no synthetic handoff, and skips zero replay
+  frames. The route starts at the real publisher/title sequence, crosses every ordinary campaign
+  gameplay, boss, bonus, completion and map phase, defeats Cortex, executes Ending, and remounts
+  Title.
+- Its terminal checkpoint is `currentLid == mountedLid == 0x19`, draw/process count 130,740, and
+  RNG-A `0x3b704e12`. The 141,872 executed harness frames report three expected source hard-restart
+  calls and two expected LoadState effects at bonus-return boundaries, zero death-camera frames,
+  and no checkpoint, runtime/GOOL/zone/spawn, console, network, or WebGL failure.
+- The three legacy Rolling Stones FreshBoot-family fixtures now pass: direct completion reaches
+  Level Complete, Brio tokens restore the exact parent snapshot, and ordinary pad input traverses
+  the Brio bonus and returns cleanly. The owned raw-BIN extraction regression also matches all 44
+  local stream pairs and their bootable graph.
 
 ## Reproducible commands
 
@@ -1628,16 +1650,17 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   n_sanity_idle_paging_matches_the_legal_360_frame_trace -- --ignored --exact --nocapture
-# This uninterrupted multi-level fixture retains several complete runtime
-# owners at once; give its test thread an explicit stack instead of relying
-# on the platform-specific libtest default.
-RUST_MIN_STACK=33554432 C1_STREAM_DIR=/path/to/streams \
+RUST_MIN_STACK=67108864 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
-  rolling_stones_direct_boot_reaches_level_complete -- --ignored --exact --nocapture
+  exact_post_papu_rolling_stones_phase_completes_with_live_controller \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  stormy_ascent_direct_boot_reaches_authored_end_warp -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   hog_wild_direct_boot_reaches_level_complete -- --ignored --exact --nocapture

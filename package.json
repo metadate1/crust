@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": "22.16.0"
   },
   "scripts": {
     "build": "./scripts/build-web.sh",
@@ -21,7 +21,11 @@
     "verify:browser-harness:cooked-iso": "npm run build:browser-harness && node ./scripts/browser-harness-smoke.mjs --synthetic-cooked-iso-import",
     "verify:browser-harness:smoke": "npm run build:browser-harness && node ./scripts/browser-harness-smoke.mjs",
     "test": "node --test scripts/*.test.mjs && PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo test --workspace --all-targets --locked",
-    "lint": "PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo clippy --workspace --all-targets -- -D warnings",
+    "lint": "PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo clippy --workspace --all-targets --locked -- -D warnings",
+    "lint:wasm": "PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo clippy -p crust-web --target wasm32-unknown-unknown --locked -- -D warnings",
+    "lint:wasm:browser-harness": "PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo clippy -p crust-web --features browser-test-harness --target wasm32-unknown-unknown --locked -- -D warnings",
+    "build:wasm": "PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo build --release --locked --target wasm32-unknown-unknown -p crust-web",
+    "build:wasm:browser-harness": "PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo build --release --locked --target wasm32-unknown-unknown -p crust-web --features browser-test-harness",
     "fmt": "PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo fmt --all -- --check"
   }
 }

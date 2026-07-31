@@ -12,15 +12,77 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Enforce local-only game-data boundary
+        with:
+          fetch-depth: 0
+      - name: Enforce repository boundary
         shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          prohibited='(^|/)(local-data|streams)(/|$)|\.(bin|raw|iso|cue|ccd|sub|ecm|chd|cso|img|mdf|mds|nrg|pbp|nsd|nsf|zip|7z|rar|tar|tar\.gz|tgz)$'
-          if git ls-files | grep -Eiq "$prohibited"; then
-            echo "Tracked game data or archive detected:" >&2
-            git ls-files | grep -Ei "$prohibited" >&2
+          set -euo pipefail
+          prohibited='(^|/)(local-data|streams|target|dist|pkg|node_modules|artifacts|captures|screenshots|recordings|coverage|browser-profile|playwright-report|test-results)(/|$)|(^|/)(\.cache|\.pytest_cache|\.mypy_cache|\.ruff_cache|__pycache__)(/|$)|(^|/)fuzz/(artifacts|corpus)(/|$)|(^|/)proptest-regressions(/|$)|(^|/)(memory-card\.json|resume\.json)$|(^|/)\.env($|\.)|(^|/)\.DS_Store$|(^|/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$|\.dSYM(/|$)|\.(bin|raw|iso|cue|ccd|sub|ecm|chd|cso|img|mdf|mds|nrg|pbp|nsd|nsf|zip|7z|rar|tar|tar\.gz|tgz|log|tmp|wasm|wat|rmeta|memory-card\.json|resume\.json|sav|mcr|srm|state|save|har|webm|mp4|mov|key|pem|p12|pfx|jks|keystore)$'
+          zero_sha='0000000000000000000000000000000000000000'
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          commits="$scratch/commits"
+          paths="$scratch/paths"
+
+          commit_exists() {
+            [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]] &&
+              git cat-file -e "$1^{commit}" 2>/dev/null
+          }
+
+          scan_tip="$GITHUB_SHA"
+          baseline=""
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            if commit_exists "${PR_HEAD_SHA:-}"; then
+              scan_tip="$PR_HEAD_SHA"
+            fi
+            baseline="${PR_BASE_SHA:-}"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            baseline="${BEFORE_SHA:-}"
+          fi
+
+          if ! commit_exists "$scan_tip"; then
+            echo "Repository-boundary scan could not resolve its event tip." >&2
             exit 1
           fi
+
+          if [[ "$baseline" != "$zero_sha" ]] && commit_exists "$baseline"; then
+            git rev-list "$scan_tip" "^$baseline" > "$commits"
+          else
+            # New branches and unavailable event baselines must scan the tip's
+            # complete reachable history, not merely its final tree.
+            git rev-list "$scan_tip" > "$commits"
+          fi
+
+          git ls-files -z > "$paths"
+          while IFS= read -r commit; do
+            git ls-tree -r --full-tree --name-only -z "$commit" >> "$paths"
+          done < "$commits"
+
+          violation=0
+          while IFS= read -r -d '' path; do
+            if [[ "$path" == ".env.example" || "$path" == */.env.example ]]; then
+              continue
+            fi
+            if [[ "$path" =~ $prohibited ]]; then
+              violation=1
+              break
+            fi
+          done < "$paths"
+
+          if (( violation )); then
+            echo "Repository boundary violation detected in tracked or newly reachable history." >&2
+            echo "The matching pathname and file contents are intentionally withheld from CI output." >&2
+            exit 1
+          fi
+      - name: Install pinned Node runtime
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22.16.0
       - name: Install pinned Rust toolchain
         run: |
           rustup set profile minimal
@@ -28,16 +90,28 @@ jobs:
           rustup default 1.97.0
       - name: Format
         run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Native Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Production Wasm Clippy
+        run: cargo clippy -p crust-web --target wasm32-unknown-unknown --locked -- -D warnings
+      - name: Browser-harness Wasm Clippy
+        run: cargo clippy -p crust-web --features browser-test-harness --target wasm32-unknown-unknown --locked -- -D warnings
       - name: Test
         run: npm test
       - name: Native release
         run: cargo build --workspace --release --locked
-      - name: Wasm release
+      - name: Production Wasm release
         run: cargo build --release --locked --target wasm32-unknown-unknown -p crust-web
+      - name: Browser-harness Wasm release
+        run: cargo build --release --locked --target wasm32-unknown-unknown -p crust-web --features browser-test-harness
       - name: Generated browser release
         run: |
           cargo install wasm-bindgen-cli --version 0.2.126 --locked
           npm run build
           npm run verify:dist
+      - name: Generated browser-harness release
+        run: |
+          npm run build:browser-harness
+          npm run verify:browser-harness
+      - name: Synthetic cooked-ISO Chrome smoke
+        run: node ./scripts/browser-harness-smoke.mjs --synthetic-cooked-iso-import

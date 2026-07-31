@@ -227,7 +227,7 @@ enum ValidatedControlArgument {
 }
 
 /// Browser-independent 30 Hz retail SFX controller backed by [`Mixer`].
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RetailAudioEngine {
     mixer: Mixer,
     voices: [RetailVoice; VOICE_COUNT],

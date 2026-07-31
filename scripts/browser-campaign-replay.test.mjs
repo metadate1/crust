@@ -32,6 +32,12 @@ function checkpoint(lid, draw, salt) {
   };
 }
 
+function browserCheckpoint(value) {
+  const checkpoint = structuredClone(value);
+  delete checkpoint.retailRandomSeedB;
+  return checkpoint;
+}
+
 function phase(id, fragment, entry, exit, extra = {}) {
   return { id, fragment, entry, exit, ...extra };
 }
@@ -384,16 +390,25 @@ test("publisher discovery keeps a bonus return on the one continuous campaign pa
 });
 
 test("composer joins a bonus final pad to the returned parent's post-restart boundary", async () => {
-  const bonusEntry = checkpoint(0x33, 20, 2);
-  const returnedParentEntry = {
-    ...checkpoint(0x12, 30, 3),
+  const bonusEntry = {
+    ...checkpoint(0x33, 20, 2),
+    // A prior ordinary death establishes that these are cumulative session
+    // counters, matching the legally-local canonical campaign fixture.
     retailHardRestarts: 1,
     retailLoadStates: 1,
   };
+  const returnedParentEntry = {
+    ...checkpoint(0x12, 30, 3),
+    // Bonus WarpC calls LoadState/LevelRestart once to select the parent, then
+    // the protected destination mount performs the source's second
+    // LevelRestart against the carried parent snapshot.
+    retailHardRestarts: 3,
+    retailLoadStates: 2,
+  };
   const completionEntry = {
     ...checkpoint(0x2d, 40, 4),
-    retailHardRestarts: 1,
-    retailLoadStates: 1,
+    retailHardRestarts: 3,
+    retailLoadStates: 2,
   };
   const bonusFragment = fragment(
     bonusEntry,
@@ -446,6 +461,18 @@ test("composer joins a bonus final pad to the returned parent's post-restart bou
     bonusFragment.exitCheckpoint.retailHardRestarts,
     returnedParentFragment.entryCheckpoint.retailHardRestarts,
   );
+  assert.equal(
+    returnedParentFragment.entryCheckpoint.retailHardRestarts
+      - bonusFragment.entryCheckpoint.retailHardRestarts,
+    2,
+    "the bonus return includes the cross-level and protected-parent LevelRestart calls",
+  );
+  assert.equal(
+    returnedParentFragment.entryCheckpoint.retailLoadStates
+      - bonusFragment.entryCheckpoint.retailLoadStates,
+    1,
+    "only the bonus WarpC emits a GOOL LoadState effect",
+  );
   assert.notDeepEqual(
     bonusFragment.finalPad,
     returnedParentFragment.initialPad,
@@ -453,7 +480,7 @@ test("composer joins a bonus final pad to the returned parent's post-restart bou
   );
 
   const staleBonus = structuredClone(bonusFragment);
-  staleBonus.exitCheckpoint.retailHardRestarts = 0;
+  staleBonus.exitCheckpoint.retailHardRestarts = 2;
   await assert.rejects(
     composeCampaignReplay(
       manifest,
@@ -699,7 +726,7 @@ test("composer inserts authored title-map fragments with guards and exact exits"
         key.startsWith("retail") || key.endsWith("Lid") || key === "titleState",
       ),
     ),
-    checkpoints.completionEntry,
+    browserCheckpoint(checkpoints.completionEntry),
   );
   assert.deepEqual(
     Object.fromEntries(
@@ -707,7 +734,7 @@ test("composer inserts authored title-map fragments with guards and exact exits"
         key.startsWith("retail") || key.endsWith("Lid") || key === "titleState",
       ),
     ),
-    checkpoints.jungleEntry,
+    browserCheckpoint(checkpoints.jungleEntry),
   );
   assert.equal(
     replay.segments[4].expect.minRetailExecutions,
@@ -718,12 +745,32 @@ test("composer inserts authored title-map fragments with guards and exact exits"
     replay.composition.crossLidExitPolicy,
     "exact-checkpoint-at-destination-mount",
   );
+  assert.deepEqual(
+    replay.composition.browserObservedOnlyCheckpointFields,
+    ["retailRandomSeedB"],
+  );
+  assert.ok(
+    replay.segments.every(
+      (segment) => segment.expect.retailRandomSeedB === undefined,
+    ),
+    "browser replay expectations must not compare native-host RNG-B against WebAudio-owned RNG-B",
+  );
   assert.equal(
     replay.segments[4].settleFrames,
     3,
     "manifest phase settle override replaces the fragment root settle budget",
   );
-  assert.deepEqual(replay.expect, checkpoints.finalCompletion);
+  assert.equal(
+    replay.segments[4].settleHeld,
+    0x0040,
+    "cross-LID settlement retains the departing phase's final physical pad word",
+  );
+  assert.deepEqual(
+    [1, 2, 4, 5].map((index) => replay.segments[index].settleHeld),
+    [0, 0x0800, 0x0040, 0x0010],
+    "every asynchronous stream mount preserves its captured source-side pad latch",
+  );
+  assert.deepEqual(replay.expect, browserCheckpoint(checkpoints.finalCompletion));
   assert.equal(replay.localDiagnosticOnly, true);
   assert.equal(replay.canonicalCampaign, false);
   assert.ok(
@@ -765,6 +812,88 @@ test("composer consumes destination frames only when the exact exit checkpoint r
     1,
     "a phase that stays on the same mount retains its standalone execution proof",
   );
+});
+
+test("composer projects source Title init2 state at cross-LID mounts", async () => {
+  for (const {
+    gameState,
+    carriedTitleState,
+    mountedTitleState,
+  } of [
+    { gameState: 0x200, carriedTitleState: 15, mountedTitleState: 12 },
+    { gameState: 0x600, carriedTitleState: 15, mountedTitleState: 5 },
+    { gameState: 0x300, carriedTitleState: 14, mountedTitleState: 14 },
+  ]) {
+    const titleEntry = checkpoint(0x19, 10, 1);
+    const endingEntry = checkpoint(0x39, 20, 2);
+    const titleExit = {
+      ...checkpoint(0x19, 30, 3),
+      titleState: carriedTitleState,
+    };
+    const titleProgression = progression(0);
+    const endingProgression = {
+      ...progression(1),
+      gameState: 0x100,
+    };
+    const returnProgression = {
+      ...progression(2),
+      gameState,
+      titleState: carriedTitleState,
+    };
+    const fragments = new Map([
+      [
+        "./title-to-ending.json",
+        fragment(titleEntry, endingEntry, [{ frames: 1, held: 0 }], {
+          entryProgression: titleProgression,
+          exitProgression: endingProgression,
+        }),
+      ],
+      [
+        "./ending-to-title.json",
+        fragment(endingEntry, titleExit, [{ frames: 1, held: 0 }], {
+          entryProgression: endingProgression,
+          exitProgression: returnProgression,
+        }),
+      ],
+    ]);
+    const manifest = {
+      schema: 1,
+      localDiagnosticOnly: true,
+      canonicalCampaign: false,
+      bootLid: 0x19,
+      unlockAll: false,
+      phases: [
+        phase(
+          "title-to-ending",
+          "./title-to-ending.json",
+          titleEntry,
+          endingEntry,
+        ),
+        phase(
+          "ending-to-title",
+          "./ending-to-title.json",
+          endingEntry,
+          titleExit,
+        ),
+      ],
+      titleMapHandoffs: [],
+    };
+
+    const replay = await composeCampaignReplay(
+      manifest,
+      async (reference) => fragments.get(reference),
+    );
+
+    assert.equal(
+      manifest.phases.at(-1).exit.titleState,
+      carriedTitleState,
+      "native pure-import metadata remains unchanged",
+    );
+    assert.equal(replay.segments.at(-1).expect.titleState, mountedTitleState);
+    assert.equal(replay.expect.titleState, mountedTitleState);
+    assert.equal(replay.segments.at(-1).expect.retailDrawCount, 30);
+    assert.equal(replay.expect.retailDrawCount, 30);
+  }
 });
 
 test("composer rejects exact checkpoint discontinuity before loading fragments", async () => {

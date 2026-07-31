@@ -37,6 +37,13 @@ const CHECKPOINT_FIELDS = [
   "retailDeathCameraFrames",
   "titleState",
 ];
+// Native route capture deliberately runs without the browser audio host. RNG-B
+// remains exact metadata for native fragment discovery/composition, but the
+// browser's RetailAudioEngine legitimately advances it while allocating SFX
+// voices. Never turn that known host difference into a gameplay failure.
+const BROWSER_OBSERVED_ONLY_CHECKPOINT_FIELDS = Object.freeze([
+  "retailRandomSeedB",
+]);
 const PROGRESSION_FIELDS = [
   "gameState",
   "titleState",
@@ -825,7 +832,12 @@ function validateFragmentMetadata(fragment, normalizedReplay, phase, manifest) {
   };
 }
 
-function guardedPhaseSegments(fragment, normalizedReplay, phase) {
+function guardedPhaseSegments(
+  fragment,
+  normalizedReplay,
+  phase,
+  captureMetadata,
+) {
   const permitsIntermediateMounts = fragment.captureKind === "publisher-title";
   const guard = {
     currentLid: phase.entry.currentLid,
@@ -858,11 +870,19 @@ function guardedPhaseSegments(fragment, normalizedReplay, phase) {
     normalizedReplay.expect,
     `fragment for phase ${JSON.stringify(phase.id)} final fragment expectation`,
   );
+  const observableExit = projectDestinationTitleCheckpoint(
+    phase,
+    captureMetadata,
+    phase.exit,
+  );
   last.expect = mergeExpectations(
     fragmentExpectation,
-    phase.exit,
+    observableExit,
     `fragment for phase ${JSON.stringify(phase.id)} final expectation`,
   );
+  for (const field of BROWSER_OBSERVED_ONLY_CHECKPOINT_FIELDS) {
+    delete last.expect[field];
+  }
   if (phase.entry.currentLid !== phase.exit.currentLid) {
     // A standalone exported fragment asks for one destination execution so
     // its smoke test proves that the newly mounted stream is runnable. In a
@@ -871,6 +891,14 @@ function guardedPhaseSegments(fragment, normalizedReplay, phase) {
     // checkpoint fields remain authoritative and may still advance the
     // destination deliberately when they describe a later checkpoint.
     delete last.expect.minRetailExecutions;
+
+    // A stream change can need one or more host settlement frames after the
+    // source phase has issued its transition. The physical controller does
+    // not become neutral during that asynchronous mount: CoreObjectsCreate's
+    // PadUpdate samples the last word captured by the departing phase. Keep
+    // that word stable so the destination starts from the exact initialPad
+    // history validated below instead of manufacturing release/tap edges.
+    last.settleHeld = captureMetadata.finalPad.held;
   }
   const phaseSettleFrames =
     phase.settleFrames ?? normalizedReplay.settleFrames;
@@ -883,6 +911,35 @@ function guardedPhaseSegments(fragment, normalizedReplay, phase) {
   }
   last.settleFrames = combinedSettleFrames;
   return segments;
+}
+
+function projectDestinationTitleCheckpoint(phase, captureMetadata, checkpoint) {
+  const projected = { ...checkpoint };
+  if (
+    phase.entry.currentLid === phase.exit.currentLid
+    || phase.exit.currentLid !== TITLE_LID
+  ) {
+    return projected;
+  }
+
+  // Fragment checkpoints intentionally describe the pure session-import
+  // boundary so adjacent native captures can prove exact carry continuity.
+  // A mounted Title stream has one additional source-owned init2 step before
+  // it becomes browser-observable: TitleLoadNextState overrides the carried
+  // map state for Game Over and the post-ending return to Main Menu. Preserve
+  // the raw capture metadata, but compare the state that NSInit actually
+  // publishes at the destination mount.
+  switch (captureMetadata.exitProgression.gameState) {
+    case 0x200:
+      projected.titleState = 12;
+      break;
+    case 0x600:
+      projected.titleState = 5;
+      break;
+    default:
+      break;
+  }
+  return projected;
 }
 
 export async function composeCampaignReplay(rawManifest, loadFragment) {
@@ -979,12 +1036,24 @@ export async function composeCampaignReplay(rawManifest, loadFragment) {
       }
     }
     outputSegments.push(
-      ...guardedPhaseSegments(fragment, normalizedReplay, phase),
+      ...guardedPhaseSegments(
+        fragment,
+        normalizedReplay,
+        phase,
+        captureMetadata,
+      ),
     );
     previousCaptureMetadata = captureMetadata;
     previousPhase = phase;
   }
-  const finalCheckpoint = manifest.phases.at(-1).exit;
+  const finalCheckpoint = projectDestinationTitleCheckpoint(
+    previousPhase,
+    previousCaptureMetadata,
+    manifest.phases.at(-1).exit,
+  );
+  for (const field of BROWSER_OBSERVED_ONLY_CHECKPOINT_FIELDS) {
+    delete finalCheckpoint[field];
+  }
   const replay = {
     schema: 1,
     bootLid: manifest.bootLid,
@@ -1012,6 +1081,9 @@ export async function composeCampaignReplay(rawManifest, loadFragment) {
     composition: {
       schema: 1,
       crossLidExitPolicy: "exact-checkpoint-at-destination-mount",
+      browserObservedOnlyCheckpointFields: [
+        ...BROWSER_OBSERVED_ONLY_CHECKPOINT_FIELDS,
+      ],
       phaseIds: manifest.phases.map(({ id }) => id),
       insertedHandoffs: manifest.insertedHandoffs,
     },

@@ -307,22 +307,28 @@ fn stormy_ascent_direct_boot_reaches_authored_end_warp() {
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
     );
     let level = LevelId::new_const(0x22);
-    let (nsd, nsf, nsf_bytes) =
-        parse_local_pair(&root, level).expect("the legally local Stormy Ascent pair must parse");
+    let pair = CampaignPair::parse(&root, level);
     let frames = std::env::var("C1_STORMY_ROUTE_FRAMES")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(9_500);
-    let (survey, _) = survey_pair_with_runtime(
-        "Stormy Ascent",
+    let mut pad = PersistentPadState::default();
+    let mount_held = pad.snapshot.held;
+    let (survey, runtime) = survey_pair_with_persistent_pad(
+        pair.name,
         level,
-        &nsd,
-        &nsf,
-        &nsf_bytes,
+        &pair.nsd,
+        &pair.nsf,
+        &pair.nsf_bytes,
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::StormyAscentCompletionRoute,
         frames,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held,
+            ..PersistentSurveyPlan::default()
+        },
     )
     .expect("Stormy Ascent's ordinary-pad completion route must execute");
 
@@ -336,6 +342,8 @@ fn stormy_ascent_direct_boot_reaches_authored_end_warp() {
     assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
     assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
     assert!(survey.is_clean(), "{}", survey.summary());
+
+    let _carry = pair.finish_checked_with_replay(runtime, LevelId::LEVEL_COMPLETE, &survey);
 }
 
 #[test]

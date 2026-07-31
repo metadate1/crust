@@ -1451,13 +1451,13 @@ is 1,322,866 bytes with SHA-256
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- The locked all-target workspace currently enumerates 1,295 Rust tests: 1,064 default-active and
+- The locked all-target workspace currently enumerates 1,300 Rust tests: 1,069 default-active and
   231 ignored-by-default legally-local tests. The complete default gate and focused owned-data
   sweeps pass with zero failures, including the complete Native Fortress and Up
   the Creek route goldens; the added N. Sanity completion, owned-disc caption-return, and complete
   `pb0cB` scene goldens pass independently. Rustfmt,
   warnings-denied native all-target Clippy, warnings-denied Wasm Clippy, optimized native/Wasm
-  release builds, all 51 Node tests, `npm run build`, and the distribution verifier
+  release builds, all 52 Node tests, `npm run build`, and the distribution verifier
   pass on the delivery tree.
 - The `5ef328e` Chrome-compatible in-app browser build
   `5ef328ef9bcb-1a72bf618243-87f5283f6472-clean` selected the user's legally local
@@ -1590,10 +1590,12 @@ is 1,322,866 bytes with SHA-256
   Ending's checked `LEVEL_END` and in the freshly mounted frame-zero Title carry; the first authored
   Title tick then clears it to zero. This exact handshake is distinct from the earlier bounded
   3,600-frame credits characterization.
-- `stormy_ascent_direct_boot_reaches_authored_end_warp` also passes. Its ordinary-pad route reaches
-  Level Complete within the 9,500-frame budget without a restart, death-camera frame, terminal
-  fall, or checked runtime issue. Key-unlock integration and a browser-driven Stormy Ascent run are
-  separate checks.
+- `stormy_ascent_direct_boot_reaches_authored_end_warp` also passes. Its persistent physical-pad
+  capture composes into a 9,334-frame direct-boot replay. The owned raw BIN executes that complete
+  replay in Chrome with zero skipped frames or recovery, then mounts Level Complete after one
+  transition-gate settle step at exact draw/process count 9,334 and RNG-A `0x10448346`. Retail
+  IsldC has no Stormy destination; natural key integration instead concerns the distinct Whole Hog
+  and Fumbling in the Dark map branches.
 - Castle Machinery's current exact carried golden passes at 6,071 frames. Its controller no longer
   relies on an impossible opposing-direction fallback, so that characterization is not a remaining
   campaign blocker.
@@ -1604,9 +1606,11 @@ is 1,322,866 bytes with SHA-256
   gameplay, boss, bonus, completion and map phase, defeats Cortex, executes Ending, and remounts
   Title.
 - Its terminal checkpoint is `currentLid == mountedLid == 0x19`, draw/process count 130,740, and
-  RNG-A `0x3b704e12`. The 141,872 executed harness frames report three expected source hard-restart
-  calls and two expected LoadState effects at bonus-return boundaries, zero death-camera frames,
-  and no checkpoint, runtime/GOOL/zone/spawn, console, network, or WebGL failure.
+  RNG-A `0x3b704e12`. The 141,872 executed harness frames report three source hard-restart calls
+  and two LoadState effects: one same-level pair from Jungle Rollers' authored terminal fall, then
+  The Great Gate's different-stream Tawna-bonus load/restart and protected parent restart. There
+  are zero death-camera frames and no checkpoint, runtime/GOOL/zone/spawn, console, network, or
+  WebGL failure.
 - The three legacy Rolling Stones FreshBoot-family fixtures now pass: direct completion reaches
   Level Complete, Brio tokens restore the exact parent snapshot, and ordinary pad input traverses
   the Brio bonus and returns cleanly. The owned raw-BIN extraction regression also matches all 44

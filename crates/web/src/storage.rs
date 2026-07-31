@@ -1,21 +1,21 @@
 use crust_platform::persistence::{
-    CARD_STORAGE_KEY, CardSlot, PersistenceError, RESUME_STORAGE_KEY, ResumeRecord,
-    VirtualCardRecord, decode_resume, decode_virtual_card, encode_resume, encode_virtual_card,
-    invalid_resume_key,
+    CARD_STORAGE_KEY, CardSlot, RESUME_STORAGE_KEY, ResumeRecord, encode_resume,
+    encode_virtual_card, invalid_resume_key,
 };
 use crust_sim::card::{
-    CardOperation, CardPayload, ResumeLoadResult, ResumeManager, SaveData, Slot, StoredResume,
-    VirtualCard,
+    CardOperation, CardPayload, ResumeLoadResult, ResumeManager, SaveData, Slot, VirtualCard,
 };
 use wasm_bindgen::JsValue;
 use web_sys::Storage;
 
-use crate::card_persistence::{CardPersistIntent, merge_card_record};
+use crate::card_persistence::{
+    CardPersistIntent, CardRecordState, ResumeRecordDisposition, load_resume_record,
+};
 
 #[derive(Clone, Debug)]
 pub struct StorageState {
     storage: Storage,
-    card_record: VirtualCardRecord,
+    card_record: CardRecordState,
     writes_enabled: bool,
     card_writes_deferred: bool,
     deferred_card_dirty: bool,
@@ -27,13 +27,8 @@ impl StorageState {
             .ok_or_else(|| JsValue::from_str("browser window is unavailable"))?
             .local_storage()?
             .ok_or_else(|| JsValue::from_str("localStorage is unavailable"))?;
-        let card_record = storage
-            .get_item(CARD_STORAGE_KEY)?
-            .as_deref()
-            .map(decode_virtual_card)
-            .transpose()
-            .map_err(|error| JsValue::from_str(&error.to_string()))?
-            .unwrap_or_default();
+        let stored_card = storage.get_item(CARD_STORAGE_KEY)?;
+        let card_record = CardRecordState::load(stored_card.as_deref());
         Ok(Self {
             storage,
             card_record,
@@ -59,7 +54,7 @@ impl StorageState {
     /// boundary and converts this fork back into ordinary storage state.
     pub fn commit_card_transaction(&mut self) -> Result<(), JsValue> {
         if self.card_writes_deferred && self.deferred_card_dirty && self.writes_enabled {
-            let json = encode_virtual_card(&self.card_record)
+            let json = encode_virtual_card(self.card_record.record())
                 .map_err(|error| JsValue::from_str(&error.to_string()))?;
             self.storage.set_item(CARD_STORAGE_KEY, &json)?;
         }
@@ -76,7 +71,12 @@ impl StorageState {
 
     pub fn virtual_card(&self) -> VirtualCard {
         let mut card = VirtualCard::new();
-        for (index, slot) in self.card_record.slots.iter().enumerate() {
+        if !self.card_record.is_readable() {
+            card.set_storage_available(false);
+            let _ = card.control(CardOperation::Rescan, 0, None);
+            return card;
+        }
+        for (index, slot) in self.card_record.record().slots.iter().enumerate() {
             let value = match slot {
                 CardSlot::Empty => Slot::Empty,
                 CardSlot::Valid { payload, .. } => {
@@ -93,22 +93,31 @@ impl StorageState {
         card
     }
 
+    #[must_use]
+    pub const fn card_operation_available(&self, operation: CardOperation) -> bool {
+        self.card_record.can_service(operation)
+    }
+
     pub fn persist_card(
         &mut self,
         card: &VirtualCard,
         intent: CardPersistIntent,
     ) -> Result<(), JsValue> {
-        if !self.writes_enabled {
-            return Ok(());
-        }
         let timestamp = now_timestamp();
-        let next_record = merge_card_record(&self.card_record, card, timestamp, intent);
-        let json = encode_virtual_card(&next_record)
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        if !self.card_writes_deferred {
-            self.storage.set_item(CARD_STORAGE_KEY, &json)?;
+        let next_record = self
+            .card_record
+            .merged(card, timestamp, intent)
+            .ok_or_else(|| {
+                JsValue::from_str("virtual card record is unreadable; format required")
+            })?;
+        if self.writes_enabled {
+            let json = encode_virtual_card(&next_record)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            if !self.card_writes_deferred {
+                self.storage.set_item(CARD_STORAGE_KEY, &json)?;
+            }
         }
-        self.card_record = next_record;
+        self.card_record.replace(next_record);
         self.deferred_card_dirty |= self.card_writes_deferred;
         Ok(())
     }
@@ -120,39 +129,13 @@ impl StorageState {
         let Some(json) = self.storage.get_item(RESUME_STORAGE_KEY)? else {
             return Ok(ResumeManager::load(None, current));
         };
-        match decode_resume(&json) {
-            Ok(record) => {
-                let stored = StoredResume {
-                    schema: crust_sim::card::RESUME_SCHEMA.to_owned(),
-                    version: crust_sim::card::RESUME_VERSION,
-                    payload: record.payload.to_vec(),
-                };
-                Ok(ResumeManager::load(Some(stored), current))
-            }
-            Err(PersistenceError::UnsupportedVersion(version)) => {
-                let stored = StoredResume {
-                    schema: crust_sim::card::RESUME_SCHEMA.to_owned(),
-                    version,
-                    payload: Vec::new(),
-                };
-                Ok(ResumeManager::load(Some(stored), current))
-            }
-            Err(_) => {
-                if self.writes_enabled {
-                    let key = invalid_resume_key(now_timestamp());
-                    self.storage.set_item(&key, &json)?;
-                    self.storage.remove_item(RESUME_STORAGE_KEY)?;
-                }
-                Ok(ResumeManager::load(
-                    Some(StoredResume {
-                        schema: "invalid".to_owned(),
-                        version: 0,
-                        payload: Vec::new(),
-                    }),
-                    current,
-                ))
-            }
+        let (manager, result, disposition) = load_resume_record(&json, current);
+        if disposition == ResumeRecordDisposition::Quarantine && self.writes_enabled {
+            let key = invalid_resume_key(now_timestamp());
+            self.storage.set_item(&key, &json)?;
+            self.storage.remove_item(RESUME_STORAGE_KEY)?;
         }
+        Ok((manager, result))
     }
 
     pub fn persist_resume(&self, payload: CardPayload) -> Result<(), JsValue> {

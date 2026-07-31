@@ -10,8 +10,10 @@ The current native canonical regression starts at the retail publisher/title ope
 same process/session and physical-pad history through the main-map campaign, defeats Dr. Neo
 Cortex, executes Ending, and remounts Title. The matching real-browser proof now completes that
 ordinary route across all 44 mounted pairs and 141,776 replay frames with no skipped frame or
-failed checkpoint. Stormy Ascent separately reaches its authored end warp from a direct boot;
-secret-key integration and a browser-driven Stormy Ascent route remain separate checks.
+failed checkpoint. Stormy Ascent separately reaches its authored end warp from a direct boot in
+both native characterization and an exact 9,334-frame owned-BIN browser replay. Natural key
+earning and the authored Whole Hog/Fumbling map branches remain separate checks; retail IsldC has
+no Stormy Ascent destination.
 
 ## What is connected in the browser
 
@@ -845,16 +847,18 @@ secret-key integration and a browser-driven Stormy Ascent route remain separate 
   has since been superseded by the completed 141,776-frame Title-to-Title browser replay. The final
   run crosses every later campaign mount, Cortex, Ending, and the return to Title with no skipped
   replay frame, death-camera frame, or failed runtime/checkpoint assertion. Its three hard-restart
-  and two LoadState calls are expected authored bonus-return transactions.
+  and two LoadState calls comprise Jungle Rollers' authored fall load/restart plus The Great Gate's
+  different-stream bonus load/restart and protected parent restart.
   Representative Tawna, second-Tawna, and Cortex bonus layouts have complete ordinary-pad native
   parent-entry/portal/return coverage, including protected parent remounts where asserted. Rolling
   Stones/Brio now passes direct completion, exact parent-snapshot round trip, and ordinary-input
   Brio-bonus traversal checks. Other parent-specific bonus layouts remain explicit edge gates.
-  Stormy Ascent's direct ordinary-pad route now reaches its
-  authored end warp within the 9,500-frame budget with no restart, death-camera frame, terminal
-  fall, or checked issue. Castle Machinery's corrected exact carried route also passes at 6,071
-  frames without the former impossible opposing-direction fallback. Carried key-unlock integration
-  for the secret levels remains separate.
+  Stormy Ascent's direct ordinary-pad route reaches its authored end warp within the 9,500-frame
+  budget with no restart, death-camera frame, terminal fall, or checked issue. Its composed owned-
+  BIN Chrome replay consumes all 9,334 captured frames, skips none, and mounts Level Complete with
+  exact draw/process count 9,334 and RNG-A `0x10448346`. Castle Machinery's corrected exact carried
+  route also passes at 6,071 frames without the former impossible opposing-direction fallback.
+  Natural key earning and the Whole Hog/Fumbling map branches remain separate.
   Other remaining gates include unfinished bonus-layout variants, broader death/checkpoint
   sequences, alternate completion, long soak, mobile audio sessions, and a multiple physical-
   gamepad matrix.

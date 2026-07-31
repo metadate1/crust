@@ -54,9 +54,12 @@ The owned-raw-BIN run recognized all 88 streams and 44/44 pairs, executed 141,77
 frames plus 96 bounded transition-settle frames, and finished at Title with draw/process count
 130,740 and RNG-A `0x3b704e12`. It skipped no replay frame and reported no checkpoint, runtime,
 GOOL, zone, spawn, console, network, or WebGL failure. Its three hard-restart calls and two
-LoadState effects are the expected source bonus-return transactions, not recovery from a failed
-route. Stormy Ascent separately has a clean native direct-boot route to its authored end warp;
-secret-key integration and the corresponding browser route remain explicit parity gates.
+LoadState effects are all source-authored: one Jungle Rollers terminal fall contributes a
+same-level load/restart, while The Great Gate's Tawna-bonus return contributes the different-stream
+load/restart and protected parent restart. Stormy Ascent separately completes from direct boot in
+Chrome: all 9,334 captured frames match through its Level Complete mount with no recovery or failed
+checkpoint. Retail's natural key routes unlock Whole Hog and Fumbling in the Dark, not Stormy;
+earning those keys and traversing both map branches remain explicit parity gates.
 
 The browser now owns a checked retail object runtime for title, gameplay, bonus, boss, level-
 complete, intro and ending states.
@@ -581,7 +584,7 @@ restart snapshots around the Title/Cortex boundary, and the Ending-to-Title draw
 The current strict direction/button survey runs all 43 bootable pairs for 5,400
 browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
-The `crust-sim` library enumerates 645 tests; the locked all-target workspace inventory has 1,064
+The `crust-sim` library enumerates 645 tests; the locked all-target workspace inventory has 1,069
 default-active tests plus 231 ignored-by-default legally local tests. Native
 warnings-denied Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm
 build gates pass.

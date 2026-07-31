@@ -259,13 +259,17 @@ handoff, and skipped zero replay frames. Three diagnostic alternatives remain ou
 connected path.
 
 The terminal snapshot is current/mounted Title LID `0x19`, draw/process count 130,740, and RNG-A
-`0x3b704e12`. The harness reported three source hard-restart calls and two LoadState effects from
-the expected bonus-return transactions, zero death-camera frames, and no checkpoint,
+`0x3b704e12`. The harness reported three source hard-restart calls and two LoadState effects: one
+same-level load/restart from Jungle Rollers' authored terminal fall, then the different-stream
+load/restart and protected parent restart from The Great Gate's Tawna-bonus return. It recorded
+zero death-camera frames and no checkpoint,
 runtime/GOOL/zone/spawn, console, network, or WebGL failure. A separate nine-phase, 9,477-frame
 exact branch still proves The Great Gate's physical Tawna path, Bonus 2, its `-2` save-state return,
 and the remounted Great Gate checkpoint. The completed browser campaign is authoritative for the
-ordinary route; secret-key/Stormy Ascent integration, alternate completion, and other explicitly
-documented edge routes remain separate parity gates.
+ordinary route. A separate direct-boot replay completes Stormy Ascent's 9,334 captured frames and
+mounts Level Complete at exact draw/RNG state with no recovery or skipped frame. Natural key
+earning plus the authored Whole Hog/Fumbling map branches, alternate completion, and other
+explicitly documented edge routes remain separate parity gates.
 
 Every composed gameplay, completion, and island-map segment receives:
 

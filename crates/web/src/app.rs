@@ -793,7 +793,11 @@ impl ProgramHost for BrowserProgramHost<'_, '_> {
         let part_index = usize::try_from(request.part_index).unwrap_or(usize::MAX);
         let before = self.card.clone();
         let mut candidate = before.clone();
-        candidate.set_storage_available(self.storage.is_some());
+        candidate.set_storage_available(
+            self.storage
+                .as_ref()
+                .is_some_and(|storage| storage.card_operation_available(operation)),
+        );
         let outcome = candidate.control(operation, part_index, Some(current));
 
         if outcome.is_ok() && operation.mutates_storage() {
@@ -6409,12 +6413,10 @@ fn retail_pad_snapshot(snapshot: PlatformPadSnapshot) -> RetailPadSnapshot {
 
 fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Result<(), JsValue> {
     let level = current_level(&runtime.flow);
-    let title_state = runtime
-        .retail_objects
-        .retail_title_presentation()
-        .ok()
-        .flatten()
-        .map_or(runtime.flow.title_screen(), |title| title.screen);
+    let title_state = crate::retail_debug_title_state(
+        &runtime.retail_objects,
+        u32::from(runtime.flow.title_screen() as u8),
+    );
     Reflect::set(
         debug,
         &JsValue::from_str("frame"),
@@ -6428,7 +6430,7 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
     Reflect::set(
         debug,
         &JsValue::from_str("titleState"),
-        &JsValue::from_f64(f64::from(title_state as u8)),
+        &JsValue::from_f64(f64::from(title_state)),
     )?;
     Reflect::set(
         debug,

@@ -1,5 +1,121 @@
-use crust_platform::persistence::{CardSlot, VirtualCardRecord};
-use crust_sim::card::{Slot, VirtualCard};
+use crust_platform::persistence::{
+    CardSlot, PersistenceError, ResumeRecord, VirtualCardRecord, decode_resume, decode_virtual_card,
+};
+use crust_sim::card::{
+    CardOperation, ResumeLoadResult, ResumeManager, SaveData, Slot, StoredResume, VirtualCard,
+};
+
+/// Decoded browser-card state plus whether the complete storage envelope was
+/// readable.
+///
+/// A malformed individual slot remains a readable [`VirtualCardRecord`] and is
+/// represented as a damaged part. A malformed envelope is different: ordinary
+/// card operations must report a storage error, while retail's explicit format
+/// operation must still be able to replace it with an empty valid card.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CardRecordState {
+    record: VirtualCardRecord,
+    readable: bool,
+}
+
+impl CardRecordState {
+    #[must_use]
+    pub(crate) fn load(json: Option<&str>) -> Self {
+        match json {
+            None => Self {
+                record: VirtualCardRecord::default(),
+                readable: true,
+            },
+            Some(json) => match decode_virtual_card(json) {
+                Ok(record) => Self {
+                    record,
+                    readable: true,
+                },
+                Err(_) => Self {
+                    record: VirtualCardRecord::default(),
+                    readable: false,
+                },
+            },
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn record(&self) -> &VirtualCardRecord {
+        &self.record
+    }
+
+    #[must_use]
+    pub(crate) const fn is_readable(&self) -> bool {
+        self.readable
+    }
+
+    /// Mirrors the source browser backend: a broken card record rejects reads,
+    /// scans, and writes, but FORMAT bypasses parsing and may repair the record.
+    #[must_use]
+    pub(crate) const fn can_service(&self, operation: CardOperation) -> bool {
+        self.readable || matches!(operation, CardOperation::Format)
+    }
+
+    #[must_use]
+    pub(crate) fn merged(
+        &self,
+        card: &VirtualCard,
+        timestamp: u64,
+        intent: CardPersistIntent,
+    ) -> Option<VirtualCardRecord> {
+        if !self.readable && intent != CardPersistIntent::Format {
+            return None;
+        }
+        Some(merge_card_record(&self.record, card, timestamp, intent))
+    }
+
+    pub(crate) fn replace(&mut self, record: VirtualCardRecord) {
+        self.record = record;
+        self.readable = true;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResumeRecordDisposition {
+    Preserve,
+    Quarantine,
+}
+
+/// Decodes and validates both layers of a browser resume record.
+///
+/// `decode_resume` validates the JSON/base64 envelope, while
+/// `ResumeManager::load` validates the retail payload checksum. Both kinds of
+/// corruption must be quarantined; a newer version is intentionally preserved.
+#[must_use]
+pub(crate) fn load_resume_record(
+    json: &str,
+    current: SaveData,
+) -> (ResumeManager, ResumeLoadResult, ResumeRecordDisposition) {
+    let stored = match decode_resume(json) {
+        Ok(ResumeRecord { payload, .. }) => StoredResume {
+            schema: crust_sim::card::RESUME_SCHEMA.to_owned(),
+            version: crust_sim::card::RESUME_VERSION,
+            payload: payload.to_vec(),
+        },
+        Err(PersistenceError::UnsupportedVersion(version)) => StoredResume {
+            schema: crust_sim::card::RESUME_SCHEMA.to_owned(),
+            version,
+            payload: Vec::new(),
+        },
+        Err(_) => StoredResume {
+            schema: "invalid".to_owned(),
+            version: 0,
+            payload: Vec::new(),
+        },
+    };
+    let (manager, result) = ResumeManager::load(Some(stored), current);
+    let disposition = if result == ResumeLoadResult::Corrupt {
+        ResumeRecordDisposition::Quarantine
+    } else {
+        ResumeRecordDisposition::Preserve
+    };
+    (manager, result, disposition)
+}
 
 /// Identifies the browser-card operation that caused a persistence snapshot.
 ///
@@ -65,6 +181,9 @@ pub(crate) fn merge_card_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crust_platform::persistence::{
+        CARD_SCHEMA, STORAGE_VERSION, encode_resume, encode_virtual_card,
+    };
     use crust_sim::card::{CardPayload, SaveData};
 
     fn payload(level_count: u32) -> CardPayload {
@@ -178,5 +297,84 @@ mod tests {
 
         assert_eq!(next.updated_at, 99);
         assert!(next.slots.iter().all(|slot| *slot == CardSlot::Empty));
+    }
+
+    #[test]
+    fn malformed_card_envelope_remains_format_repairable() {
+        let mut state = CardRecordState::load(Some("not json"));
+
+        assert!(!state.is_readable());
+        assert!(!state.can_service(CardOperation::Rescan));
+        assert!(!state.can_service(CardOperation::SaveSelected));
+        assert!(state.can_service(CardOperation::Format));
+        assert!(
+            state
+                .merged(&VirtualCard::new(), 99, CardPersistIntent::Snapshot)
+                .is_none()
+        );
+
+        let repaired = state
+            .merged(&VirtualCard::new(), 99, CardPersistIntent::Format)
+            .expect("format bypasses the unreadable envelope");
+        state.replace(repaired);
+
+        assert!(state.is_readable());
+        assert!(state.can_service(CardOperation::Rescan));
+        assert_eq!(state.record().updated_at, 99);
+        assert!(
+            state
+                .record()
+                .slots
+                .iter()
+                .all(|slot| *slot == CardSlot::Empty)
+        );
+        let encoded = encode_virtual_card(state.record()).unwrap();
+        assert_eq!(CardRecordState::load(Some(&encoded)), state);
+    }
+
+    #[test]
+    fn wrong_card_schema_and_version_require_explicit_format() {
+        for json in [
+            format!(r#"{{"schema":"not-{CARD_SCHEMA}","version":{STORAGE_VERSION},"slots":[]}}"#),
+            format!(
+                r#"{{"schema":"{CARD_SCHEMA}","version":{},"slots":[]}}"#,
+                STORAGE_VERSION + 1
+            ),
+        ] {
+            let state = CardRecordState::load(Some(&json));
+            assert!(!state.is_readable());
+            assert!(state.can_service(CardOperation::Format));
+            assert!(!state.can_service(CardOperation::LoadSelected));
+        }
+    }
+
+    #[test]
+    fn checksum_corrupt_resume_is_selected_for_quarantine() {
+        let mut bytes = CardPayload::encode(SaveData::default()).into_bytes();
+        bytes[0] ^= 0x80;
+        let json = encode_resume(&ResumeRecord {
+            payload: Box::new(bytes),
+            updated_at: 42,
+        })
+        .unwrap();
+
+        let (_, result, disposition) = load_resume_record(&json, SaveData::default());
+
+        assert_eq!(result, ResumeLoadResult::Corrupt);
+        assert_eq!(disposition, ResumeRecordDisposition::Quarantine);
+    }
+
+    #[test]
+    fn newer_resume_version_is_preserved() {
+        let json = format!(
+            r#"{{"schema":"{}","version":{},"payload":"","updatedAt":0}}"#,
+            crust_sim::card::RESUME_SCHEMA,
+            crust_sim::card::RESUME_VERSION + 1
+        );
+
+        let (_, result, disposition) = load_resume_record(&json, SaveData::default());
+
+        assert_eq!(result, ResumeLoadResult::NewerVersion);
+        assert_eq!(disposition, ResumeRecordDisposition::Preserve);
     }
 }

@@ -9,6 +9,7 @@ import {
   nextReplayBatchFrameCount,
   normalizeReplay,
   parseArguments,
+  replayLidConditionKnown,
   replayLidConditionMatches,
   replayStepMethod,
   retailExecutionObserved,
@@ -115,6 +116,33 @@ test("destination mount acknowledgement waits for the requested stream pair", ()
       0x19,
     ),
     false,
+  );
+});
+
+test("replay LID guards wait for their first observable runtime frame", () => {
+  assert.equal(
+    replayLidConditionKnown(
+      { currentLid: 0x22, mountedLid: 0x22 },
+      0x22,
+      0x22,
+    ),
+    true,
+  );
+  assert.equal(
+    replayLidConditionKnown(
+      { currentLid: 0x22, mountedLid: 0x22 },
+      undefined,
+      undefined,
+    ),
+    false,
+  );
+  assert.equal(
+    replayLidConditionKnown(
+      { currentLid: 0x22 },
+      0x22,
+      undefined,
+    ),
+    true,
   );
 });
 

@@ -13,7 +13,7 @@ use crust_sim::card::SaveData;
 #[cfg(any(target_arch = "wasm32", test))]
 use crust_sim::gool::{
     INITIAL_LIFE_COUNT_GLOBAL, ITEM_POOL_2_GLOBAL, LEVELS_UNLOCKED_GLOBAL, LIFE_COUNT_GLOBAL,
-    VmError,
+    TITLE_STATE_GLOBAL, VmError,
 };
 #[cfg(any(target_arch = "wasm32", test))]
 use crust_sim::retail_runtime::{RenderObjectsError, RetailRenderObject, RetailRuntime};
@@ -458,6 +458,16 @@ pub(crate) fn require_render_object_snapshot(
     snapshot.map_err(|error| format!("retail render-object snapshot failed: {error:?}"))
 }
 
+/// Exposes the VM's raw title-state global for exact replay checkpoints.
+///
+/// The passive browser-flow mirror remains a presentation fallback only. In
+/// direct gameplay boots it can still name the publisher screen while the
+/// retained process global correctly remains state seven.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn retail_debug_title_state(runtime: &RetailRuntime, fallback: u32) -> u32 {
+    runtime.global_word(TITLE_STATE_GLOBAL).unwrap_or(fallback)
+}
+
 #[wasm_bindgen]
 /// Starts the browser application after the generated Wasm module is initialized.
 ///
@@ -486,6 +496,14 @@ mod tests {
         assert_eq!(clock.take_timestamp_ms(), 0.0);
         assert_eq!(clock.take_timestamp_ms(), 34.0);
         assert_eq!(clock.take_timestamp_ms(), 68.0);
+    }
+
+    #[test]
+    fn replay_debug_prefers_the_raw_process_title_state_over_the_flow_mirror() {
+        let runtime = RetailRuntime::new_for_level(256, FormatLevelId::new_const(0x22));
+
+        assert_eq!(retail_debug_title_state(&runtime, 10), 7);
+        assert_eq!(retail_debug_title_state(&RetailRuntime::new(0), 10), 10);
     }
 
     #[test]

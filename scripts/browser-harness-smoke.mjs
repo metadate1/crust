@@ -811,6 +811,14 @@ export function replayLidConditionMatches(
   }).length === 0;
 }
 
+export function replayLidConditionKnown(condition, currentLid, mountedLid) {
+  if (condition === undefined) return true;
+  return (
+    (condition.currentLid === undefined || Number.isSafeInteger(currentLid))
+    && (condition.mountedLid === undefined || Number.isSafeInteger(mountedLid))
+  );
+}
+
 export function allLevelsFailures(
   snapshot,
   { requireStartingLives = false } = {},
@@ -1402,7 +1410,6 @@ async function runBrowser(options, replay, chromeExecutable) {
       failures,
       120_000,
     );
-
     let stepped = 0;
     // Manual harness mode cannot publish runtime globals until its first
     // cooperative step. Check that first result before the replay can
@@ -1534,7 +1541,12 @@ async function runBrowser(options, replay, chromeExecutable) {
       let remainingFrames = segment.frames;
       while (remainingFrames > 0) {
         if (
-          !replayLidConditionMatches(
+          replayLidConditionKnown(
+            segment.while,
+            replayCurrentLid,
+            replayMountedLid,
+          )
+          && !replayLidConditionMatches(
             segment.while,
             replayCurrentLid,
             replayMountedLid,

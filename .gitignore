@@ -1,4 +1,5 @@
 /target/
+**/target/
 /dist/
 /pkg/
 /node_modules/
@@ -9,7 +10,7 @@
 **/__pycache__/
 /.idea/
 /.vscode/
-/.DS_Store
+.DS_Store
 *.log
 *.tmp
 *.wasm
@@ -41,6 +42,12 @@
 *.[pP][bB][pP]
 *.[nN][sS][dD]
 *.[nN][sS][fF]
+*.[pP][bB][aA][kK]
+*.[sS][aA][vV]
+*.[mM][cC][rR]
+*.[sS][rR][mM]
+*.[sS][tT][aA][tT][eE]
+*.[sS][aA][vV][eE]
 *.[zZ][iI][pP]
 *.[7][zZ]
 *.[rR][aA][rR]
@@ -62,3 +69,11 @@
 /browser-profile/
 /playwright-report/
 /test-results/
+*.[hH][aA][rR]
+*.[wW][eE][bB][mM]
+*.[mM][pP][4]
+*.[mM][oO][vV]
+*.[pP][1][2]
+*.[pP][fF][xX]
+*.[jJ][kK][sS]
+*.[kK][eE][yY][sS][tT][oO][rR][eE]

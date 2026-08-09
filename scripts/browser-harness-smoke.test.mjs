@@ -2,21 +2,351 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyTerminalProgressionRequirements,
   allLevelsFailures,
+  allLevelsStorageFailures,
+  appendedRuntimeLogLines,
+  cardRoundTripStorageFailures,
   destinationMountReady,
+  directBonusReturnAuditFailures,
   expectationFailures,
   liveObjectExpectationFailures,
   nextReplayBatchFrameCount,
   normalizeReplay,
   parseArguments,
+  parseRetailPbakEvidence,
+  parseStorageSeedJson,
+  resumeRoundTripStorageFailures,
   replayLidConditionKnown,
   replayLidConditionMatches,
   replayStepMethod,
+  retailGameplayReadyAfterMount,
+  retailPbakAuditFailures,
+  retailPbakAuditTitleReady,
   retailExecutionObserved,
   snapshotFailures,
+  summarizeReplayHostCallbacks,
   syntheticCookedIsoImportFailures,
+  validateReplayBatchExecution,
 } from "./browser-harness-smoke.mjs";
 import { expectedSyntheticCookedIsoBlobRanges } from "./synthetic-retail-iso.mjs";
+
+const STORAGE_PAYLOAD = Buffer.alloc(128).toString("base64");
+
+function pbakLogEntry(line, stepCount, overrides = {}) {
+  return {
+    line,
+    stepCount,
+    currentLid: 0x0c,
+    mountedLid: 0x0c,
+    retailFrame: stepCount,
+    retailDrawCount: stepCount,
+    retailProcessDrawCount: stepCount,
+    retailHardRestarts: 1,
+    retailLoadStates: 0,
+    retailDeathCameraFrames: 0,
+    retailExecutions: stepCount * 3,
+    retailExecutionErrors: 0,
+    retailFaultedObjects: 0,
+    retailZoneEventFailures: 0,
+    retailRandomSeed: 0x1234,
+    retailRandomSeedB: 0x5678,
+    ...overrides,
+  };
+}
+
+test("bounded runtime-log history retains only genuinely appended lines", () => {
+  assert.deepEqual(appendedRuntimeLogLines("", "\n> first\n> second"), [
+    "> first",
+    "> second",
+  ]);
+  const previous = Array.from({ length: 81 }, (_, index) => `> line ${index}`);
+  const current = [...previous.slice(1), "> new line"];
+  assert.deepEqual(
+    appendedRuntimeLogLines(previous.join("\n"), current.join("\n")),
+    ["> new line"],
+  );
+  assert.deepEqual(appendedRuntimeLogLines(current.join("\n"), current.join("\n")), []);
+  assert.throws(() => appendedRuntimeLogLines(null, ""), /must be strings/);
+});
+
+test("retail PBAK log evidence requires one exact arm/start/finish sequence", () => {
+  const evidence = parseRetailPbakEvidence([
+    pbakLogEntry(
+      "> Armed retail PBAK pb0cB (Standard, 217 recorded frames); input remains locked until Crash is live.",
+      40,
+    ),
+    pbakLogEntry(
+      "> Retail PBAK pb0cB physical open is waiting for the in-flight CD page transfer.",
+      40,
+    ),
+    pbakLogEntry(
+      "> Started retail PBAK pb0cB; created caption controller RuntimeObjectHandle and restored its checked camera/player snapshot and gameplay RNG.",
+      41,
+      { retailHardRestarts: 2 },
+    ),
+    pbakLogEntry(
+      "> Retail PBAK input ended (Finished); caption RuntimeObjectHandle received event 0xE00 (acknowledged: true) and retained the authored return lock.",
+      258,
+      { retailHardRestarts: 3, retailLoadStates: 1 },
+    ),
+    pbakLogEntry(
+      "> Retail LEVEL_END resolved 25 to 25 (bonus return: false).",
+      270,
+      { currentLid: 0x19, mountedLid: 0x0c },
+    ),
+  ]);
+  assert.equal(evidence.length, 1);
+  assert.deepEqual(
+    {
+      eid: evidence[0].eid,
+      layout: evidence[0].layout,
+      recordedFrames: evidence[0].recordedFrames,
+      finishReason: evidence[0].finishReason,
+      wallFrames: evidence[0].wallFrames,
+      hardRestartsDuringPlayback: evidence[0].hardRestartsDuringPlayback,
+      loadStatesDuringPlayback: evidence[0].loadStatesDuringPlayback,
+      pagerWaits: evidence[0].pagerWaits.length,
+      targetLid: evidence[0].transition.targetLid,
+    },
+    {
+      eid: "pb0cB",
+      layout: "Standard",
+      recordedFrames: 217,
+      finishReason: "Finished",
+      wallFrames: 218,
+      hardRestartsDuringPlayback: 1,
+      loadStatesDuringPlayback: 1,
+      pagerWaits: 1,
+      targetLid: 25,
+    },
+  );
+
+  assert.throws(
+    () => parseRetailPbakEvidence([
+      pbakLogEntry("> Started retail PBAK pb0cB; snapshot restored.", 1),
+    ]),
+    /without being armed/,
+  );
+  assert.throws(
+    () => parseRetailPbakEvidence([
+      pbakLogEntry(
+        "> Armed retail PBAK pb0cB (Standard, 217 recorded frames); input remains locked until Crash is live.",
+        1,
+      ),
+    ]),
+    /armed without finishing/,
+  );
+  assert.throws(
+    () => parseRetailPbakEvidence([
+      pbakLogEntry(
+        "> Armed retail PBAK pb0cB (Standard, 217 recorded frames); input remains locked until Crash is live.",
+        1,
+      ),
+      pbakLogEntry("> Started retail PBAK pb0eB; snapshot restored.", 2),
+    ]),
+    /while pb0cB was armed/,
+  );
+  assert.deepEqual(
+    parseRetailPbakEvidence(
+      [
+        pbakLogEntry(
+          "> Armed retail PBAK pb0cB (SpawnWords304, 1348 recorded frames); input remains locked until Crash is live.",
+          1,
+        ),
+        pbakLogEntry("> Started retail PBAK pb0cB; snapshot restored.", 2),
+      ],
+      { allowIncomplete: true },
+    ),
+    [],
+  );
+  assert.throws(
+    () => parseRetailPbakEvidence([
+      pbakLogEntry(
+        "> Armed retail PBAK pb0cB (SpawnWords304, 1348 recorded frames); input remains locked until Crash is live.",
+        1,
+      ),
+      pbakLogEntry("> Started retail PBAK pb0cB; snapshot restored.", 2),
+      pbakLogEntry(
+        "> Retail PBAK input ended (Released); no caption controller retained the authored return lock.",
+        3,
+      ),
+    ]),
+    /exact successful caption acknowledgement/,
+  );
+  const completeThenRepeat = [
+    pbakLogEntry(
+      "> Armed retail PBAK pb0cB (SpawnWords304, 1348 recorded frames); input remains locked until Crash is live.",
+      1,
+    ),
+    pbakLogEntry("> Started retail PBAK pb0cB; snapshot restored.", 2),
+    pbakLogEntry(
+      "> Retail PBAK input ended (Finished); caption RuntimeObjectHandle received event 0xE00 (acknowledged: true) and retained the authored return lock.",
+      1_349,
+    ),
+    pbakLogEntry(
+      "> Retail LEVEL_END resolved 12 to 0x19 (bonus return: false).",
+      1_350,
+    ),
+    pbakLogEntry(
+      "> Armed retail PBAK pb0cB (SpawnWords304, 1348 recorded frames); input remains locked until Crash is live.",
+      2_000,
+    ),
+  ];
+  assert.equal(
+    parseRetailPbakEvidence(completeThenRepeat, {
+      allowTrailingRepeat: true,
+    }).length,
+    1,
+  );
+  assert.throws(
+    () => parseRetailPbakEvidence(completeThenRepeat),
+    /armed without finishing/,
+  );
+  assert.throws(
+    () => parseRetailPbakEvidence([
+      ...completeThenRepeat,
+      pbakLogEntry("> Started retail PBAK pb0cB; snapshot restored.", 2_001),
+    ], {
+      allowTrailingRepeat: true,
+    }),
+    /started without finishing/,
+  );
+  assert.throws(
+    () => parseRetailPbakEvidence(completeThenRepeat.slice(-1), {
+      allowTrailingRepeat: true,
+    }),
+    /armed without finishing/,
+  );
+  assert.throws(
+    () => parseRetailPbakEvidence([], { allowIncomplete: "yes" }),
+    /must be a boolean/,
+  );
+  assert.throws(
+    () => parseRetailPbakEvidence([], { allowTrailingRepeat: "yes" }),
+    /must be a boolean/,
+  );
+});
+
+test("retail PBAK audit requires the exact nine-recording census and Title returns", () => {
+  const profiles = [
+    ["pb0aB", "SpawnWords304", 872],
+    ["pb0cB", "SpawnWords304", 1_348],
+    ["pb0eB", "SpawnWords304", 990],
+    ["pb0fB", "SpawnWords511", 934],
+    ["pb0iB", "SpawnWords304", 1_240],
+    ["pb0sB", "SpawnWords304", 998],
+    ["pb0tB", "SpawnWords304", 1_804],
+    ["pb0wB", "SpawnWords304", 1_878],
+    ["pb0FB", "SpawnWords304", 902],
+  ];
+  const clean = profiles.map(([eid, layout, recordedFrames]) => ({
+    eid,
+    layout,
+    recordedFrames,
+    finishReason: "Finished",
+    finished: {
+      retailExecutionErrors: 0,
+      retailFaultedObjects: 0,
+      retailZoneEventFailures: 0,
+    },
+    transition: { targetLid: 0x19, bonusReturn: false },
+  }));
+  assert.deepEqual(retailPbakAuditFailures(clean), []);
+  const naturalEids = [
+    "pb0aB",
+    "pb0cB",
+    "pb0eB",
+    "pb0iB",
+    "pb0tB",
+    "pb0wB",
+    "pb0FB",
+  ];
+  assert.deepEqual(
+    retailPbakAuditFailures(
+      clean.filter((run) => naturalEids.includes(run.eid)),
+      { expectedEids: naturalEids },
+    ),
+    [],
+  );
+  assert.match(
+    retailPbakAuditFailures(clean.slice(1)).join("\n"),
+    /did not complete pb0aB/,
+  );
+  assert.match(
+    retailPbakAuditFailures([
+      ...clean,
+      { ...clean[0], eid: "wrong" },
+    ]).join("\n"),
+    /unknown EID/,
+  );
+  assert.match(
+    retailPbakAuditFailures([
+      { ...clean[0], recordedFrames: 871, transition: undefined },
+    ]).join("\n"),
+    /reports 871 frames.*no observed LEVEL_END/s,
+  );
+  assert.throws(
+    () => retailPbakAuditFailures([], { requireAll: "yes" }),
+    /must be a boolean/,
+  );
+});
+
+test("retail PBAK audit waits for a fully mounted running Title pair", () => {
+  const ready = {
+    runtimeState: "running",
+    runtimeStatus: "Rust runtime active",
+    harness: { lastRequestedLid: null },
+    debug: {
+      currentLid: 0x19,
+      mountedLid: 0x19,
+      mountedPages: 17,
+      mountedEntries: 42,
+    },
+  };
+  assert.equal(retailPbakAuditTitleReady(ready), true);
+  for (const notReady of [
+    { runtimeState: "loading" },
+    { runtimeStatus: "Reading local NSD/NSF pair" },
+    { harness: { lastRequestedLid: 0x19 } },
+    { debug: { currentLid: 0x0f } },
+    { debug: { mountedLid: 0x0f } },
+    { debug: { mountedPages: 0 } },
+    { debug: { mountedEntries: 0 } },
+  ]) {
+    assert.equal(
+      retailPbakAuditTitleReady({
+        ...ready,
+        ...notReady,
+        harness: { ...ready.harness, ...notReady.harness },
+        debug: { ...ready.debug, ...notReady.debug },
+      }),
+      false,
+    );
+  }
+});
+
+function resumeStorageEnvelope(overrides = {}) {
+  return {
+    schema: "c1-browser-resume",
+    version: 1,
+    payload: STORAGE_PAYLOAD,
+    updatedAt: 7,
+    ...overrides,
+  };
+}
+
+function cardStorageEnvelope(overrides = {}) {
+  const slots = Array.from({ length: 15 }, () => null);
+  slots[0] = { payload: STORAGE_PAYLOAD, updatedAt: 5 };
+  return {
+    schema: "c1-virtual-memory-card",
+    version: 1,
+    slots,
+    updatedAt: 9,
+    ...overrides,
+  };
+}
 
 test("destination mount acknowledgement waits for the requested stream pair", () => {
   assert.equal(
@@ -165,6 +495,151 @@ test("replay batches cap constant-held runs and can isolate the launch frame", (
   );
 });
 
+test("replay host callbacks consume only cooperative steps and bound pager waits", () => {
+  assert.deepEqual(
+    summarizeReplayHostCallbacks(
+      [false, false, true, false, true],
+      2,
+      { zeroStepLimit: 2 },
+    ),
+    {
+      executed: 2,
+      hostCallbacks: 5,
+      consecutiveZeroSteps: 0,
+      maximumConsecutiveZeroSteps: 2,
+    },
+  );
+  assert.deepEqual(
+    summarizeReplayHostCallbacks([false, false], 1, { zeroStepLimit: 2 }),
+    {
+      executed: 0,
+      hostCallbacks: 2,
+      consecutiveZeroSteps: 2,
+      maximumConsecutiveZeroSteps: 2,
+    },
+  );
+  assert.throws(
+    () => summarizeReplayHostCallbacks(
+      [false, false, false],
+      1,
+      { zeroStepLimit: 2 },
+    ),
+    /exceeded 2 consecutive zero-step host callbacks/,
+  );
+  assert.throws(
+    () => summarizeReplayHostCallbacks([true, true], 1),
+    /exceeded the requested steps/,
+  );
+  assert.throws(
+    () => summarizeReplayHostCallbacks([0], 1),
+    /results must be booleans/,
+  );
+});
+
+test("a transition-only callback mounts without consuming replay input", () => {
+  assert.equal(validateReplayBatchExecution(1), 1);
+  assert.equal(
+    validateReplayBatchExecution(0, { mountedDestination: true }),
+    0,
+  );
+  assert.throws(
+    () => validateReplayBatchExecution(0),
+    /did not execute a cooperative simulation step/,
+  );
+  assert.throws(
+    () => validateReplayBatchExecution(-1),
+    /nonnegative safe integer/,
+  );
+});
+
+test("gameplay readiness requires a post-mount execution and live player", () => {
+  const ready = {
+    runtimeState: "running",
+    debug: {
+      currentLid: 0x11,
+      mountedLid: 0x11,
+      retailExecutions: 8,
+      browserTestObjects: [{ player: true, faulted: false }],
+    },
+  };
+  assert.equal(retailGameplayReadyAfterMount(ready, 0x11, 7), true);
+  for (const notReady of [
+    { runtimeState: "idle" },
+    { debug: { currentLid: 0x19 } },
+    { debug: { mountedLid: 0x19 } },
+    { debug: { retailExecutions: 7 } },
+    { debug: { browserTestObjects: [] } },
+    { debug: { browserTestObjects: [{ player: true, faulted: true }] } },
+  ]) {
+    assert.equal(
+      retailGameplayReadyAfterMount(
+        {
+          ...ready,
+          ...notReady,
+          debug: { ...ready.debug, ...notReady.debug },
+        },
+        0x11,
+        7,
+      ),
+      false,
+    );
+  }
+  assert.throws(
+    () => retailGameplayReadyAfterMount(ready, -1, 7),
+    /expectedLid/,
+  );
+  assert.throws(
+    () => retailGameplayReadyAfterMount(ready, 0x11, -1),
+    /mountExecutions/,
+  );
+});
+
+test("direct-bonus browser audit requires the classified LoadState and mounted Main Menu", () => {
+  const clean = {
+    runtimeState: "running",
+    runtimeLog: [
+      "> Completed a directly selected bonus without a parent snapshot; returning to the Main Menu.",
+      "> Mounted destination 0x19: Title pair.",
+    ].join("\n"),
+    harness: {
+      lastError: null,
+      directBonusStateBoundary: 32,
+    },
+    consoleErrors: [],
+    debug: {
+      currentLid: 0x19,
+      mountedLid: 0x19,
+      titleState: 5,
+      retailLoadStates: 1,
+      glError: 0,
+      retailFaultedObjects: 0,
+      retailExecutionErrors: 0,
+      retailZoneEventFailures: 0,
+      retailRuntimeError: null,
+      retailRuntimeWarning: null,
+    },
+  };
+  assert.deepEqual(directBonusReturnAuditFailures(clean), []);
+
+  const failures = directBonusReturnAuditFailures({
+    ...clean,
+    runtimeLog: "> Mounted destination 0x24: Tawna Bonus 1 pair.",
+    debug: {
+      ...clean.debug,
+      currentLid: 0x24,
+      mountedLid: 0x24,
+      titleState: 0,
+      retailLoadStates: 0,
+    },
+  }).join("\n");
+  assert.match(failures, /currentLid/);
+  assert.match(failures, /mountedLid/);
+  assert.match(failures, /titleState/);
+  assert.match(failures, /retailLoadStates/);
+  assert.match(failures, /completion classification/);
+  assert.match(failures, /Title destination mount/);
+});
+
 test("campaign execution evidence survives a destination mount at frame zero", () => {
   assert.equal(retailExecutionObserved(false, undefined), false);
   assert.equal(
@@ -202,7 +677,15 @@ test("browser smoke arguments keep the harness local and assets explicit", () =>
       "0x19",
       "--frames",
       "64",
+      "--expect-final-key-count",
+      "2",
+      "--expect-final-item-pool-2",
+      "0x00100400",
       "--unlock-all",
+      "--seed-card",
+      "./local-data/card.json",
+      "--seed-resume",
+      "./local-data/resume.json",
     ],
     {},
   );
@@ -210,8 +693,98 @@ test("browser smoke arguments keep the harness local and assets explicit", () =>
   assert.equal(parsed.url, "http://127.0.0.1:4175/");
   assert.equal(parsed.bootLid, 0x19);
   assert.equal(parsed.frames, 64);
+  assert.equal(parsed.expectFinalKeyCount, 2);
+  assert.equal(parsed.expectFinalItemPool2, 0x0010_0400);
   assert.equal(parsed.unlockAll, true);
+  assert.equal(parsed.cardStorageSeed.endsWith("/local-data/card.json"), true);
+  assert.equal(parsed.resumeStorageSeed.endsWith("/local-data/resume.json"), true);
   assert.equal(parsed.assets.length, 2);
+  const audit = parseArguments(
+    ["--asset", "./disc.bin", "--frames", "1000000", "--audit-retail-pbaks"],
+    {},
+  );
+  assert.equal(audit.auditRetailPbaks, true);
+  const isolated = parseArguments(
+    [
+      "--asset",
+      "./disc.bin",
+      "--frames",
+      "10000",
+      "--audit-isolated-retail-pbak",
+      "0x0f",
+    ],
+    {},
+  );
+  assert.equal(isolated.auditIsolatedRetailPbakLid, 0x0f);
+  const cardRoundTrip = parseArguments(
+    ["--asset", "./disc.bin", "--audit-card-round-trip"],
+    {},
+  );
+  assert.equal(cardRoundTrip.auditCardRoundTrip, true);
+  const directBonus = parseArguments(
+    ["--asset", "./disc.bin", "--audit-direct-bonus-return"],
+    {},
+  );
+  assert.equal(directBonus.auditDirectBonusReturn, true);
+  assert.equal(directBonus.bootLid, 0x24);
+  assert.equal(
+    parseArguments([
+      "--asset",
+      "./disc.bin",
+      "--lid",
+      "0x24",
+      "--audit-direct-bonus-return",
+    ], {}).bootLid,
+    0x24,
+  );
+  assert.throws(
+    () => parseArguments(["--audit-retail-pbaks", "--lid", "0x0a"], {}),
+    /requires Title boot LID/,
+  );
+  assert.throws(
+    () => parseArguments(["--audit-retail-pbaks", "--replay", "route.json"], {}),
+    /cannot be combined with --replay/,
+  );
+  assert.throws(
+    () => parseArguments([
+      "--audit-retail-pbaks",
+      "--audit-isolated-retail-pbak",
+      "0x1c",
+    ], {}),
+    /cannot be combined/,
+  );
+  assert.throws(
+    () => parseArguments(["--audit-isolated-retail-pbak", "0x0a"], {}),
+    /accepts only Upstream/,
+  );
+  for (const incompatible of [
+    ["--audit-card-round-trip", "--replay", "route.json"],
+    ["--audit-card-round-trip", "--audit-retail-pbaks"],
+    ["--audit-card-round-trip", "--unlock-all"],
+    ["--audit-card-round-trip", "--seed-card", "card.json"],
+  ]) {
+    assert.throws(() => parseArguments(incompatible, {}), /cannot be combined/);
+  }
+  assert.throws(
+    () => parseArguments(["--audit-card-round-trip", "--lid", "0x09"], {}),
+    /requires Title boot LID/,
+  );
+  assert.throws(
+    () => parseArguments([
+      "--audit-direct-bonus-return",
+      "--lid",
+      "0x25",
+    ], {}),
+    /requires Tawna Bonus 1 boot LID 0x24/,
+  );
+  for (const incompatible of [
+    ["--audit-direct-bonus-return", "--replay", "route.json"],
+    ["--audit-direct-bonus-return", "--audit-retail-pbaks"],
+    ["--audit-direct-bonus-return", "--unlock-all"],
+    ["--audit-direct-bonus-return", "--seed-resume", "resume.json"],
+  ]) {
+    assert.throws(() => parseArguments(incompatible, {}), /cannot be combined/);
+  }
   assert.throws(
     () => parseArguments(["--asset", "./x.nsd", "--url", "https://example.com/"], {}),
     /loopback HTTP URL/,
@@ -225,12 +798,255 @@ test("browser smoke arguments keep the harness local and assets explicit", () =>
     ["--synthetic-cooked-iso-import", "--frames", "1"],
     ["--synthetic-cooked-iso-import", "--unlock-all"],
     ["--synthetic-cooked-iso-import", "--replay", "./route.json"],
+    ["--synthetic-cooked-iso-import", "--seed-card", "./card.json"],
+    ["--synthetic-cooked-iso-import", "--seed-resume", "./resume.json"],
   ]) {
     assert.throws(
       () => parseArguments(incompatible, {}),
       /cannot be combined/,
     );
   }
+  assert.throws(
+    () => parseArguments(["--seed-card", "a.json", "--seed-card", "b.json"], {}),
+    /only once/,
+  );
+  assert.throws(
+    () =>
+      parseArguments(
+        ["--seed-resume", "a.json", "--seed-resume", "b.json"],
+        {},
+      ),
+    /only once/,
+  );
+  assert.throws(
+    () => parseArguments([
+      "--expect-final-key-count",
+      "1",
+      "--expect-final-key-count",
+      "2",
+    ], {}),
+    /only once/,
+  );
+  assert.throws(
+    () => parseArguments(["--expect-final-item-pool-2", "0x100000000"], {}),
+    /0 through 4294967295/,
+  );
+});
+
+test("browser smoke accepts only the exact IPv6 loopback literal", () => {
+  const ipv6Loopback = parseArguments(
+    ["--asset", "./x.nsd", "--url", "http://[::1]:4175/", "--no-server"],
+    {},
+  );
+  assert.equal(ipv6Loopback.url, "http://[::1]:4175/");
+  assert.equal(ipv6Loopback.startServer, false);
+  assert.throws(
+    () => parseArguments(["--asset", "./x.nsd", "--url", "http://[::2]:4175/"], {}),
+    /loopback HTTP URL/,
+  );
+});
+
+test("CLI terminal progression requirements extend replay expectations exactly", () => {
+  const replay = normalizeReplay({
+    schema: 1,
+    bootLid: 0x19,
+    segments: [{ frames: 1, held: 0 }],
+    expect: { currentLid: 0x19 },
+  });
+  assert.equal(applyTerminalProgressionRequirements(replay), replay);
+
+  const required = applyTerminalProgressionRequirements(replay, {
+    expectFinalKeyCount: 2,
+    expectFinalItemPool2: 0x0010_0400,
+  });
+  assert.deepEqual(required.expect, {
+    currentLid: 0x19,
+    keyCount: 2,
+    itemPool2: 0x0010_0400,
+  });
+  assert.deepEqual(replay.expect, { currentLid: 0x19 });
+  assert.deepEqual(
+    expectationFailures(required.expect, {
+      debug: {
+        currentLid: 0x19,
+        browserTestGlobals: {
+          keyCount: 2,
+          itemPool2: 0x0010_0400,
+        },
+      },
+    }),
+    [],
+  );
+  assert.match(
+    expectationFailures(required.expect, {
+      debug: {
+        currentLid: 0x19,
+        browserTestGlobals: {
+          keyCount: 1,
+          itemPool2: 0x400,
+        },
+      },
+    }).join("\n"),
+    /keyCount: expected 2, received 1[\s\S]*itemPool2: expected 1049600, received 1024/,
+  );
+});
+
+test("CLI terminal progression requirements reject replay conflicts", () => {
+  const replay = normalizeReplay({
+    schema: 1,
+    bootLid: 0x19,
+    segments: [{ frames: 1, held: 0 }],
+    expect: { keyCount: 1, itemPool2: 0x400 },
+  });
+  assert.throws(
+    () => applyTerminalProgressionRequirements(replay, {
+      expectFinalKeyCount: 2,
+    }),
+    /conflicts with replay\.expect\.keyCount=1/,
+  );
+  assert.throws(
+    () => applyTerminalProgressionRequirements(replay, {
+      expectFinalItemPool2: 0x0010_0400,
+    }),
+    /conflicts with replay\.expect\.itemPool2=1024/,
+  );
+  assert.deepEqual(
+    applyTerminalProgressionRequirements(replay, {
+      expectFinalKeyCount: 1,
+      expectFinalItemPool2: 0x400,
+    }).expect,
+    replay.expect,
+  );
+});
+
+test("storage seed parser preserves exact bounded versioned envelopes", () => {
+  const resumeJson = JSON.stringify(resumeStorageEnvelope(), null, 2);
+  assert.deepEqual(parseStorageSeedJson(resumeJson, "resume"), {
+    key: "c1.browser-resume.v1",
+    json: resumeJson,
+  });
+
+  const cardJson = JSON.stringify(cardStorageEnvelope());
+  assert.deepEqual(parseStorageSeedJson(cardJson, "card"), {
+    key: "c1.virtual-memory-card.v1",
+    json: cardJson,
+  });
+});
+
+test("storage seed parser rejects malformed, oversized, or non-exact input", () => {
+  const secret = "PAYLOAD_MUST_NOT_APPEAR_IN_THE_ERROR";
+  let malformedError;
+  try {
+    parseStorageSeedJson(`{${secret}`, "resume");
+  } catch (error) {
+    malformedError = error;
+  }
+  assert.match(malformedError?.message ?? "", /not valid JSON/);
+  assert.equal(malformedError?.message.includes(secret), false);
+
+  assert.throws(
+    () => parseStorageSeedJson("x".repeat((16 * 1024) + 1), "resume"),
+    /1 through 16384 UTF-8 bytes/,
+  );
+  assert.throws(
+    () =>
+      parseStorageSeedJson(
+        JSON.stringify(resumeStorageEnvelope({ extra: true })),
+        "resume",
+      ),
+    /only its versioned envelope fields/,
+  );
+  assert.throws(
+    () =>
+      parseStorageSeedJson(
+        JSON.stringify(resumeStorageEnvelope({ version: 2 })),
+        "resume",
+      ),
+    /version must be 1/,
+  );
+  assert.throws(
+    () =>
+      parseStorageSeedJson(
+        JSON.stringify(resumeStorageEnvelope({ payload: secret })),
+        "resume",
+      ),
+    /canonical base64 for exactly 128 bytes/,
+  );
+  assert.throws(
+    () =>
+      parseStorageSeedJson(
+        JSON.stringify(cardStorageEnvelope({ slots: [] })),
+        "card",
+      ),
+    /exactly 15 entries/,
+  );
+  assert.throws(
+    () =>
+      parseStorageSeedJson(
+        JSON.stringify(cardStorageEnvelope({ updatedAt: -1 })),
+        "card",
+      ),
+    /non-negative safe integer/,
+  );
+  assert.throws(
+    () => parseStorageSeedJson(JSON.stringify(resumeStorageEnvelope()), "other"),
+    /kind must be card or resume/,
+  );
+});
+
+test("authored card round-trip evidence requires one exact atomic slot write", () => {
+  const exactPayload =
+    "KAAAAAgAAAAABwAAeFY0EgEAAADvAAAA3wAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHlnRSs=";
+  const exact = cardStorageEnvelope({ updatedAt: 23 });
+  exact.slots[0] = { payload: exactPayload, updatedAt: 23 };
+  assert.deepEqual(cardRoundTripStorageFailures(JSON.stringify(exact)), []);
+  assert.match(cardRoundTripStorageFailures(null).join("\n"), /did not create/);
+
+  const wrongPayload = structuredClone(exact);
+  wrongPayload.slots[0].payload = STORAGE_PAYLOAD;
+  assert.match(
+    cardRoundTripStorageFailures(JSON.stringify(wrongPayload)).join("\n"),
+    /exact 128-byte fixture/,
+  );
+  const extraSlot = structuredClone(exact);
+  extraSlot.slots[4] = { payload: exactPayload, updatedAt: 23 };
+  assert.match(
+    cardRoundTripStorageFailures(JSON.stringify(extraSlot)).join("\n"),
+    /only slot zero/,
+  );
+  const splitTimestamp = structuredClone(exact);
+  splitTimestamp.updatedAt = 24;
+  assert.match(
+    cardRoundTripStorageFailures(JSON.stringify(splitTimestamp)).join("\n"),
+    /atomic write/,
+  );
+});
+
+test("page reload resume evidence preserves the exact authored payload", () => {
+  const exactPayload =
+    "KAAAAAgAAAAABwAAeFY0EgEAAADvAAAA3wAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHlnRSs=";
+  assert.deepEqual(
+    resumeRoundTripStorageFailures(
+      JSON.stringify(resumeStorageEnvelope({ payload: exactPayload, updatedAt: 23 })),
+    ),
+    [],
+  );
+  assert.match(
+    resumeRoundTripStorageFailures(null).join("\n"),
+    /did not create/,
+  );
+  assert.match(
+    resumeRoundTripStorageFailures(
+      JSON.stringify(resumeStorageEnvelope({ payload: STORAGE_PAYLOAD })),
+    ).join("\n"),
+    /exact authored 128-byte fixture/,
+  );
+  assert.match(
+    resumeRoundTripStorageFailures(
+      JSON.stringify(resumeStorageEnvelope({ payload: exactPayload, updatedAt: 0 })),
+    ).join("\n"),
+    /positive write timestamp/,
+  );
 });
 
 test("synthetic cooked-ISO import evidence is exact and fail-closed", () => {
@@ -320,6 +1136,7 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
       retailDeathCameraFrames: 0,
       paused: false,
       lifeCount: 3 << 8,
+      playerLifeCount: 3 << 8,
       minRetailExecutions: 1,
     },
   });
@@ -348,6 +1165,7 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
   assert.equal(replay.expect.retailDeathCameraFrames, 0);
   assert.equal(replay.expect.paused, false);
   assert.equal(replay.expect.lifeCount, 3 << 8);
+  assert.equal(replay.expect.playerLifeCount, 3 << 8);
   assert.equal(
     normalizeReplay(
       { schema: 1, bootLid: 0x19, segments: [{ frames: 1, held: 0 }] },
@@ -532,6 +1350,11 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
         retailDeathCameraFrames: 0,
         paused: false,
         lifeCount: 3 << 8,
+        playerLifeCount: 3 << 8,
+        gemCount: 12,
+        keyCount: 1,
+        itemPool1: 0x1234_5678,
+        itemPool2: 0x0010_0400,
         minFrame: 64,
         minRetailExecutions: 1,
       },
@@ -547,7 +1370,14 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
           retailLoadStates: 0,
           retailDeathCameraFrames: 0,
           paused: false,
-          browserTestGlobals: { lifeCount: 3 << 8 },
+          playerLifeCount: 3 << 8,
+          browserTestGlobals: {
+            lifeCount: 3 << 8,
+            gemCount: 12,
+            keyCount: 1,
+            itemPool1: 0x1234_5678,
+            itemPool2: 0x0010_0400,
+          },
           frame: 64,
           retailExecutions: 9,
         },
@@ -566,12 +1396,14 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
         retailDeathCameraFrames: 0,
         paused: false,
         lifeCount: 3 << 8,
+        playerLifeCount: 3 << 8,
         minRetailFrame: 65,
       },
       {
         debug: {
           currentLid: 0x19,
           paused: true,
+          playerLifeCount: 4 << 8,
           retailRandomSeedB: 0x9999,
           retailHardRestarts: 2,
           retailLoadStates: 1,
@@ -581,7 +1413,7 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
         },
       },
     ).join("\n"),
-    /currentLid.*retailFrame.*retailRandomSeedB.*retailHardRestarts.*retailLoadStates.*retailDeathCameraFrames.*paused.*retailFrame.*lifeCount/s,
+    /currentLid.*retailFrame.*retailRandomSeedB.*retailHardRestarts.*retailLoadStates.*retailDeathCameraFrames.*paused.*playerLifeCount.*retailFrame.*lifeCount/s,
   );
 });
 
@@ -752,6 +1584,7 @@ test("replay validation bounds live-object phase predicates", () => {
 test("all-level browser assertion permits spent lives after verifying launch", () => {
   const clean = {
     debug: {
+      playerLifeCount: 999 << 8,
       browserTestGlobals: {
         allLevels: true,
         lifeCount: 999 << 8,
@@ -763,12 +1596,16 @@ test("all-level browser assertion permits spent lives after verifying launch", (
   };
   assert.deepEqual(allLevelsFailures(clean), []);
   assert.deepEqual(
-    allLevelsFailures(clean, { requireStartingLives: true }),
+    allLevelsFailures(clean, {
+      requireStartingLives: true,
+      requireLivePlayer: true,
+    }),
     [],
   );
 
   const spentLife = {
     debug: {
+      playerLifeCount: 998 << 8,
       browserTestGlobals: {
         ...clean.debug.browserTestGlobals,
         lifeCount: 998 << 8,
@@ -781,12 +1618,16 @@ test("all-level browser assertion permits spent lives after verifying launch", (
     "a legitimate life loss must remain valid after launch",
   );
   assert.match(
-    allLevelsFailures(spentLife, { requireStartingLives: true }).join("\n"),
-    /lifeCount.*at launch/,
+    allLevelsFailures(spentLife, {
+      requireStartingLives: true,
+      requireLivePlayer: true,
+    }).join("\n"),
+    /lifeCount.*at launch.*playerLifeCount.*at launch/s,
   );
 
   const fractionalLife = {
     debug: {
+      playerLifeCount: (998 << 8) + 1,
       browserTestGlobals: {
         ...clean.debug.browserTestGlobals,
         lifeCount: (998 << 8) + 1,
@@ -795,7 +1636,7 @@ test("all-level browser assertion permits spent lives after verifying launch", (
   };
   assert.match(
     allLevelsFailures(fractionalLife).join("\n"),
-    /lifeCount.*aligned 24\.8/,
+    /lifeCount.*aligned 24\.8.*playerLifeCount.*aligned 24\.8/s,
   );
 
   const failures = allLevelsFailures({
@@ -823,4 +1664,36 @@ test("all-level browser assertion permits spent lives after verifying launch", (
   });
   assert.match(accessFailures.join("\n"), /all-level mode/);
   assert.match(accessFailures.join("\n"), /levelsUnlocked/);
+
+  assert.match(
+    allLevelsFailures(
+      { debug: { browserTestGlobals: clean.debug.browserTestGlobals } },
+      { requireLivePlayer: true },
+    ).join("\n"),
+    /live-player life count is unavailable/,
+  );
+});
+
+test("all-level storage audit preserves exact card and resume state", () => {
+  const cardKey = "c1.virtual-memory-card.v1";
+  const resumeKey = "c1.browser-resume.v1";
+  assert.deepEqual(allLevelsStorageFailures({}, {}), []);
+  assert.deepEqual(
+    allLevelsStorageFailures(
+      { [cardKey]: "card-seed", [resumeKey]: "resume-seed" },
+      { [cardKey]: "card-seed", [resumeKey]: "resume-seed" },
+    ),
+    [],
+  );
+  assert.match(
+    allLevelsStorageFailures(
+      { [cardKey]: "card-seed" },
+      { [cardKey]: "changed", [resumeKey]: "unexpected" },
+    ).join("\n"),
+    /virtual card.*changed value.*browser resume.*no value.*changed value/s,
+  );
+  assert.throws(
+    () => allLevelsStorageFailures([], {}),
+    /storage seeds must be an object/,
+  );
 });

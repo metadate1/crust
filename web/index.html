@@ -54,6 +54,19 @@
               </dl>
               <button id="clearData" class="button button-link" type="button" disabled>Eject local data</button>
             </details>
+
+            <details class="advanced-import">
+              <summary>Use extracted NSD / NSF streams instead</summary>
+              <p>Choose individual stream files or an extracted S0–S3 folder.</p>
+              <div class="source-actions">
+                <button id="chooseFiles" class="button button-secondary" type="button">Choose stream files</button>
+                <button id="chooseFolder" class="button button-secondary" type="button">Choose S0–S3 folder</button>
+              </div>
+            </details>
+
+            <p class="privacy-note">
+              Your disc never leaves this tab and is never saved to browser storage.
+            </p>
           </div>
         </div>
 
@@ -64,18 +77,9 @@
               Launch game
             </button>
 
-            <label class="unlock-option" for="unlockAll">
-              <input id="unlockAll" type="checkbox" disabled>
-              <span class="unlock-switch" aria-hidden="true"></span>
-              <span class="unlock-copy">
-                <strong>All levels unlocked</strong>
-                <small>Includes 999 lives for this session — your normal resume and memory card stay untouched</small>
-              </span>
-            </label>
-
             <div class="level-choice">
               <label for="bootLevel">
-                <span>Optional: choose a level</span>
+                <span>Choose an individual level</span>
                 <small>Leave on “full game” to begin at the opening</small>
               </label>
               <div class="select-shell">
@@ -85,84 +89,91 @@
               </div>
             </div>
 
-            <details class="display-upgrades">
-              <summary>Optional display upgrades</summary>
-              <div class="display-upgrade-grid">
-                <label class="display-toggle" for="smoothMotion">
-                  <input id="smoothMotion" type="checkbox">
-                  <span>
-                    <strong>Refresh-rate smoothing</strong>
-                    <small>Interpolates each browser display refresh; gameplay remains exactly 30 Hz</small>
+            <details class="launcher-advanced">
+              <summary>
+                <span>
+                  <strong>Advanced &amp; display</strong>
+                  <small>Session unlocks, lives, aspect ratio, and resolution</small>
+                </span>
+              </summary>
+              <div class="launcher-advanced-content">
+                <label class="unlock-option" for="unlockAll">
+                  <input id="unlockAll" type="checkbox" disabled>
+                  <span class="unlock-switch" aria-hidden="true"></span>
+                  <span class="unlock-copy">
+                    <strong>All levels unlocked</strong>
+                    <small>Includes 999 lives for this session — your normal resume and memory card stay untouched</small>
                   </span>
                 </label>
-                <label class="display-toggle" for="extendedWorld">
-                  <input id="extendedWorld" type="checkbox">
-                  <span>
-                    <strong>Extended draw distance</strong>
-                    <small>Preloads level geometry and extends visibility across the active zone</small>
-                  </span>
-                </label>
-                <label for="cameraZoom">
-                  <span>Camera view</span>
-                  <select id="cameraZoom">
-                    <option value="100">Retail distance</option>
-                    <option value="85">Zoom out 15%</option>
-                    <option value="70">Zoom out 30%</option>
-                    <option value="55">Zoom out 45%</option>
-                  </select>
-                </label>
-                <label for="outputAspect">
-                  <span>Aspect ratio</span>
-                  <select id="outputAspect">
-                    <option value="4:3">Original 4:3</option>
-                    <option value="16:9">Uncropped 16:9</option>
-                    <option value="21:9">Uncropped 21:9</option>
-                    <option value="screen">Screen / Auto</option>
-                  </select>
-                </label>
-                <label class="render-resolution" for="renderResolution">
-                  <span>Internal resolution</span>
-                  <select id="renderResolution">
-                    <option value="native">Native display</option>
-                    <option value="720">720p</option>
-                    <option value="1080">1080p</option>
-                    <option value="1440">1440p</option>
-                    <option value="2160">2160p / 4K</option>
-                    <option value="custom">Custom dimensions…</option>
-                  </select>
-                </label>
-                <details class="custom-resolution">
-                  <summary>Custom drawing buffer</summary>
-                  <div>
-                    <label for="customRenderWidth">
-                      <span>Width</span>
-                      <input id="customRenderWidth" type="number" inputmode="numeric" min="1" max="12288" step="1" value="1920">
+
+                <section class="display-upgrades" aria-labelledby="displaySettingsTitle">
+                  <h3 id="displaySettingsTitle">Display</h3>
+                  <div class="display-upgrade-grid">
+                    <label class="display-toggle" for="smoothMotion">
+                      <input id="smoothMotion" type="checkbox">
+                      <span>
+                        <strong>Refresh-rate smoothing</strong>
+                        <small>Interpolates each browser display refresh; gameplay remains exactly 30 Hz</small>
+                      </span>
                     </label>
-                    <span aria-hidden="true">×</span>
-                    <label for="customRenderHeight">
-                      <span>Height</span>
-                      <input id="customRenderHeight" type="number" inputmode="numeric" min="1" max="12288" step="1" value="1080">
+                    <label class="display-toggle" for="extendedWorld">
+                      <input id="extendedWorld" type="checkbox">
+                      <span>
+                        <strong>Extended draw distance</strong>
+                        <small>Preloads level geometry and extends visibility across the active zone</small>
+                      </span>
                     </label>
+                    <label for="cameraZoom">
+                      <span>Camera view</span>
+                      <select id="cameraZoom">
+                        <option value="100">Retail distance</option>
+                        <option value="85">Zoom out 15%</option>
+                        <option value="70">Zoom out 30%</option>
+                        <option value="55">Zoom out 45%</option>
+                      </select>
+                    </label>
+                    <label for="outputAspect">
+                      <span>Aspect ratio</span>
+                      <select id="outputAspect">
+                        <option value="4:3">Original 4:3</option>
+                        <option value="16:9">Uncropped 16:9</option>
+                        <option value="21:9">Uncropped 21:9</option>
+                        <option value="screen">Screen / Auto</option>
+                      </select>
+                    </label>
+                    <label class="render-resolution" for="renderResolution">
+                      <span>Internal resolution</span>
+                      <select id="renderResolution">
+                        <option value="native">Native display</option>
+                        <option value="720">720p</option>
+                        <option value="1080">1080p</option>
+                        <option value="1440">1440p</option>
+                        <option value="2160">2160p / 4K</option>
+                        <option value="custom">Custom dimensions…</option>
+                      </select>
+                    </label>
+                    <details class="custom-resolution">
+                      <summary>Custom drawing buffer</summary>
+                      <div>
+                        <label for="customRenderWidth">
+                          <span>Width</span>
+                          <input id="customRenderWidth" type="number" inputmode="numeric" min="1" max="12288" step="1" value="1920">
+                        </label>
+                        <span aria-hidden="true">×</span>
+                        <label for="customRenderHeight">
+                          <span>Height</span>
+                          <input id="customRenderHeight" type="number" inputmode="numeric" min="1" max="12288" step="1" value="1080">
+                        </label>
+                      </div>
+                      <small>Used only when “Custom dimensions” is selected.</small>
+                    </details>
                   </div>
-                  <small>Used only when “Custom dimensions” is selected.</small>
-                </details>
+                  <p>Screen / Auto follows the live browser shape, including 32:9, 3:2, and portrait views. Zoom and non-4:3 views enable extended visibility automatically; off-screen objects keep retail activation and timing.</p>
+                </section>
               </div>
-              <p>Screen / Auto follows the live browser shape, including 32:9, 3:2, and portrait views. Zoom and non-4:3 views enable extended visibility automatically; off-screen objects keep retail activation and timing.</p>
             </details>
           </div>
         </div>
-
-        <details class="advanced-import">
-          <summary>Use extracted NSD / NSF streams instead</summary>
-          <div class="source-actions">
-            <button id="chooseFiles" class="button button-secondary" type="button">Choose stream files</button>
-            <button id="chooseFolder" class="button button-secondary" type="button">Choose S0–S3 folder</button>
-          </div>
-        </details>
-
-        <p class="privacy-note">
-          Your disc never leaves this tab and is never saved to browser storage.
-        </p>
       </section>
 
       <section class="stage" aria-labelledby="stageTitle">

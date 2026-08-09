@@ -3374,7 +3374,13 @@ fn sample_camera(
         }
     }
 
-    interpolate_camera(zone_rect.origin, point, next_origin, next_point, fraction)
+    Ok(interpolate_camera(
+        zone_rect.origin,
+        point,
+        next_origin,
+        next_point,
+        fraction,
+    ))
 }
 
 fn interpolate_camera(
@@ -3383,21 +3389,21 @@ fn interpolate_camera(
     next_origin: [i32; 3],
     next: ZonePathPoint,
     fraction: i32,
-) -> Result<CameraSample, RetailSceneError> {
+) -> CameraSample {
     let current_coordinates = [
-        path_coordinate(origin[0], point.x)?,
-        path_coordinate(origin[1], point.y)?,
-        path_coordinate(origin[2], point.z)?,
+        path_coordinate(origin[0], point.x),
+        path_coordinate(origin[1], point.y),
+        path_coordinate(origin[2], point.z),
     ];
     let next_coordinates = [
-        path_coordinate(next_origin[0], next.x)?,
-        path_coordinate(next_origin[1], next.y)?,
-        path_coordinate(next_origin[2], next.z)?,
+        path_coordinate(next_origin[0], next.x),
+        path_coordinate(next_origin[1], next.y),
+        path_coordinate(next_origin[2], next.z),
     ];
     let translation_fixed = [
-        interpolate_coordinate_fixed(current_coordinates[0], next_coordinates[0], fraction)?,
-        interpolate_coordinate_fixed(current_coordinates[1], next_coordinates[1], fraction)?,
-        interpolate_coordinate_fixed(current_coordinates[2], next_coordinates[2], fraction)?,
+        interpolate_coordinate_fixed(current_coordinates[0], next_coordinates[0], fraction),
+        interpolate_coordinate_fixed(current_coordinates[1], next_coordinates[1], fraction),
+        interpolate_coordinate_fixed(current_coordinates[2], next_coordinates[2], fraction),
     ];
     let translation = Vec3i {
         x: translation_fixed[0] >> 8,
@@ -3408,43 +3414,37 @@ fn interpolate_camera(
         Angle12::new(i32::from(point.rotation_y))
             .difference_to(Angle12::new(i32::from(next.rotation_y))),
     );
-    Ok(CameraSample {
+    CameraSample {
         translation,
         translation_fixed,
         rotation_y: i32::from(point.rotation_y) + ((yaw_difference * fraction) >> 8),
         rotation_x: interpolate_rotation(point.rotation_x, next.rotation_x, fraction),
         rotation_z: interpolate_rotation(point.rotation_z, next.rotation_z, fraction),
-    })
+    }
 }
 
-fn path_coordinate(origin: i32, point: i16) -> Result<i32, RetailSceneError> {
-    origin
-        .checked_add(i32::from(point))
-        .ok_or_else(|| scene_error("camera path coordinate overflows signed world space"))
+fn path_coordinate(origin: i32, point: i16) -> i32 {
+    // Retail camera coordinates use the PSX's 32-bit wrapping arithmetic.
+    // Legal authored paths (notably the Great Hall epilogue) cross the signed
+    // boundary before the source engine expands the coordinate to 24.8.
+    origin.wrapping_add(i32::from(point))
 }
 
 #[cfg(test)]
-fn interpolate_coordinate(current: i32, next: i32, fraction: i32) -> Result<i32, RetailSceneError> {
-    Ok(interpolate_coordinate_fixed(current, next, fraction)? >> 8)
+fn interpolate_coordinate(current: i32, next: i32, fraction: i32) -> i32 {
+    interpolate_coordinate_fixed(current, next, fraction) >> 8
 }
 
-fn interpolate_coordinate_fixed(
-    current: i32,
-    next: i32,
-    fraction: i32,
-) -> Result<i32, RetailSceneError> {
+fn interpolate_coordinate_fixed(current: i32, next: i32, fraction: i32) -> i32 {
     debug_assert!((0..=0xff).contains(&fraction));
-    let fixed = i64::from(current)
-        .checked_shl(8)
-        .and_then(|base| {
-            i64::from(next)
-                .checked_sub(i64::from(current))
-                .and_then(|delta| delta.checked_mul(i64::from(fraction)))
-                .and_then(|delta| base.checked_add(delta))
-        })
-        .ok_or_else(|| scene_error("interpolated camera coordinate overflows fixed space"))?;
-    i32::try_from(fixed)
-        .map_err(|_| scene_error("interpolated fixed camera coordinate exceeds signed Q24.8 space"))
+    let current_fixed = current.wrapping_shl(8);
+    let next_fixed = next.wrapping_shl(8);
+    current_fixed.wrapping_add(
+        next_fixed
+            .wrapping_sub(current_fixed)
+            .wrapping_mul(fraction)
+            >> 8,
+    )
 }
 
 fn interpolate_rotation(current: i16, next: i16, fraction: i32) -> i32 {
@@ -3632,12 +3632,12 @@ mod tests {
         RetailCameraRuntime, RetailCameraStep,
     };
     use crust_sim::gool::{
-        CollisionObjectReference, GAME_STATE_GLOBAL, RetailPadSnapshot,
+        CollisionObjectReference, GAME_STATE_GLOBAL, LIFE_COUNT_GLOBAL, RetailPadSnapshot,
         RetailTransformVectorsCamera, process_register,
     };
     use crust_sim::math::Vec3;
     use crust_sim::object_arena::NeighborZone;
-    use crust_sim::paging::Pager;
+    use crust_sim::paging::{Pager, RetailLevelMountOptions, RetailLevelMountPageUpdate};
     use crust_sim::retail_lighting::{ObjectDarkShaderInput, apply_retail_object_zone_shader};
     use crust_sim::retail_runtime::{
         ISLAND_CAMERA_ROTATION_GLOBAL, NsfProgramHost, RetailDemoFinishOutcome,
@@ -4279,9 +4279,9 @@ mod tests {
 
     #[test]
     fn world_camera_coordinates_add_signed_path_points_before_source_24_8_expansion() {
-        assert_eq!(path_coordinate(1_000, -2).unwrap(), 998);
-        assert_eq!(path_coordinate(-1_000, 2).unwrap(), -998);
-        assert!(path_coordinate(i32::MAX, 1).is_err());
+        assert_eq!(path_coordinate(1_000, -2), 998);
+        assert_eq!(path_coordinate(-1_000, 2), -998);
+        assert_eq!(path_coordinate(i32::MAX, 1), i32::MIN);
     }
 
     #[test]
@@ -4302,7 +4302,7 @@ mod tests {
             rotation_x: 100,
             rotation_z: -40,
         };
-        let sample = interpolate_camera([0, 100, -100], point, [0, 100, -100], next, 0x80).unwrap();
+        let sample = interpolate_camera([0, 100, -100], point, [0, 100, -100], next, 0x80);
         assert_eq!(
             sample.translation,
             Vec3i {
@@ -4318,8 +4318,26 @@ mod tests {
 
         // The C implementation keeps 24.8 precision until the graphics-side
         // arithmetic shift, so a negative fraction rounds toward -infinity.
-        assert_eq!(interpolate_coordinate(-1, 0, 1).unwrap(), -1);
-        assert_eq!(interpolate_coordinate_fixed(-1, 0, 1).unwrap(), -255);
+        assert_eq!(interpolate_coordinate(-1, 0, 1), -1);
+        assert_eq!(interpolate_coordinate_fixed(-1, 0, 1), -255);
+
+        // The source's 32-bit fixed-point operations also wrap explicitly;
+        // using widened checked arithmetic here rejects legal retail paths.
+        let current = i32::MAX;
+        let next = i32::MIN;
+        let fraction = 0x80;
+        let current_fixed = current.wrapping_shl(8);
+        let next_fixed = next.wrapping_shl(8);
+        let expected = current_fixed.wrapping_add(
+            next_fixed
+                .wrapping_sub(current_fixed)
+                .wrapping_mul(fraction)
+                >> 8,
+        );
+        assert_eq!(
+            interpolate_coordinate_fixed(current, next, fraction),
+            expected
+        );
     }
 
     #[test]
@@ -6002,6 +6020,70 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn papu_papu_attract_pbak_page_remains_physically_openable() {
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+        );
+        let level = LevelId::new_const(0x0a);
+        let nsd_path = root.join(StreamName::new(level, StreamKind::Nsd).filename());
+        let nsf_path = root.join(StreamName::new(level, StreamKind::Nsf).filename());
+        let nsd_bytes = std::fs::read(&nsd_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display()));
+        let nsf_bytes = std::fs::read(&nsf_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
+        let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+        let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+        let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+        let camera = RetailCameraRuntime::at_path(&graph, graph.spawn_path(), 0, 0x600).unwrap();
+        let initial_zone = camera.location().path.zone;
+        let entry = typed_entry(&nsf, &nsd, initial_zone, ZDAT_ENTRY_TYPE, "spawn ZDAT").unwrap();
+        let header =
+            ZoneHeader::parse(entry_item(entry, &nsf_bytes, 0, "spawn ZDAT header").unwrap())
+                .unwrap();
+        let load_list = OrderedZoneLoadList::from(&header.load_list);
+        let initial_visibility = (!header.worlds.is_empty())
+            .then(|| graph.path(camera.location().path).unwrap().visibility_list);
+        let mut pager = Pager::mount_retail_level_with_options(
+            &nsd,
+            &nsf,
+            level,
+            initial_zone,
+            load_list.entries().iter().copied(),
+            load_list.pages().iter().copied(),
+            RetailLevelMountOptions::new(level)
+                .with_page_update(RetailLevelMountPageUpdate::Defer)
+                .with_initial_visibility_list(initial_visibility),
+        )
+        .unwrap();
+        for _ in 0..128 {
+            pager.update_pending_virtual_page().unwrap();
+        }
+        let mut random_seed_b = 0;
+        let prepared = prepare_pair_pbak(&nsd, &nsf, &nsf_bytes, &graph, &mut random_seed_b)
+            .unwrap()
+            .expect("Papu Papu has an authored PBAK");
+        let referenced = pager
+            .page_reference_counts()
+            .filter(|(_, references)| *references != 0)
+            .map(|(page, references)| {
+                let record = pager.page(page).unwrap();
+                (page, record.state, record.physical_slot(), references)
+            })
+            .collect::<Vec<_>>();
+        let open = pager.open_eid_with_outcome(prepared.eid);
+        assert!(
+            open.is_ok(),
+            "{} page must remain physically openable after deferred attract loading; capacity {}, available {}, resident {}, referenced {referenced:?}; open {open:?}",
+            prepared.eid,
+            pager.physical_slot_count(),
+            pager.available_physical_page_count(),
+            pager.resident_physical_page_count(),
+        );
+    }
+
+    #[test]
     #[ignore = "set C1_STREAM_DIR or C1_DISC_IMAGE to legally local retail data"]
     fn local_pbak_restored_scene_is_renderable() {
         const RETAIL_GLOBAL_WORDS: usize = 256;
@@ -6227,10 +6309,11 @@ mod tests {
             .create_retail_demo_caption(camera.location().path.zone, &mut host)
             .unwrap();
         runtime
-            .install_retail_demo_start(
+            .install_retail_demo_start_with_draw_stamp(
                 prepared.snapshot.clone(),
                 prepared.player.seed(),
                 prepared.crash_bound,
+                prepared.player.draw_stamp(),
             )
             .unwrap();
 
@@ -6264,6 +6347,10 @@ mod tests {
         let mut finish_outcome = None;
         let mut finish_island_rotation = None;
         let mut pad_boundaries = 0_usize;
+        let mut premature_game_over = None;
+        let mut last_life_count = runtime.global_word(LIFE_COUNT_GLOBAL).unwrap();
+        let mut life_count_timeline = Vec::new();
+        let mut restart_timeline = Vec::new();
         let maximum_wall_frames = trace_frames.saturating_mul(8).max(trace_frames + 512);
         for pbak_frame in 0..maximum_wall_frames {
             let restored_neighbors = lifecycle
@@ -6276,6 +6363,12 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             runtime.spawn_current_zone_neighbors(&restored_neighbors, &mut host);
+
+            let recorded_ticks = playback.pre_shader_ticks_elapsed();
+            let recorded_frame_index = recorded_ticks.map(|ticks| ticks / 34);
+            if let Some(recorded_ticks) = recorded_ticks {
+                runtime.publish_retail_demo_draw_stamp(recorded_ticks);
+            }
 
             let draw_count = runtime.draw_count();
             let display_mask = runtime.current_display_mask();
@@ -6334,6 +6427,46 @@ mod tests {
                         .map_err(crust_sim::retail_runtime::RuntimeError::Vm)
                 })
                 .unwrap_or_else(|error| panic!("{} frame {pbak_frame}: {error:?}", prepared.eid));
+            let life_count = runtime.global_word(LIFE_COUNT_GLOBAL).unwrap();
+            if life_count != last_life_count {
+                let main = runtime
+                    .arena()
+                    .main_object()
+                    .and_then(|arena| runtime.object_for_arena(arena))
+                    .and_then(|object| runtime.machine().object(object.vm()).ok())
+                    .map(|object| {
+                        (
+                            object.state(),
+                            object
+                                .register(process_register::TRANSLATION_X)
+                                .unwrap()
+                                .cast_signed(),
+                            object
+                                .register(process_register::TRANSLATION_Y)
+                                .unwrap()
+                                .cast_signed(),
+                            object
+                                .register(process_register::TRANSLATION_Z)
+                                .unwrap()
+                                .cast_signed(),
+                        )
+                    });
+                life_count_timeline.push((pbak_frame, pad_boundaries, life_count, main));
+                last_life_count = life_count;
+            }
+            if premature_game_over.is_none()
+                && pad_boundaries < trace_frames
+                && runtime.global_word(GAME_STATE_GLOBAL) == Ok(0x200)
+            {
+                premature_game_over = Some((
+                    pbak_frame,
+                    pad_boundaries,
+                    runtime.global_word(LIFE_COUNT_GLOBAL).unwrap(),
+                    runtime
+                        .saved_level_state()
+                        .map(|snapshot| snapshot.location),
+                ));
+            }
             assert!(
                 runtime_frame
                     .executions
@@ -6349,6 +6482,13 @@ mod tests {
             );
 
             if runtime.machine().level_restart_requested() {
+                restart_timeline.push((
+                    pbak_frame,
+                    pad_boundaries,
+                    runtime.global_word(5).unwrap(),
+                    runtime.global_word(108).unwrap(),
+                    camera.location(),
+                ));
                 let saved_location = runtime
                     .saved_level_state()
                     .expect("PBAK death restart retains its installed snapshot")
@@ -6408,19 +6548,21 @@ mod tests {
                     )
                 });
 
-            if level == LevelId::new_const(0x0c) && (189..=210).contains(&pbak_frame) {
-                const FRUIT_SCALE_SEQUENCE: [[i32; 3]; 11] = [
-                    [2_764, 3_456, 4_915],
-                    [-253, 658, 936],
-                    [-253, 658, 936],
-                    [-278, 722, 936],
-                    [-306, 792, 936],
-                    [-336, 869, 936],
-                    [-369, 953, 936],
-                    [-406, 1_046, 936],
-                    [-446, 1_148, 936],
-                    [-490, 1_260, 936],
-                    [-538, 1_383, 936],
+            if level == LevelId::new_const(0x0c) && matches!(pbak_frame, 189..=197 | 200..=208) {
+                // PBAK publishes each absolute draw stamp divided by 34, so
+                // the two visible FruiC lifetimes below are already in state
+                // 12. Keep their exact animation phase and physical-slot reuse
+                // pinned to that source clock rather than the local loop index.
+                const FRUIT_SCALE_SEQUENCE: [[i32; 3]; 9] = [
+                    [526, 658, 936],
+                    [472, 591, 936],
+                    [424, 530, 936],
+                    [380, 476, 936],
+                    [417, 522, 936],
+                    [374, 468, 936],
+                    [410, 513, 936],
+                    [368, 460, 936],
+                    [403, 504, 936],
                 ];
                 let fruit = objects
                     .iter()
@@ -6439,7 +6581,7 @@ mod tests {
                     prepared.eid,
                 );
                 let fruit = fruit[0];
-                let (generation_index, sequence_index) = if pbak_frame < 200 {
+                let (generation_index, sequence_index) = if pbak_frame <= 197 {
                     (0, pbak_frame - 189)
                 } else {
                     (1, pbak_frame - 200)
@@ -6476,13 +6618,15 @@ mod tests {
                     prepared.eid,
                 );
                 let vm = runtime.machine().object(fruit.object.vm()).unwrap();
-                assert_eq!(vm.state(), if sequence_index == 0 { 8 } else { 12 });
+                assert_eq!(vm.state(), 12);
                 assert_eq!(
                     vm.register(process_register::ANIMATION_STAMP).unwrap(),
-                    u32::try_from(pbak_frame).unwrap() + 1,
+                    recorded_frame_index.expect("active PBAK publishes an absolute draw stamp"),
+                    "{} frame {pbak_frame} must animate on the published absolute draw clock",
+                    prepared.eid,
                 );
             }
-            if level == LevelId::new_const(0x0c) && (211..=217).contains(&pbak_frame) {
+            if level == LevelId::new_const(0x0c) && matches!(pbak_frame, 198..=199 | 209..=217) {
                 assert!(
                     objects.iter().all(|object| {
                         object.executable != 3
@@ -6503,6 +6647,22 @@ mod tests {
             pad_boundaries, trace_frames,
             "the requested recorded pad boundaries must run within the bounded wall window"
         );
+        assert!(
+            premature_game_over.is_none(),
+            "{} entered game over before its complete authored PBAK boundary: {premature_game_over:?}; death resets {}, life timeline {life_count_timeline:?}; restarts {restart_timeline:?}",
+            prepared.eid,
+            prepared.snapshot.death_resets_counter,
+        );
+        if level == LevelId::new_const(0x1d) {
+            assert!(
+                restart_timeline.is_empty(),
+                "pb0tB restarts {restart_timeline:?}"
+            );
+            assert!(
+                life_count_timeline.is_empty(),
+                "pb0tB life changes {life_count_timeline:?}"
+            );
+        }
         if level == LevelId::new_const(0x0c) && trace_frames >= 211 {
             assert!(
                 observed_fruit_generations

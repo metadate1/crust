@@ -13,7 +13,7 @@ use crust_sim::card::SaveData;
 #[cfg(any(target_arch = "wasm32", test))]
 use crust_sim::gool::{
     INITIAL_LIFE_COUNT_GLOBAL, ITEM_POOL_2_GLOBAL, LEVELS_UNLOCKED_GLOBAL, LIFE_COUNT_GLOBAL,
-    TITLE_STATE_GLOBAL, VmError,
+    ObjectHandle, SendEventTarget, TITLE_STATE_GLOBAL, VmError,
 };
 #[cfg(any(target_arch = "wasm32", test))]
 use crust_sim::retail_runtime::{RenderObjectsError, RetailRenderObject, RetailRuntime};
@@ -157,6 +157,136 @@ impl RetailTickState {
         }
     }
 }
+
+/// Reports whether one scheduler callback completed a source `CoreFrame` and
+/// may therefore consume one browser-replay input sample.
+///
+/// Destination validation and pager work are asynchronous in the browser.
+/// Those callbacks can advance host-side loading while the mounted retail
+/// runtime still has no live main object; native blocks inside that same
+/// source frame and does not consume another pad sample. Likewise, the
+/// callback that consumes a transition requested by the preceding GOOL frame
+/// only mounts the destination. A live retail main-frame tail, or an ordinary
+/// non-retail flow frame, is the first completed source frame that may advance
+/// replay input.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) const fn retail_source_frame_completed(
+    retail_state: bool,
+    transition_queued: bool,
+    retail_pad_boundary_completed: bool,
+) -> bool {
+    if transition_queued {
+        false
+    } else if retail_state {
+        retail_pad_boundary_completed
+    } else {
+        true
+    }
+}
+
+/// Resolves the transition consumed at native's pre-spawn/pre-camera
+/// `CoreFrame` gate.
+///
+/// A fatal same-level restart returns with no explicit `next_lid`, but its
+/// restored game state requests Title. Keeping that fallback in the same
+/// decision as explicit requests prevents the following camera update from
+/// overwriting the carried Game Over/continue state first.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn retail_core_frame_transition_request(
+    tick_state: RetailTickState,
+    next_lid: i32,
+    current_level: FormatLevelId,
+    game_state: i32,
+) -> Option<i32> {
+    let next_lid = if next_lid == -1
+        && current_level != FormatLevelId::TITLE
+        && matches!(game_state, 0x200 | 0x300 | 0x400)
+    {
+        i32::try_from(FormatLevelId::TITLE.get()).expect("retail title level fits signed 32-bit")
+    } else {
+        next_lid
+    };
+    tick_state.explicit_core_frame_transition(next_lid)
+}
+
+/// Browser-visible half of the Stormy Ascent cut-content recovery gate.
+///
+/// The runtime performs the stronger direct-boot, object-program, state,
+/// checkpoint, counter, and saved-level validation. This host-side check
+/// preserves the one piece of provenance available only in the ordered frame
+/// effects: `DispC` sent its exact completion event directly to the player in
+/// the same frame that requested the invalid LID-zero fallthrough.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn stormy_cut_content_completion_recipient(
+    current_level: FormatLevelId,
+    requested_level: i32,
+    target: SendEventTarget,
+    event: u32,
+    arguments: &[u32],
+) -> Option<ObjectHandle> {
+    if current_level.get() != 0x22
+        || requested_level != 0
+        || event != 0x0f00
+        || arguments != [0x500]
+    {
+        return None;
+    }
+    let SendEventTarget::Direct { recipient } = target else {
+        return None;
+    };
+    Some(recipient)
+}
+
+/// Ordered browser-side provenance for Stormy Ascent's missing-destination
+/// recovery.
+///
+/// GOOL services a direct event synchronously before the sending object can
+/// execute its following `LLEV`. Recipient-side work may therefore emit other
+/// effects between the two instructions. Retain the most recent matching send
+/// that the host has actually processed, then consume it at the next
+/// transition. This deliberately cannot see a matching send that appears
+/// later in the same frame.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StormyCutContentEffectGate {
+    pending: Option<(ObjectHandle, ObjectHandle)>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl StormyCutContentEffectGate {
+    pub(crate) fn observe_send(
+        &mut self,
+        current_level: FormatLevelId,
+        sender: ObjectHandle,
+        target: SendEventTarget,
+        event: u32,
+        arguments: &[u32],
+    ) {
+        if let Some(recipient) =
+            stormy_cut_content_completion_recipient(current_level, 0, target, event, arguments)
+        {
+            self.pending = Some((sender, recipient));
+        }
+    }
+
+    pub(crate) fn take_for_transition(
+        &mut self,
+        current_level: FormatLevelId,
+        requested_level: i32,
+    ) -> Option<(ObjectHandle, ObjectHandle)> {
+        let pending = self.pending.take();
+        if current_level.get() == 0x22 && requested_level == 0 {
+            pending
+        } else {
+            None
+        }
+    }
+}
+
+/// Clear diagnostic shown when the exact host-only Stormy boundary is
+/// recovered without inventing a missing Cortex bonus stream.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) const STORMY_CUT_CONTENT_RECOVERY_DIAGNOSTIC: &str = "Stormy Ascent's retail three-Cortex-token path requests nonexistent LID 0; returned to the Main Menu without inventing a bonus layout.";
 
 /// `PbakChoose` runs before the destination's initial `LevelUpdate`. When a
 /// title-attract destination has no usable recording it changes native's game
@@ -354,6 +484,23 @@ pub(crate) fn authoritative_save_or_last<E>(
     current.unwrap_or(last)
 }
 
+/// Builds the browser launcher's direct-boot label without changing the
+/// canonical retail catalog name used by runtime diagnostics and game state.
+///
+/// LID `0x26` is a valid mounted pair, but the owned retail data has no parent
+/// selector or natural completion path. Keep it available for inspection while
+/// making that limitation explicit before a user launches it.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn boot_level_option_label(level: FormatLevelId, name: &str) -> String {
+    if level == FormatLevelId::TITLE {
+        "Full game — from the beginning".to_owned()
+    } else if level == FormatLevelId::new_const(0x26) {
+        format!("{name} — {level} · dormant/unused retail bonus data; no natural completion")
+    } else {
+        format!("{name} — {level}")
+    }
+}
+
 /// Native `GOD_MODE` access gate, deliberately separate from saved progress.
 #[cfg(any(target_arch = "wasm32", test))]
 const ALL_LEVELS_UNLOCK_GATE: u32 = 99;
@@ -499,11 +646,45 @@ mod tests {
     }
 
     #[test]
+    fn browser_replay_advances_only_after_a_completed_source_core_frame() {
+        assert!(!retail_source_frame_completed(true, false, false));
+        assert!(retail_source_frame_completed(true, false, true));
+        assert!(retail_source_frame_completed(false, false, false));
+
+        assert!(
+            !retail_source_frame_completed(true, true, true),
+            "the callback that consumes a prior GOOL transition only mounts the destination"
+        );
+        assert!(
+            !retail_source_frame_completed(false, true, false),
+            "a queued transition never consumes destination input"
+        );
+    }
+
+    #[test]
     fn replay_debug_prefers_the_raw_process_title_state_over_the_flow_mirror() {
         let runtime = RetailRuntime::new_for_level(256, FormatLevelId::new_const(0x22));
 
         assert_eq!(retail_debug_title_state(&runtime, 10), 7);
         assert_eq!(retail_debug_title_state(&RetailRuntime::new(0), 10), 10);
+    }
+
+    #[test]
+    fn direct_boot_labels_only_annotate_the_dormant_retail_bonus() {
+        for level in crust_formats::stream::KNOWN_LEVELS {
+            let label = boot_level_option_label(level.id, level.name);
+            if level.id == FormatLevelId::TITLE {
+                assert_eq!(label, "Full game — from the beginning");
+            } else if level.id == FormatLevelId::new_const(0x26) {
+                assert_eq!(level.name, "Bonus", "the canonical catalog stays unchanged");
+                assert_eq!(
+                    label,
+                    "Bonus — 0x26 · dormant/unused retail bonus data; no natural completion"
+                );
+            } else {
+                assert_eq!(label, format!("{} — {}", level.name, level.id));
+            }
+        }
     }
 
     #[test]
@@ -572,6 +753,170 @@ mod tests {
                 "the same request becomes consumable at the following CoreFrame gate"
             );
         }
+    }
+
+    #[test]
+    fn restarted_last_life_requests_title_before_the_camera_tail() {
+        let gameplay = FormatLevelId::new_const(0x0c);
+        let mut camera_tail_ran = false;
+        let requested = retail_core_frame_transition_request(
+            RetailTickState::RestartedNeedsSpawn,
+            -1,
+            gameplay,
+            0x200,
+        );
+        if requested.is_none() {
+            camera_tail_ran = true;
+        }
+        assert_eq!(
+            requested,
+            Some(i32::try_from(FormatLevelId::TITLE.get()).unwrap())
+        );
+        assert!(
+            !camera_tail_ran,
+            "the fatal restart must queue Title before spawn/camera can rewrite GAME_STATE_GAMEOVER"
+        );
+
+        assert_eq!(
+            retail_core_frame_transition_request(RetailTickState::NeedsSpawn, -1, gameplay, 0x200,),
+            None,
+            "a bonus-return mount still owes its suspended frame tail"
+        );
+        assert_eq!(
+            retail_core_frame_transition_request(
+                RetailTickState::RestartedNeedsSpawn,
+                -1,
+                FormatLevelId::TITLE,
+                0x200,
+            ),
+            None,
+            "the implicit fallback is only a non-title transition"
+        );
+    }
+
+    #[test]
+    fn browser_stormy_recovery_requires_the_exact_completion_effect() {
+        let stormy = FormatLevelId::new_const(0x22);
+        let recipient = ObjectHandle::new(7).unwrap();
+        let direct = SendEventTarget::Direct { recipient };
+
+        assert_eq!(
+            stormy_cut_content_completion_recipient(stormy, 0, direct, 0x0f00, &[0x500]),
+            Some(recipient)
+        );
+        for (label, level, requested, target, event, arguments) in [
+            (
+                "other level",
+                FormatLevelId::N_SANITY_BEACH,
+                0,
+                direct,
+                0x0f00,
+                &[0x500][..],
+            ),
+            ("nonzero transition", stormy, 1, direct, 0x0f00, &[0x500]),
+            ("wrong event", stormy, 0, direct, 0x0e00, &[0x500]),
+            ("wrong argument", stormy, 0, direct, 0x0f00, &[0x400]),
+            ("extra argument", stormy, 0, direct, 0x0f00, &[0x500, 0]),
+            (
+                "broadcast target",
+                stormy,
+                0,
+                SendEventTarget::AllRoots { mode: 0 },
+                0x0f00,
+                &[0x500],
+            ),
+        ] {
+            assert_eq!(
+                stormy_cut_content_completion_recipient(level, requested, target, event, arguments,),
+                None,
+                "{label} must not classify the cut-content boundary"
+            );
+        }
+        assert!(STORMY_CUT_CONTENT_RECOVERY_DIAGNOSTIC.contains("nonexistent LID 0"));
+        assert!(STORMY_CUT_CONTENT_RECOVERY_DIAGNOSTIC.contains("Main Menu"));
+    }
+
+    #[test]
+    fn browser_stormy_recovery_uses_only_processed_effect_order() {
+        let stormy = FormatLevelId::new_const(0x22);
+        let sender = ObjectHandle::new(6).unwrap();
+        let recipient = ObjectHandle::new(7).unwrap();
+        let direct = SendEventTarget::Direct { recipient };
+        let mut gate = StormyCutContentEffectGate::default();
+
+        assert_eq!(
+            gate.take_for_transition(stormy, 0),
+            None,
+            "a future same-frame send cannot classify an earlier transition"
+        );
+        gate.observe_send(stormy, sender, direct, 0x0f00, &[0x500]);
+        assert_eq!(
+            gate.take_for_transition(stormy, 0),
+            Some((sender, recipient))
+        );
+        assert_eq!(
+            gate.take_for_transition(stormy, 0),
+            None,
+            "one completion send can classify only its following transition"
+        );
+    }
+
+    #[test]
+    fn browser_stormy_recovery_prefers_the_latest_matching_send() {
+        let stormy = FormatLevelId::new_const(0x22);
+        let first_sender = ObjectHandle::new(4).unwrap();
+        let first_recipient = ObjectHandle::new(5).unwrap();
+        let authentic_sender = ObjectHandle::new(6).unwrap();
+        let authentic_recipient = ObjectHandle::new(7).unwrap();
+        let mut gate = StormyCutContentEffectGate::default();
+
+        gate.observe_send(
+            stormy,
+            first_sender,
+            SendEventTarget::Direct {
+                recipient: first_recipient,
+            },
+            0x0f00,
+            &[0x500],
+        );
+        // A recipient-side unrelated send may occur while the first event is
+        // serviced; it must neither erase nor manufacture provenance.
+        gate.observe_send(
+            stormy,
+            first_sender,
+            SendEventTarget::AllRoots { mode: 0 },
+            0x0f00,
+            &[0x500],
+        );
+        gate.observe_send(
+            stormy,
+            authentic_sender,
+            SendEventTarget::Direct {
+                recipient: authentic_recipient,
+            },
+            0x0f00,
+            &[0x500],
+        );
+        assert_eq!(
+            gate.take_for_transition(stormy, 0),
+            Some((authentic_sender, authentic_recipient))
+        );
+
+        gate.observe_send(
+            stormy,
+            authentic_sender,
+            SendEventTarget::Direct {
+                recipient: authentic_recipient,
+            },
+            0x0f00,
+            &[0x500],
+        );
+        assert_eq!(gate.take_for_transition(stormy, 1), None);
+        assert_eq!(
+            gate.take_for_transition(stormy, 0),
+            None,
+            "a nonzero transition consumes stale completion provenance"
+        );
     }
 
     #[test]

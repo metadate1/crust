@@ -49,6 +49,49 @@ fn parses_every_retail_pbak_entry_directly_from_local_disc() {
         {
             let pbak = load_pbak_entry(entry, &nsf_bytes)
                 .unwrap_or_else(|error| panic!("{} {} PBAK: {error}", known.name, entry.eid));
+            if entry.eid.name().as_deref() == Some("pb0eB") {
+                // These words retain their provenance as a recording from the
+                // user's local disc. Physical replay classification only says
+                // that a live pad can reproduce them exactly: every Boulders
+                // word is 16-bit and contains no opposing direction pair.
+                assert_eq!(pbak.frames.len(), 990);
+                for (frame_index, frame) in pbak.frames.iter().enumerate() {
+                    assert!(
+                        u16::try_from(frame.held).is_ok(),
+                        "Boulders PBAK frame {} exceeds a physical 16-bit pad word: {:#010x}",
+                        frame_index + 1,
+                        frame.held
+                    );
+                    assert_ne!(
+                        frame.held & 0x5000,
+                        0x5000,
+                        "Boulders PBAK frame {} holds Up+Down: {:#06x}",
+                        frame_index + 1,
+                        frame.held
+                    );
+                    assert_ne!(
+                        frame.held & 0xa000,
+                        0xa000,
+                        "Boulders PBAK frame {} holds Left+Right: {:#06x}",
+                        frame_index + 1,
+                        frame.held
+                    );
+                }
+            }
+            if entry.eid.name().as_deref() == Some("pb0fB") {
+                // Upstream's late frames are byte-swapped-looking on the
+                // owned NTSC-U disc, but native reads the same little-endian
+                // words. Preserve both the first discontinuity and a later
+                // u32 wrap; neither is a license to normalize the recording.
+                assert_eq!(pbak.frames[830].ticks_elapsed.cast_unsigned(), 0x0001_f984);
+                assert_eq!(pbak.frames[830].held, 0x0000_1000);
+                assert_eq!(pbak.frames[831].ticks_elapsed.cast_unsigned(), 0xa7f9_0100);
+                assert_eq!(pbak.frames[831].held, 0x0010_0000);
+                assert_eq!(pbak.frames[833].ticks_elapsed.cast_unsigned(), 0xecf9_0100);
+                assert_eq!(pbak.frames[834].ticks_elapsed.cast_unsigned(), 0x0ffa_0100);
+                assert_eq!(pbak.frames[929].ticks_elapsed.cast_unsigned(), 0xde06_0200);
+                assert_eq!(pbak.frames[930].ticks_elapsed.cast_unsigned(), 0x0107_0200);
+            }
             total_frames += pbak.frame_count();
             census.push((
                 known.id.get(),

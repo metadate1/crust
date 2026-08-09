@@ -58,8 +58,9 @@ LoadState effects are all source-authored: one Jungle Rollers terminal fall cont
 same-level load/restart, while The Great Gate's Tawna-bonus return contributes the different-stream
 load/restart and protected parent restart. Stormy Ascent separately completes from direct boot in
 Chrome: all 9,334 captured frames match through its Level Complete mount with no recovery or failed
-checkpoint. Retail's natural key routes unlock Whole Hog and Fumbling in the Dark, not Stormy;
-earning those keys and traversing both map branches remain explicit parity gates.
+checkpoint. Retail's natural key routes unlock Whole Hog and Fumbling in the Dark, not Stormy.
+Each key and its authored map branch now passes independently from fresh browser storage; joining
+both branches into one uninterrupted empty-card campaign remains an explicit parity gate.
 
 The browser now owns a checked retail object runtime for title, gameplay, bonus, boss, level-
 complete, intro and ending states.
@@ -321,18 +322,16 @@ count `0x0900`, and advances the live count to `0x0b00`. The route records 117 s
 from 29,372 attempts with 29,255 source-expected rejections, 55,526 clean executions, 32 lifecycle
 zone transitions, 45 camera ranges and 46 path changes. It has no restart, state-31 squash, death
 camera, terminal fall, VM fault, execution error, or LoadState; RNG is `0xb40bac74` at draw 6,863.
-These are deterministic native integration goldens over user-supplied local data, not a browser
-playthrough or full-game parity claim; a browser exercise of this complete carried chain remains
-open.
+These are deterministic native integration goldens over user-supplied local data, not browser
+measurements or a full-game parity claim. The completed owned-BIN browser campaign independently
+carries this same segment as part of its Title-to-Title ordinary route.
 
 The exact current and session-carried Rolling Stones normal routes reach the authored end and are
-the active coverage for that level. Three older FreshBoot-family characterizations are pending
-revalidation after scheduler/controller changes: the standalone direct-completion fixture, its
-short Brio-token snapshot, and the longer Rolling Stones → Brio Bonus round trip. The current
-owned-data sweep does not count those legacy fixtures as passing, and there is not yet a
-current-campaign replacement for the Brio round trip. Their earlier direct-boot frame and phase
-measurements remain historical evidence only; this distinction does not weaken the passing
-canonical carried route.
+the active coverage for that level. All three FreshBoot-family characterizations also pass against
+the current scheduler/controller phase: the standalone direct-completion fixture, its short
+Brio-token snapshot, and the longer Rolling Stones → Brio Bonus round trip. These focused proofs
+do not replace the canonical carried route or claim that every parent-specific bonus layout has
+been joined into one uninterrupted browser campaign.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 174-frame death camera, and the same-level checkpoint
@@ -489,13 +488,21 @@ scale. Authored
 writes now run the eight-root postorder `LEVEL_END` phase, carry process-lifetime state into a
 fresh destination runtime, and restore bonus returns from the saved zone/path/progress.
 Normal bonus entry retains that parent snapshot. Fresh direct bonus boot alone seeds a one-shot
-same-level restart snapshot because all five bonus spawn zones are save-restricted; directly booted
-bonus completion still lacks a distinct host return destination and is not claimed as a complete
-round trip. A legally local controlled regression drives all three authentic Jungle Rollers Tawna
+same-level restart snapshot because all five bonus spawn zones are save-restricted. When WillC's
+authored state-32 WARP loads that exact synthetic same-level snapshot, the host consumes it and
+returns to Title's Main Menu instead of remounting the completed bonus; real parent-carried returns
+remain unchanged. An owned-BIN Chrome audit joins at the separately proven parsed state-32 boundary
+and exercises the production state binder, CardC ceremony, `LoadState`, classifier, `LEVEL_END`,
+and asynchronous Title mount. It is downstream browser-path evidence, not a claim that automation
+physically traversed the portal. A legally local controlled regression drives all three authentic
+Jungle Rollers Tawna
 crate descriptors from their authored player `HIT 0x0300` boundary through `BoxsC` → `FruiC` →
 `DispC`. Only token three performs `SaveState`, before its counter increment; the HUD then sends
 completion `0x2700`, resets the master fade, sends status `0x0f00 [0x500]`, emits destination
 `0x24`, and `finish_level_transition` carries the saved `0x0c` snapshot into Tawna Bonus. A
+retail-executable oracle also fixes a historical C transcription error at this boundary: a
+screen-space `DispC` caller keeps Crash's live translation instead of replacing it with HUD
+coordinates, while a world-space caller may override it and a checkpoint remains final. A
 separate parsed WarpC/WillC regression covers the transition's exact proximity/status gate and its
 direct `0x1600 [0]` handoff into WillC state 32. The downstream cross-stream characterization runs the
 real WarpC/CardC confirmation path, observes `LoadState` on frame 301, resolves `-2` back to Jungle
@@ -503,9 +510,8 @@ Rollers, and reproduces the protected parent remount while checking Crash's tran
 path/progress, box count, and all 304 spawn words. These deterministic boundaries do not
 substitute for a browser full-playthrough. Current legally local ordinary-pad routes physically
 join the parent, token, bonus, portal, `LoadState`, and return boundaries for representative Tawna,
-second-Tawna, and Cortex layouts. The former Rolling Stones/Brio FreshBoot round trip is pending
-revalidation and is not counted as current coverage; other parent-specific layouts also remain to
-be certified.
+second-Tawna, and Cortex layouts. The Rolling Stones/Brio FreshBoot round trip now passes against
+the current scheduler/controller phase; other parent-specific layouts remain to be certified.
 Follow and automatic camera movement now calls `LevelUpdate` after every successful same-path or
 crossing movement, in source order after the applicable shared game-state write. Every
 `LevelUpdate` also republishes the destination zone's graphics flags in GOOL
@@ -629,7 +635,7 @@ JavaScript and Wasm requests, so an already-cached prototype bundle cannot silen
 builds are staged under ignored `target/` storage and replace `dist/` only after compilation,
 binding generation, and source-stability checks succeed.
 
-The collapsed **Optional display upgrades** panel keeps retail presentation as the default and
+The collapsed **Advanced & display** panel keeps retail presentation as the default and
 offers presentation interpolation at the browser's actual refresh cadence, 4:3, 16:9, and 21:9
 presets, a Screen / Auto mode which follows arbitrary browser shapes such as 32:9 or 3:2,
 15/30/45% camera zoom-out presets, native, fixed 720p–2160p, or custom internal drawing buffers,
@@ -726,10 +732,11 @@ handles; they are never reinterpreted as host pointers. See [Architecture](docs/
 
 ## Data and legal boundary
 
-The repository intentionally contains no game asset, disc sector, executable, art, audio, texture,
-or stream. `*.bin`, `*.iso`, `*.nsd`, `*.nsf`, local data directories, build output, fuzz corpora,
-storage exports, caches, and captures are ignored. The two supported persistent records contain
-only the retail 128-byte progression/options payload:
+The repository intentionally contains no proprietary or game-derived asset, disc sector,
+executable, art, audio, texture, or stream. Its original generated interface artwork is documented
+in [`artwork/PROVENANCE.md`](artwork/PROVENANCE.md). `*.bin`, `*.iso`, `*.nsd`, `*.nsf`, local data
+directories, build output, fuzz corpora, storage exports, caches, and captures are ignored. The two
+supported persistent records contain only the retail 128-byte progression/options payload:
 
 - `c1.virtual-memory-card.v1` — 15 slots containing checksummed retail-format payloads.
 - `c1.browser-resume.v1` — one checksummed automatic resume record.

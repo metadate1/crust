@@ -9,7 +9,7 @@ use crust_audio::retail_player::{
 };
 use crust_formats::binary::Eid;
 use wasm_bindgen::JsValue;
-use web_sys::{AudioContext, GainNode};
+use web_sys::{AudioContext, AudioContextState, GainNode};
 
 #[cfg(feature = "browser-test-harness")]
 use crate::audio_output_metrics::FixedMillisecondSampleClock;
@@ -61,6 +61,25 @@ impl WebAudio {
 
     pub fn resume(&self) {
         let _ = self.context.resume();
+    }
+
+    /// Describes whether synthesized output is actually audible according to
+    /// the browser's audio context, rather than merely reporting that the
+    /// software mixer was constructed successfully.
+    #[must_use]
+    pub fn status_label(&self) -> &'static str {
+        audio_context_status_label(self.context.state())
+    }
+
+    /// Stable, read-only browser state for acceptance diagnostics.
+    #[must_use]
+    pub fn context_state_label(&self) -> &'static str {
+        match self.context.state() {
+            AudioContextState::Running => "running",
+            AudioContextState::Suspended => "suspended",
+            AudioContextState::Closed => "closed",
+            _ => "unknown",
+        }
     }
 
     pub fn set_muted(&mut self, muted: bool) {
@@ -209,4 +228,12 @@ impl WebAudio {
 #[cfg(not(feature = "browser-test-harness"))]
 fn sample_rate_f32() -> f32 {
     f32::from(u16::try_from(SAMPLE_RATE).expect("44.1 kHz sample rate fits u16 exactly"))
+}
+
+const fn audio_context_status_label(state: AudioContextState) -> &'static str {
+    match state {
+        AudioContextState::Running => "SYNTH ACTIVE",
+        AudioContextState::Suspended => "AUDIO LOCKED",
+        _ => "UNAVAILABLE",
+    }
 }

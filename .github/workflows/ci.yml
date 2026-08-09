@@ -22,7 +22,10 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          prohibited='(^|/)(local-data|streams|target|dist|pkg|node_modules|artifacts|captures|screenshots|recordings|coverage|browser-profile|playwright-report|test-results)(/|$)|(^|/)(\.cache|\.pytest_cache|\.mypy_cache|\.ruff_cache|__pycache__)(/|$)|(^|/)fuzz/(artifacts|corpus)(/|$)|(^|/)proptest-regressions(/|$)|(^|/)(memory-card\.json|resume\.json)$|(^|/)\.env($|\.)|(^|/)\.DS_Store$|(^|/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$|\.dSYM(/|$)|\.(bin|raw|iso|cue|ccd|sub|ecm|chd|cso|img|mdf|mds|nrg|pbp|nsd|nsf|zip|7z|rar|tar|tar\.gz|tgz|log|tmp|wasm|wat|rmeta|memory-card\.json|resume\.json|sav|mcr|srm|state|save|har|webm|mp4|mov|key|pem|p12|pfx|jks|keystore)$'
+          # Disc/stream filenames are commonly uppercase. Keep the CI boundary
+          # case-insensitive just like the local bracketed ignore patterns.
+          shopt -s nocasematch
+          prohibited='(^|/)(local-data|streams|target|dist|pkg|node_modules|artifacts|captures|screenshots|recordings|coverage|browser-profile|playwright-report|test-results)(/|$)|(^|/)(\.cache|\.pytest_cache|\.mypy_cache|\.ruff_cache|__pycache__)(/|$)|(^|/)fuzz/(artifacts|corpus)(/|$)|(^|/)proptest-regressions(/|$)|(^|/)(memory-card\.json|resume\.json)$|(^|/)\.env($|\.)|(^|/)\.DS_Store$|(^|/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$|\.dSYM(/|$)|\.(bin|raw|iso|cue|ccd|sub|ecm|chd|cso|img|mdf|mds|nrg|pbp|nsd|nsf|pbak|zip|7z|rar|tar|tar\.gz|tgz|log|tmp|wasm|wat|rmeta|memory-card\.json|resume\.json|sav|mcr|srm|state|save|har|webm|mp4|mov|key|pem|p12|pfx|jks|keystore)$'
           zero_sha='0000000000000000000000000000000000000000'
           scratch="$(mktemp -d)"
           trap 'rm -rf "$scratch"' EXIT
@@ -65,7 +68,9 @@ jobs:
 
           violation=0
           while IFS= read -r -d '' path; do
-            if [[ "$path" == ".env.example" || "$path" == */.env.example ]]; then
+            # `nocasematch` must not widen this sole source-controlled env
+            # exemption to mixed-case secret-bearing filenames.
+            if [ "${path##*/}" = ".env.example" ]; then
               continue
             fi
             if [[ "$path" =~ $prohibited ]]; then

@@ -19,7 +19,7 @@ use crust_formats::{
 
 use crate::{
     camera::{GOOL_FLAG_SPIN_ACCEL, RetailCameraLocation},
-    card::{CardPublishedState, SaveData},
+    card::{CardOperation, CardOutcome, CardPublishedState, SaveData, VirtualCard},
     flow::{TITLE_FADE_START, TITLE_FADE_STEP, TitlePhase, TitleScreen},
     gool::{
         AnimationLocalBoundRefresh, AnimationReference, AnimationSource, AudioHostRequest,
@@ -63,10 +63,11 @@ const MAX_SYNCHRONOUS_STATE_CHANGES: usize = 64;
 /// Retail data is acyclic here; malformed programs still need a deterministic
 /// failure instead of exhausting the Rust or browser stack.
 const MAX_SYNCHRONOUS_LEVEL_RESTARTS: usize = 8;
-/// Native GOOL completes the instruction tail after a synchronous child
-/// spawn without yielding. Keep that atomic tail bounded if malformed code
-/// never reaches an authored halt.
-const SPAWN_CONTINUATION_LIMIT: usize = 4_096;
+/// Native `GoolObjectInterpret` does not yield after an arbitrary instruction
+/// count. The platform budget divides a long call into watchdog chunks, while
+/// this independent hard limit keeps malformed code from monopolizing the
+/// browser if it never reaches an authored return, animation, or host halt.
+const OBJECT_UPDATE_INSTRUCTION_LIMIT: usize = 4_096;
 const COLLIDABLE_STATUS_B: u32 = 0x10;
 const FIRST_FRAME_STATUS_A: u32 = 0x20;
 const LOCAL_BOUND_INVALID_STATUS_A: u32 = 0x8000;
@@ -100,7 +101,11 @@ const RESPAWN_EVENT: u32 = 0x1300;
 /// Native `GOOL_EVENT_LEVEL_END`, broadcast before every stream remount.
 pub const LEVEL_END_EVENT: u32 = 0x2900;
 const SAVE_RESTRICTED_ZONE_FLAG: u32 = 0x2000;
-const SAVE_TRANSLATION_FROM_CALLER_STATUS_B: u32 = 0x200;
+/// Retail `LevelSaveState` uses the caller's translation only when this
+/// non-spatial/screen-space bit is clear. The upstream C transcription had
+/// the branch inverted; the NTSC-U executable branches over the caller copy
+/// when `status_b & 0x200 != 0`.
+const SAVE_SUPPRESS_CALLER_TRANSLATION_STATUS_B: u32 = 0x200;
 const SPAWN_ACTIVE_BIT: u32 = 1;
 const SPAWN_CHECKPOINT_BLOCKED_BIT: u32 = 2;
 const SPAWN_CHECKPOINT_SEEN_BIT: u32 = 8;
@@ -114,25 +119,26 @@ const ZONE_TERMINATION_STATE_IMMUNE: u32 = 0x0004_0000;
 /// `GoolObjectInit` stores that non-null address in process link five, even
 /// while no logical main/Crash object occupies it.
 const DEDICATED_PLAYER_POOL_SLOT: u8 = OBJECT_POOL_CAPACITY as u8;
+const PICKUP_HUD_OBJECT_GLOBAL: usize = 14;
 
 // `gool_globals` words whose C values are native pointers. A stream remount
 // destroys every pointee. Retaining compact Rust handles here could alias a
 // newly allocated object, so these words are deliberately cleared rather than
 // reproducing that undefined dangling-pointer behavior.
 const POINTER_GLOBALS: [usize; 13] = [
-    6,   // fruit_hud
-    7,   // life_hud
-    8,   // ambiance_obj
-    12,  // pause_obj
-    14,  // pickup_hud
-    16,  // doctor
-    36,  // cam_spin_obj
-    54,  // light_src_obj
-    76,  // caption_obj
-    80,  // card_str
-    81,  // card_icon
-    116, // prev_box
-    118, // prev_box_entity
+    6,                        // fruit_hud
+    7,                        // life_hud
+    8,                        // ambiance_obj
+    12,                       // pause_obj
+    PICKUP_HUD_OBJECT_GLOBAL, // pickup_hud
+    16,                       // doctor
+    36,                       // cam_spin_obj
+    54,                       // light_src_obj
+    76,                       // caption_obj
+    80,                       // card_str
+    81,                       // card_icon
+    116,                      // prev_box
+    118,                      // prev_box_entity
 ];
 const RESPAWN_COUNT_GLOBAL: usize = 5;
 const SCREEN_SHAKE_GLOBAL: usize = 2;
@@ -1396,6 +1402,7 @@ impl NsfProgramHost<'_> {
 pub struct PagedNsfProgramHost<'assets, 'pager> {
     program: NsfProgramHost<'assets>,
     pager: &'pager mut Pager,
+    virtual_card: Option<VirtualCard>,
 }
 
 impl<'assets, 'pager> PagedNsfProgramHost<'assets, 'pager> {
@@ -1409,7 +1416,43 @@ impl<'assets, 'pager> PagedNsfProgramHost<'assets, 'pager> {
         Self {
             program: NsfProgramHost::new(metadata, nsf, nsf_bytes),
             pager,
+            virtual_card: None,
         }
+    }
+
+    /// Opts this asset host into the source-faithful in-memory card boundary.
+    ///
+    /// The default remains an absent card so existing characterization runs
+    /// retain their historical `CardControl` failure result. Callers that
+    /// model a browser session own the card here and publish each value
+    /// returned by [`Self::update_virtual_card`] before GOOL traversal.
+    #[must_use]
+    pub fn with_virtual_card(mut self, card: VirtualCard) -> Self {
+        self.virtual_card = Some(card);
+        self
+    }
+
+    /// Returns the optional in-memory card owned by this host.
+    #[must_use]
+    pub const fn virtual_card(&self) -> Option<&VirtualCard> {
+        self.virtual_card.as_ref()
+    }
+
+    /// Returns mutable access to the optional in-memory card.
+    pub fn virtual_card_mut(&mut self) -> Option<&mut VirtualCard> {
+        self.virtual_card.as_mut()
+    }
+
+    /// Advances one asynchronous card frame and returns its coherent GOOL
+    /// publication snapshot.
+    ///
+    /// `None` preserves the default absent-card host contract. The returned
+    /// snapshot is intentionally not written into a [`RetailRuntime`] here;
+    /// hosts control the exact pre-traversal publication order.
+    pub fn update_virtual_card(&mut self) -> Option<CardPublishedState> {
+        let card = self.virtual_card.as_mut()?;
+        card.update();
+        Some(card.published_state())
     }
 
     #[must_use]
@@ -1551,6 +1594,31 @@ impl ProgramHost for PagedNsfProgramHost<'_, '_> {
 
     fn texture_frame_snapshot(&self) -> Option<TextureFrameSnapshot> {
         Some(self.pager.texture_frame_snapshot())
+    }
+
+    fn handle_card_request(
+        &mut self,
+        request: CardHostRequest,
+        current: SaveData,
+    ) -> Result<CardHostResponse, Self::Error> {
+        let Some(card) = self.virtual_card.as_mut() else {
+            return Ok(CardHostResponse {
+                result: 1,
+                ..CardHostResponse::default()
+            });
+        };
+        let operation = CardOperation::from_retail(request.operation);
+        let part_index = usize::try_from(request.part_index).unwrap_or(usize::MAX);
+        let outcome = card.control(operation, part_index, Some(current));
+        let loaded = match outcome {
+            Ok(CardOutcome::Loaded(save)) => Some(save),
+            Ok(CardOutcome::Complete) | Err(_) => None,
+        };
+        Ok(CardHostResponse {
+            result: i32::from(outcome.is_err()),
+            loaded,
+            published: card.published_state(),
+        })
     }
 }
 
@@ -2048,6 +2116,10 @@ pub enum RuntimeError<E> {
     PendingLevelRestartAtLevelEnd,
     SameLevelRestartDuringLevelEnd(LevelId),
     LevelRestartRecursionBudgetExhausted {
+        limit: usize,
+    },
+    ObjectUpdateInstructionBudgetExhausted {
+        object: RuntimeObjectHandle,
         limit: usize,
     },
     SavedLevelChangedAfterLoad {
@@ -2870,6 +2942,18 @@ enum RetailLevelMiscObjectState {
 enum RestrictedDirectBootSave {
     Disabled,
     Armed,
+    /// A save-restricted fresh mount received a host-only same-level snapshot.
+    /// Keep this provenance across ordinary deaths so the completion WARP can
+    /// distinguish the synthetic snapshot from a real parent-level bonus save.
+    SeededRestricted,
+}
+
+/// Host construction boundary; unlike retail process state, this is never
+/// serialized into a cross-stream session carry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamMountProvenance {
+    Session,
+    Direct,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2921,6 +3005,12 @@ pub struct RetailRuntime {
     /// so the advertised direct-boot path remains restartable. Session mounts
     /// never enable this and retain the real parent-level bonus return.
     restricted_direct_boot_save: RestrictedDirectBootSave,
+    /// Host-only provenance for a stream selected outside retail's authored
+    /// transition graph. This is deliberately not exported in
+    /// [`RetailSessionCarry`]: every `new_from_session` mount is an authored
+    /// process transition, while `new_for_level` is the browser/CLI direct
+    /// selection boundary.
+    stream_mount_provenance: StreamMountProvenance,
     /// Safe owned form of native's retained `doctor` pool pointer. Its tagged
     /// global word names a compact VM handle, but subsequent reads follow the
     /// captured physical arena slot across free-list and VM-handle reuse.
@@ -2974,6 +3064,7 @@ impl RetailRuntime {
             pending_first_spawn: false,
             suppress_initial_crash_save: false,
             restricted_direct_boot_save: RestrictedDirectBootSave::Disabled,
+            stream_mount_provenance: StreamMountProvenance::Session,
             retained_doctor_pool_pointer: None,
             respawn_count: 0,
             death_count: 0,
@@ -3005,6 +3096,7 @@ impl RetailRuntime {
         // `new_from_session`.
         runtime.apply_stream_mount_globals(level);
         runtime.restricted_direct_boot_save = RestrictedDirectBootSave::Armed;
+        runtime.stream_mount_provenance = StreamMountProvenance::Direct;
         runtime
     }
 
@@ -4215,6 +4307,36 @@ impl RetailRuntime {
         Ok(())
     }
 
+    /// Installs `PbakStart` and publishes its recorded GL clock for the next
+    /// GOOL traversal.
+    ///
+    /// Native writes `context.draw_stamp` immediately before `LevelRestart`;
+    /// the restart handlers still observe the preceding `frames_elapsed`, and
+    /// the following `GoolUpdate` publishes `draw_stamp / 34`. Retain that
+    /// split by updating the host frame index without eagerly changing the
+    /// machine's current frame word.
+    pub fn install_retail_demo_start_with_draw_stamp(
+        &mut self,
+        snapshot: RetailLevelSnapshot,
+        random_seed: u32,
+        crash_bound: Bounds3,
+        draw_stamp: u32,
+    ) -> Result<(), RetailDemoStartError> {
+        self.install_retail_demo_start(snapshot, random_seed, crash_bound)?;
+        self.publish_retail_demo_draw_stamp(draw_stamp);
+        Ok(())
+    }
+
+    /// Publishes an absolute recorded GL tick for the next GOOL traversal.
+    ///
+    /// PBAK ticks are not uniformly one 30 Hz frame apart: legal recordings
+    /// contain 51-tick frames, quotient repeats, and wrapping jumps. Native
+    /// derives `frames_elapsed` from each absolute `context.draw_stamp`, so a
+    /// host-side increment cannot substitute for this division.
+    pub fn publish_retail_demo_draw_stamp(&mut self, draw_stamp: u32) {
+        self.frame_index = u64::from(draw_stamp / 34);
+    }
+
     /// Completes native `PadUpdatePbak` after the final recorded word or a
     /// physical interruption has already been made observable to GOOL.
     ///
@@ -4289,8 +4411,9 @@ impl RetailRuntime {
     /// Captures the exact fields written by native `LevelSaveState`.
     ///
     /// The zone's `0x2000` restriction is checked before dereferencing Crash,
-    /// matching the source early return. `caller` supplies the optional
-    /// status-`0x200` translation override used by checkpoint objects.
+    /// matching the retail early return. A world-space `caller` overrides
+    /// Crash's translation; a caller with `GOOL_FLAG_2D` (`status_b & 0x200`)
+    /// keeps Crash's translation. A nonzero checkpoint has final precedence.
     pub fn save_level_state(
         &mut self,
         caller: RuntimeObjectHandle,
@@ -4318,7 +4441,7 @@ impl RetailRuntime {
     fn save_restricted_direct_boot_state(
         &mut self,
         caller: RuntimeObjectHandle,
-    ) -> Result<(), RetailLevelStateError> {
+    ) -> Result<RetailSaveStateOutcome, RetailLevelStateError> {
         let mut context = self
             .level_state_context
             .clone()
@@ -4333,10 +4456,190 @@ impl RetailRuntime {
             caller,
             true,
         )?;
-        if let RetailSaveStateOutcome::Saved(snapshot) = outcome {
-            self.saved_level_state = Some(*snapshot);
+        if let RetailSaveStateOutcome::Saved(snapshot) = &outcome {
+            self.saved_level_state = Some(snapshot.as_ref().clone());
         }
-        Ok(())
+        Ok(outcome)
+    }
+
+    /// Consumes the one host-defined completion case absent from native:
+    /// completing a bonus stream selected directly, without a parent snapshot.
+    ///
+    /// Native leaves its static save buffer invalid when a save-restricted
+    /// bonus is booted out of context. Crust seeds a same-level snapshot so
+    /// state-22 deaths remain restartable. If that exact synthetic snapshot is
+    /// later loaded by `WillC`'s authored state-32 WARP, returning to the same
+    /// bonus would trap the player in a completion loop. Route only that
+    /// boundary to Title, discard the host-only snapshot, and leave real
+    /// session-carried bonus returns untouched.
+    pub fn take_direct_bonus_completion_destination(
+        &mut self,
+        object: VmObjectHandle,
+        saved_level: LevelId,
+    ) -> Result<Option<LevelId>, RuntimeError<()>> {
+        let Some(current_level) = self.level else {
+            return Ok(None);
+        };
+        if self.restricted_direct_boot_save != RestrictedDirectBootSave::SeededRestricted
+            || saved_level != current_level
+            || !matches!(current_level.get(), 0x24 | 0x25 | 0x26 | 0x33 | 0x34)
+            || !self.machine.level_restart_requested()
+        {
+            return Ok(None);
+        }
+
+        let runtime_object = self
+            .handles
+            .for_vm(object)
+            .ok_or(RuntimeError::UnknownVmObject(object))?;
+        Self::validate_runtime_object(&self.arena, &self.handles, &self.machine, runtime_object)?;
+        let process = self.machine.object(object).map_err(RuntimeError::Vm)?;
+        let is_completion = runtime_object.arena.is_dedicated_main()
+            && process.state() == 32
+            && process
+                .program_identity()
+                .is_some_and(|identity| identity.global_eid().name().as_deref() == Some("WillC"));
+        if !is_completion {
+            return Ok(None);
+        }
+
+        // The source has no valid savestate to restore in this host-only
+        // case. Publish the same coherent Title/Main Menu scalar pair used by
+        // ordinary post-game title entry before exporting the session carry;
+        // all persistent save/card words remain untouched.
+        self.machine
+            .global_word(GAME_STATE_GLOBAL)
+            .and_then(|_| self.machine.global_word(TITLE_STATE_GLOBAL))
+            .map_err(RuntimeError::Vm)?;
+        self.machine
+            .set_global_word(GAME_STATE_GLOBAL, 0x600)
+            .map_err(RuntimeError::Vm)?;
+        self.machine
+            .set_global_word(TITLE_STATE_GLOBAL, TitleScreen::MainMenu.raw())
+            .map_err(RuntimeError::Vm)?;
+        self.machine.clear_level_restart_request();
+        self.saved_level_state = None;
+        self.restricted_direct_boot_save = RestrictedDirectBootSave::Disabled;
+        Ok(Some(LevelId::TITLE))
+    }
+
+    /// Consumes Stormy Ascent's unreachable retail three-Cortex-token exit
+    /// only when the stream was selected directly by the host.
+    ///
+    /// Stormy (`0x22`) contains three Cortex-token boxes, but `DispC`'s
+    /// retail destination selector has no `0x22` arm. Its fallthrough leaves
+    /// register 78 at zero and the following `LLEV` therefore requests LID
+    /// zero, whose metadata is absent. The authored island graph can never
+    /// enter Stormy, so native campaign play cannot reach this boundary.
+    ///
+    /// Crust does not invent a Cortex bonus layout. It recognizes the exact
+    /// direct-stream provenance and live GOOL handshake, then publishes a
+    /// coherent Title/Main Menu boundary. Every ordinary LID-zero request,
+    /// including one carried through [`RetailSessionCarry`], remains
+    /// untouched unless all checks below match.
+    pub fn take_direct_stormy_cut_content_destination(
+        &mut self,
+        sender: VmObjectHandle,
+        recipient: VmObjectHandle,
+        requested_level: i32,
+    ) -> Result<Option<LevelId>, RuntimeError<()>> {
+        const STORMY_ASCENT: LevelId = LevelId::new_const(0x22);
+        const DISP_CORTEX_DESTINATION_REGISTER: usize = 78;
+        const STORMY_CORTEX_TOKEN_CHECKPOINTS: [u32; 3] = [29 << 8, 60 << 8, 81 << 8];
+
+        if self.stream_mount_provenance != StreamMountProvenance::Direct
+            || self.level != Some(STORMY_ASCENT)
+            || requested_level != 0
+            || self
+                .saved_level_state
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.level != STORMY_ASCENT)
+        {
+            return Ok(None);
+        }
+
+        let pickup_word = self
+            .machine
+            .global_word(PICKUP_HUD_OBJECT_GLOBAL)
+            .map_err(RuntimeError::Vm)?;
+        if CollisionObjectReference::from_word(pickup_word).is_none() {
+            return Ok(None);
+        }
+        let pickup_pool_slot = self
+            .machine
+            .retail_global_pool_slot(PICKUP_HUD_OBJECT_GLOBAL)
+            .map_err(RuntimeError::Vm)?;
+        if self
+            .machine
+            .global_word(BONUS_ROUND_GLOBAL)
+            .map_err(RuntimeError::Vm)?
+            != 0
+            || self
+                .machine
+                .global_word(CORTEX_COUNT_GLOBAL)
+                .map_err(RuntimeError::Vm)?
+                != 0
+            || !STORMY_CORTEX_TOKEN_CHECKPOINTS.contains(
+                &self
+                    .machine
+                    .global_word(CHECKPOINT_ID_GLOBAL)
+                    .map_err(RuntimeError::Vm)?,
+            )
+        {
+            return Ok(None);
+        }
+
+        let sender_runtime = self
+            .handles
+            .for_vm(sender)
+            .ok_or(RuntimeError::UnknownVmObject(sender))?;
+        Self::validate_runtime_object(&self.arena, &self.handles, &self.machine, sender_runtime)?;
+        // Native global 14 retains an address in the static object pool. Its
+        // compact VM token may independently alias after either VM-handle or
+        // arena-slot reuse; only the captured physical slot is pointer identity.
+        if pickup_pool_slot != Some(sender_runtime.arena.slot()) {
+            return Ok(None);
+        }
+        let recipient_runtime = self
+            .handles
+            .for_vm(recipient)
+            .ok_or(RuntimeError::UnknownVmObject(recipient))?;
+        Self::validate_runtime_object(
+            &self.arena,
+            &self.handles,
+            &self.machine,
+            recipient_runtime,
+        )?;
+
+        let sender_process = self.machine.object(sender).map_err(RuntimeError::Vm)?;
+        let recipient_process = self.machine.object(recipient).map_err(RuntimeError::Vm)?;
+        let is_exact_handshake = !sender_runtime.arena.is_dedicated_main()
+            && recipient_runtime.arena.is_dedicated_main()
+            && sender_process.state() == 13
+            && sender_process
+                .program_identity()
+                .is_some_and(|identity| identity.global_eid().name().as_deref() == Some("DispC"))
+            && sender_process
+                .register(DISP_CORTEX_DESTINATION_REGISTER)
+                .map_err(RuntimeError::Vm)?
+                == 0
+            && recipient_process
+                .program_identity()
+                .is_some_and(|identity| identity.global_eid().name().as_deref() == Some("WillC"));
+        if !is_exact_handshake {
+            return Ok(None);
+        }
+
+        self.machine
+            .set_global_word(GAME_STATE_GLOBAL, GAME_STATE_TITLE)
+            .map_err(RuntimeError::Vm)?;
+        self.machine
+            .set_global_word(TITLE_STATE_GLOBAL, TitleScreen::MainMenu.raw())
+            .map_err(RuntimeError::Vm)?;
+        self.saved_level_state = None;
+        self.restricted_direct_boot_save = RestrictedDirectBootSave::Disabled;
+        self.stream_mount_provenance = StreamMountProvenance::Session;
+        Ok(Some(LevelId::TITLE))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4383,11 +4686,13 @@ impl RetailRuntime {
             ],
         )
         .map_err(RetailLevelStateError::Vm)?;
+        // NTSC-U 0x800264e4 branches over the caller copy when bit 0x200 is
+        // set. This is deliberately opposite the historical C transcription.
         if caller_object
             .register(process_register::STATUS_B)
             .map_err(RetailLevelStateError::Vm)?
-            & SAVE_TRANSLATION_FROM_CALLER_STATUS_B
-            != 0
+            & SAVE_SUPPRESS_CALLER_TRANSLATION_STATUS_B
+            == 0
         {
             player_translation = read_vec(
                 caller_object,
@@ -5429,6 +5734,67 @@ impl RetailRuntime {
             });
         }
         Ok(snapshots)
+    }
+
+    /// Enters one already-resolved event state for an owned-assets browser
+    /// characterization at the live `GoolObjectChangeState` boundary.
+    ///
+    /// This deliberately does not pretend to execute the sender-side event
+    /// gate. A separate parsed-program regression must prove that the authored
+    /// event selects `state`; this seam then uses the production state binder,
+    /// argv layout, once block, host requests, and subsequent object update so
+    /// browser-only effect and mount routing can be covered without mutating a
+    /// private VM process from JavaScript.
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    pub fn browser_test_enter_resolved_event_state<H: ProgramHost>(
+        &mut self,
+        host: &mut H,
+        object: RuntimeObjectHandle,
+        event: u32,
+        state: u16,
+        arguments: &[u32],
+    ) -> Result<(), RuntimeError<H::Error>> {
+        Self::validate_runtime_object(&self.arena, &self.handles, &self.machine, object)?;
+        self.machine
+            .browser_test_prepare_resolved_event_state(object.vm, event, state)
+            .map_err(RuntimeError::Vm)?;
+        let change = EventStateChange {
+            recipient: object.vm,
+            state,
+            event,
+            arguments: arguments.to_vec(),
+            argument_pool_slots: vec![None; arguments.len()],
+        };
+        let mut spawned_children = Vec::new();
+        let Self {
+            arena,
+            machine,
+            handles,
+            pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            level,
+            level_state_context,
+            saved_level_state,
+            transition_zone_context,
+            ..
+        } = self;
+        Self::rebind_event_state_change_parts(
+            arena,
+            handles,
+            machine,
+            pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            *level,
+            level_state_context.as_ref(),
+            saved_level_state,
+            *transition_zone_context,
+            host,
+            &change,
+            &mut spawned_children,
+            None,
+        )
     }
 
     /// Drains platform-owned cleanup emitted by synchronous object reclaim.
@@ -7713,6 +8079,7 @@ impl RetailRuntime {
         if let Ok(materialized) = result.as_ref().copied()
             && materialized.object.arena.is_dedicated_main()
             && !self.suppress_initial_crash_save
+            && self.machine.next_lid() == -1
             && self.level_state_context.is_some()
         {
             // `GoolObjectSpawn` establishes the initial death checkpoint as
@@ -7722,13 +8089,17 @@ impl RetailRuntime {
             // the bonus-return pre-restart scan.
             let initial_save = self.save_level_state(materialized.object, true);
             if self.restricted_direct_boot_save == RestrictedDirectBootSave::Armed {
-                if matches!(initial_save, Ok(RetailSaveStateOutcome::RestrictedByZone))
+                let seeded = matches!(initial_save, Ok(RetailSaveStateOutcome::RestrictedByZone))
                     && self.saved_level_state.is_none()
-                {
-                    let _direct_boot_save =
-                        self.save_restricted_direct_boot_state(materialized.object);
-                }
-                self.restricted_direct_boot_save = RestrictedDirectBootSave::Disabled;
+                    && matches!(
+                        self.save_restricted_direct_boot_state(materialized.object),
+                        Ok(RetailSaveStateOutcome::Saved(_))
+                    );
+                self.restricted_direct_boot_save = if seeded {
+                    RestrictedDirectBootSave::SeededRestricted
+                } else {
+                    RestrictedDirectBootSave::Disabled
+                };
             }
         }
         let preserve_spawned_bit = matches!(&result, Err(RuntimeError::Program(_)));
@@ -7773,16 +8144,17 @@ impl RetailRuntime {
                 steps: 0,
             });
         }
-        // Native `GoolObjectInterpret` does not yield between a synchronous
-        // child spawn and the authored writes that configure `child[...]`.
-        // Our per-object watchdog normally becomes a cooperative frame
-        // boundary, but doing that after `CHLD`/`CHLF` lets the new child run
-        // (and possibly reparent) before its parent resumes. Continue this
-        // one native update in bounded chunks so the temporary child link
-        // remains valid through the post-spawn configuration tail.
-        let spawned_children_before_update = spawned_children.len();
-        let mut remaining = budget;
+        // `GoolObjectInterpret` runs until an authored return, animation, or
+        // host boundary. The browser's small instruction budget is only a
+        // watchdog chunk size: exposing it as a cooperative frame boundary
+        // changes preorder visibility (for example, a later HUD object can
+        // observe half of an earlier pickup transaction). Preserve one native
+        // invocation across chunks, with an independent hard safety limit.
+        let chunk_budget = budget.clamp(1, OBJECT_UPDATE_INSTRUCTION_LIMIT);
+        let mut remaining = chunk_budget;
         let mut total_steps = 0_usize;
+        let mut condition = false;
+        let mut apply_animation_gate = true;
         loop {
             let mut callback_error = None;
             let execution = {
@@ -7799,47 +8171,57 @@ impl RetailRuntime {
                     transition_zone_context,
                     ..
                 } = self;
-                machine.run_with_host_requests(object.vm, remaining, |machine, request| {
-                    let result = Self::apply_host_request(
-                        arena,
-                        handles,
-                        machine,
-                        pending_states,
-                        pending_cleanup_actions,
-                        reclaim_event_faults,
-                        *level,
-                        level_state_context.as_ref(),
-                        saved_level_state,
-                        *transition_zone_context,
-                        host,
-                        Some(object.vm),
-                        request,
-                        spawned_children,
-                    );
-                    if let Err(error) = result {
-                        callback_error = Some(error);
-                        return Err(VmError::MissingHostEffect);
-                    }
-                    Ok(())
-                })
+                machine.run_with_host_requests_chunk(
+                    object.vm,
+                    remaining,
+                    |machine, request| {
+                        let result = Self::apply_host_request(
+                            arena,
+                            handles,
+                            machine,
+                            pending_states,
+                            pending_cleanup_actions,
+                            reclaim_event_faults,
+                            *level,
+                            level_state_context.as_ref(),
+                            saved_level_state,
+                            *transition_zone_context,
+                            host,
+                            Some(object.vm),
+                            request,
+                            spawned_children,
+                        );
+                        if let Err(error) = result {
+                            callback_error = Some(error);
+                            return Err(VmError::MissingHostEffect);
+                        }
+                        Ok(())
+                    },
+                    &mut condition,
+                    apply_animation_gate,
+                )
             };
             if let Some(error) = callback_error {
                 return Err(error);
             }
             let execution = execution.map_err(RuntimeError::Vm)?;
             total_steps = total_steps.saturating_add(execution.steps);
-            let spawned_during_update = spawned_children.len() > spawned_children_before_update;
+            apply_animation_gate = false;
             let continuation_remaining = || {
-                SPAWN_CONTINUATION_LIMIT
+                OBJECT_UPDATE_INSTRUCTION_LIMIT
                     .saturating_sub(total_steps)
-                    .min(budget.max(1))
+                    .min(chunk_budget)
             };
             let state = match execution.reason {
-                HaltReason::BudgetExhausted
-                    if spawned_during_update && total_steps < SPAWN_CONTINUATION_LIMIT =>
-                {
+                HaltReason::BudgetExhausted if total_steps < OBJECT_UPDATE_INSTRUCTION_LIMIT => {
                     remaining = continuation_remaining();
                     continue;
+                }
+                HaltReason::BudgetExhausted => {
+                    return Err(RuntimeError::ObjectUpdateInstructionBudgetExhausted {
+                        object,
+                        limit: OBJECT_UPDATE_INSTRUCTION_LIMIT,
+                    });
                 }
                 HaltReason::StateChanged(state) => state,
                 reason => {
@@ -7863,19 +8245,18 @@ impl RetailRuntime {
                     steps: total_steps,
                 });
             }
-            if total_steps >= budget
-                && (!spawned_during_update || total_steps >= SPAWN_CONTINUATION_LIMIT)
-            {
-                return Ok(Execution {
-                    reason: HaltReason::StateChanged(state),
-                    steps: total_steps,
+            if total_steps >= OBJECT_UPDATE_INSTRUCTION_LIMIT {
+                return Err(RuntimeError::ObjectUpdateInstructionBudgetExhausted {
+                    object,
+                    limit: OBJECT_UPDATE_INSTRUCTION_LIMIT,
                 });
             }
-            remaining = if total_steps < budget {
-                budget - total_steps
-            } else {
-                continuation_remaining()
-            };
+            // A rebound state starts a new interpreted code invocation and
+            // therefore receives its own animation gate and condition latch,
+            // while still belonging to this synchronous native object update.
+            condition = false;
+            apply_animation_gate = true;
+            remaining = continuation_remaining();
         }
     }
 
@@ -9558,6 +9939,12 @@ impl RetailRuntime {
             machine
                 .resolve_load_state_effect(*vm, saved_level)
                 .map_err(RuntimeError::Vm)?;
+            if level.is_some_and(|current| current != saved_level) {
+                // Different-level `LevelRestart` writes `next_lid = -2`
+                // synchronously, before the browser consumes the deferred
+                // remount effect.
+                machine.set_next_lid(-2);
+            }
             // Native LevelRestart clears bonus mode before comparing saved
             // and current levels. Different-level GOOL continues after this
             // host boundary, so the write must be visible immediately rather
@@ -10146,7 +10533,7 @@ impl RetailRuntime {
                         CollisionObjectReference::new(object.vm).to_word(),
                     )
                     .map_err(RuntimeError::Vm)?;
-                Self::refresh_player_links(arena, handles, machine)
+                Ok(())
             })();
             if let Err(error) = install_result {
                 if is_new_binding {
@@ -10233,7 +10620,9 @@ impl RetailRuntime {
                     .state_flags(),
             )
             .map_err(RuntimeError::Tree)?;
-        Self::refresh_player_links(&self.arena, &self.handles, &mut self.machine)?;
+        if binding.object.arena.is_dedicated_main() {
+            Self::refresh_player_links(&self.arena, &self.handles, &mut self.machine)?;
+        }
         Ok(MaterializedObject {
             object: binding.object,
             environment,
@@ -10412,7 +10801,11 @@ impl RetailRuntime {
             .expect("index came from the VM handle capacity");
             if handles.for_vm(vm).is_some() {
                 let vm_object = machine.object_mut(vm).map_err(RuntimeError::Vm)?;
-                Self::set_player_link(vm_object, player).map_err(RuntimeError::Vm)?;
+                if vm_object.register_pool_slot(5).map_err(RuntimeError::Vm)?
+                    == Some(DEDICATED_PLAYER_POOL_SLOT)
+                {
+                    Self::set_player_link(vm_object, player).map_err(RuntimeError::Vm)?;
+                }
             }
         }
         Ok(())
@@ -10906,6 +11299,19 @@ mod tests {
             ZONE_B
         );
 
+        let mut transitioning =
+            RetailRuntime::new_from_session(119, target, carry.clone()).unwrap();
+        let carried_snapshot = transitioning.saved_level_state().cloned().unwrap();
+        transitioning.set_level_state_context(level_context(ZONE_B, false, vec![ZONE_B]));
+        transitioning.machine.set_next_lid(0x24);
+        let attempts = transitioning.spawn_current_zone_neighbors(&neighbors, &mut SnapshotHost);
+        assert!(attempts[0].result.is_ok());
+        assert_eq!(
+            transitioning.saved_level_state(),
+            Some(&carried_snapshot),
+            "native next_lid suppresses a late Crash spawn-save once a transition is armed"
+        );
+
         let mut bonus_return = RetailRuntime::new_from_session(119, target, carry).unwrap();
         let carried_snapshot = bonus_return.saved_level_state().cloned().unwrap();
         bonus_return.set_level_state_context(level_context(ZONE_B, false, vec![ZONE_B]));
@@ -10996,6 +11402,11 @@ mod tests {
             .expect("a fresh restricted direct boot must remain restartable");
         assert_eq!(direct_snapshot.level, bonus);
         assert_eq!(direct_snapshot.location.path.zone, ZONE_B);
+        assert_eq!(
+            direct.restricted_direct_boot_save,
+            RestrictedDirectBootSave::SeededRestricted,
+            "the host-only snapshot must retain its provenance across deaths"
+        );
 
         let mut source = RetailRuntime::new_for_level(119, parent);
         source.saved_level_state = Some(level_snapshot(parent));
@@ -11010,6 +11421,421 @@ mod tests {
                 .map(|snapshot| snapshot.level),
             Some(parent),
             "a real bonus entry must retain its parent-level return snapshot"
+        );
+        assert_eq!(
+            entered_bonus.restricted_direct_boot_save,
+            RestrictedDirectBootSave::Disabled,
+            "session-carried parent saves must never acquire direct-boot provenance"
+        );
+    }
+
+    fn seeded_direct_bonus_runtime() -> (RetailRuntime, RuntimeObjectHandle) {
+        let bonus = LevelId::new_const(0x24);
+        let mut context = level_context(ZONE_B, false, vec![ZONE_B]);
+        context.graphics_flags |= SAVE_RESTRICTED_ZONE_FLAG;
+        let mut runtime = RetailRuntime::new_for_level(119, bonus);
+        runtime.set_level_state_context(context);
+        let main = spawn_test_object(&mut runtime, ZONE_B, 5, 0, 0);
+        assert_eq!(
+            runtime.restricted_direct_boot_save,
+            RestrictedDirectBootSave::SeededRestricted
+        );
+        (runtime, main)
+    }
+
+    #[test]
+    fn direct_bonus_completion_returns_to_title_without_corrupting_session_globals() {
+        let (mut runtime, main) = seeded_direct_bonus_runtime();
+        let will = Eid::from_name("WillC").expect("fixed retail player EID is valid");
+        let warp = Eid::from_name("WarpC").expect("fixed retail warp EID is valid");
+        let bonus = runtime.level().unwrap();
+
+        {
+            let process = runtime.machine.object_mut(main.vm).unwrap();
+            process.configure_test_program_identity_with_eid(will, 0, 0);
+            process.configure_test_state(22);
+        }
+        runtime.machine.request_level_restart();
+        let snapshot = runtime.saved_level_state().cloned();
+        assert_eq!(
+            runtime.take_direct_bonus_completion_destination(main.vm, bonus),
+            Ok(None),
+            "WillC's fall-death state remains an ordinary same-level restart"
+        );
+        assert!(runtime.machine.level_restart_requested());
+        assert_eq!(runtime.saved_level_state(), snapshot.as_ref());
+        assert_eq!(
+            runtime.restricted_direct_boot_save,
+            RestrictedDirectBootSave::SeededRestricted
+        );
+
+        {
+            let process = runtime.machine.object_mut(main.vm).unwrap();
+            process.configure_test_program_identity_with_eid(warp, 0, 0);
+            process.configure_test_state(32);
+        }
+        assert_eq!(
+            runtime.take_direct_bonus_completion_destination(main.vm, bonus),
+            Ok(None),
+            "state 32 on a non-player program cannot consume the fallback"
+        );
+        assert!(runtime.machine.level_restart_requested());
+
+        {
+            let process = runtime.machine.object_mut(main.vm).unwrap();
+            process.configure_test_program_identity_with_eid(will, 0, 0);
+        }
+        let mut expected_globals = runtime.machine.global_words().to_vec();
+        expected_globals[GAME_STATE_GLOBAL] = 0x600;
+        expected_globals[TITLE_STATE_GLOBAL] = TitleScreen::MainMenu.raw();
+        let card_before = runtime.card_save_data().unwrap();
+        assert_eq!(
+            runtime.take_direct_bonus_completion_destination(main.vm, bonus),
+            Ok(Some(LevelId::TITLE))
+        );
+        assert!(!runtime.machine.level_restart_requested());
+        assert_eq!(runtime.saved_level_state(), None);
+        assert_eq!(runtime.machine.global_words(), expected_globals);
+        assert_eq!(runtime.card_save_data(), Ok(card_before));
+        assert_eq!(
+            runtime.restricted_direct_boot_save,
+            RestrictedDirectBootSave::Disabled
+        );
+        assert_eq!(
+            runtime.take_direct_bonus_completion_destination(main.vm, bonus),
+            Ok(None),
+            "the host-only completion fallback is one-shot"
+        );
+    }
+
+    fn configure_stormy_pickup_process(runtime: &mut RetailRuntime, pickup: RuntimeObjectHandle) {
+        {
+            let process = runtime.machine.object_mut(pickup.vm).unwrap();
+            process.configure_test_program_identity_with_eid(
+                Eid::from_name("DispC").expect("fixed retail pickup EID is valid"),
+                0,
+                0,
+            );
+            process.configure_test_state(13);
+            process.set_register(78, 0).unwrap();
+        }
+    }
+
+    fn configure_stormy_cut_content_handshake(
+        runtime: &mut RetailRuntime,
+    ) -> (RuntimeObjectHandle, RuntimeObjectHandle) {
+        let stormy = LevelId::new_const(0x22);
+        let pickup = spawn_test_object(runtime, ZONE, 29, 4, 5);
+        let player = spawn_test_object(runtime, ZONE_B, 5, 0, 0);
+        configure_stormy_pickup_process(runtime, pickup);
+        runtime
+            .machine
+            .object_mut(player.vm)
+            .unwrap()
+            .configure_test_program_identity_with_eid(
+                Eid::from_name("WillC").expect("fixed retail player EID is valid"),
+                0,
+                0,
+            );
+        for (global, value) in [
+            (
+                PICKUP_HUD_OBJECT_GLOBAL,
+                CollisionObjectReference::new(pickup.vm).to_word(),
+            ),
+            (BONUS_ROUND_GLOBAL, 0),
+            (CORTEX_COUNT_GLOBAL, 0),
+            (CHECKPOINT_ID_GLOBAL, 29 << 8),
+        ] {
+            runtime.machine.set_global_word(global, value).unwrap();
+        }
+        runtime.saved_level_state = Some(level_snapshot(stormy));
+        (pickup, player)
+    }
+
+    fn direct_stormy_cut_content_runtime()
+    -> (RetailRuntime, RuntimeObjectHandle, RuntimeObjectHandle) {
+        let mut runtime = RetailRuntime::new_for_level(119, LevelId::new_const(0x22));
+        let (pickup, player) = configure_stormy_cut_content_handshake(&mut runtime);
+        (runtime, pickup, player)
+    }
+
+    #[test]
+    fn direct_stormy_cortex_fallthrough_returns_to_main_menu_once() {
+        let (mut runtime, pickup, player) = direct_stormy_cut_content_runtime();
+        let mut expected_globals = runtime.machine.global_words().to_vec();
+        expected_globals[GAME_STATE_GLOBAL] = GAME_STATE_TITLE;
+        expected_globals[TITLE_STATE_GLOBAL] = TitleScreen::MainMenu.raw();
+
+        assert_eq!(
+            runtime.take_direct_stormy_cut_content_destination(pickup.vm, player.vm, 0),
+            Ok(Some(LevelId::TITLE))
+        );
+        assert_eq!(runtime.machine.global_words(), expected_globals);
+        assert_eq!(runtime.saved_level_state(), None);
+        assert_eq!(
+            runtime.stream_mount_provenance,
+            StreamMountProvenance::Session
+        );
+        assert_eq!(
+            runtime.take_direct_stormy_cut_content_destination(pickup.vm, player.vm, 0),
+            Ok(None),
+            "the non-retail direct-stream recovery must be one-shot"
+        );
+    }
+
+    #[test]
+    fn stormy_recovery_rejects_reused_vm_handle_from_a_different_native_pool_slot() {
+        let (mut runtime, stale_pickup, player) = direct_stormy_cut_content_runtime();
+        let sacrificial = spawn_test_object(&mut runtime, ZONE, 300, 2, 0);
+        let retained_word = runtime
+            .machine
+            .global_word(PICKUP_HUD_OBJECT_GLOBAL)
+            .unwrap();
+        let retained_pool_slot = stale_pickup.arena.slot();
+        assert_eq!(
+            runtime
+                .machine
+                .retail_global_pool_slot(PICKUP_HUD_OBJECT_GLOBAL),
+            Ok(Some(retained_pool_slot))
+        );
+
+        let mut removal = ZoneTerminationReport::<()>::new();
+        runtime
+            .remove_runtime_subtree(stale_pickup.arena, &mut removal)
+            .unwrap();
+        runtime
+            .remove_runtime_subtree(sacrificial.arena, &mut removal)
+            .unwrap();
+
+        let reused_vm = spawn_test_object(&mut runtime, ZONE, 301, 4, 5);
+        configure_stormy_pickup_process(&mut runtime, reused_vm);
+        assert_eq!(
+            reused_vm.vm, stale_pickup.vm,
+            "the compact VM token must be reused for the regression"
+        );
+        assert_ne!(
+            reused_vm.arena.slot(),
+            retained_pool_slot,
+            "the replacement must occupy different native pool storage"
+        );
+        assert_eq!(
+            runtime
+                .machine
+                .global_word(PICKUP_HUD_OBJECT_GLOBAL)
+                .unwrap(),
+            retained_word,
+            "the dangling tagged word aliases the reused compact VM token"
+        );
+        assert_eq!(
+            runtime
+                .machine
+                .retail_global_pool_slot(PICKUP_HUD_OBJECT_GLOBAL),
+            Ok(Some(retained_pool_slot)),
+            "the retained native pointer still names its original pool slot"
+        );
+
+        assert_eq!(
+            runtime.take_direct_stormy_cut_content_destination(reused_vm.vm, player.vm, 0),
+            Ok(None),
+            "generationless VM-handle equality cannot authorize the recovery"
+        );
+    }
+
+    #[test]
+    fn stormy_recovery_accepts_reused_native_pool_slot_with_a_different_vm_handle() {
+        let (mut runtime, stale_pickup, player) = direct_stormy_cut_content_runtime();
+        let sacrificial = spawn_test_object(&mut runtime, ZONE, 296, 2, 0);
+        let retained_word = runtime
+            .machine
+            .global_word(PICKUP_HUD_OBJECT_GLOBAL)
+            .unwrap();
+        let retained_pool_slot = stale_pickup.arena.slot();
+
+        let mut removal = ZoneTerminationReport::<()>::new();
+        runtime
+            .remove_runtime_subtree(stale_pickup.arena, &mut removal)
+            .unwrap();
+        runtime
+            .remove_runtime_subtree(sacrificial.arena, &mut removal)
+            .unwrap();
+
+        let vm_handle_blocker = spawn_test_object(&mut runtime, ZONE, 297, 2, 0);
+        let replacement = spawn_test_object(&mut runtime, ZONE, 298, 4, 5);
+        configure_stormy_pickup_process(&mut runtime, replacement);
+        assert_eq!(
+            vm_handle_blocker.vm, stale_pickup.vm,
+            "an unrelated object must occupy the dangling compact VM token"
+        );
+        assert_eq!(
+            replacement.arena.slot(),
+            retained_pool_slot,
+            "the authored sender must reuse the retained native pointer storage"
+        );
+        assert_ne!(
+            replacement.vm, stale_pickup.vm,
+            "the live object must have an independently reused compact VM token"
+        );
+        assert_eq!(
+            runtime
+                .machine
+                .global_word(PICKUP_HUD_OBJECT_GLOBAL)
+                .unwrap(),
+            retained_word,
+            "the encoded VM token remains stale while native slot provenance stays valid"
+        );
+        assert_eq!(
+            runtime
+                .machine
+                .retail_global_pool_slot(PICKUP_HUD_OBJECT_GLOBAL),
+            Ok(Some(retained_pool_slot))
+        );
+
+        assert_eq!(
+            runtime.take_direct_stormy_cut_content_destination(replacement.vm, player.vm, 0),
+            Ok(Some(LevelId::TITLE)),
+            "native pointer equality is pool-slot equality, not compact VM-token equality"
+        );
+    }
+
+    #[test]
+    fn stormy_cortex_fallthrough_rejects_every_provenance_near_miss() {
+        let (baseline, pickup, player) = direct_stormy_cut_content_runtime();
+
+        let mut session = RetailRuntime::new_from_session(
+            119,
+            LevelId::new_const(0x22),
+            baseline.export_session_carry(),
+        )
+        .unwrap();
+        let (session_pickup, session_player) = configure_stormy_cut_content_handshake(&mut session);
+        assert_eq!(
+            session.take_direct_stormy_cut_content_destination(
+                session_pickup.vm,
+                session_player.vm,
+                0,
+            ),
+            Ok(None),
+            "a session-carried transition never has direct-stream provenance"
+        );
+
+        let mut wrong_sender = baseline.clone();
+        let other = spawn_test_object(&mut wrong_sender, ZONE, 30, 4, 5);
+        {
+            let process = wrong_sender.machine.object_mut(other.vm).unwrap();
+            process.configure_test_program_identity_with_eid(
+                Eid::from_name("DispC").expect("fixed retail pickup EID is valid"),
+                0,
+                0,
+            );
+            process.configure_test_state(13);
+            process.set_register(78, 0).unwrap();
+        }
+        assert_eq!(
+            wrong_sender.take_direct_stormy_cut_content_destination(other.vm, player.vm, 0),
+            Ok(None),
+            "only the live pickup_hud global may originate the boundary"
+        );
+
+        let mut wrong_state = baseline.clone();
+        wrong_state
+            .machine
+            .object_mut(pickup.vm)
+            .unwrap()
+            .configure_test_state(12);
+        assert_eq!(
+            wrong_state.take_direct_stormy_cut_content_destination(pickup.vm, player.vm, 0),
+            Ok(None)
+        );
+
+        for (label, global, value) in [
+            ("checkpoint", CHECKPOINT_ID_GLOBAL, 30 << 8),
+            ("bonus round", BONUS_ROUND_GLOBAL, 1),
+            ("Cortex count", CORTEX_COUNT_GLOBAL, 0x100),
+        ] {
+            let mut near_miss = baseline.clone();
+            near_miss.machine.set_global_word(global, value).unwrap();
+            assert_eq!(
+                near_miss.take_direct_stormy_cut_content_destination(pickup.vm, player.vm, 0),
+                Ok(None),
+                "wrong {label} must preserve LID zero"
+            );
+        }
+
+        let mut wrong_save = baseline.clone();
+        wrong_save.saved_level_state = Some(level_snapshot(LevelId::N_SANITY_BEACH));
+        assert_eq!(
+            wrong_save.take_direct_stormy_cut_content_destination(pickup.vm, player.vm, 0),
+            Ok(None)
+        );
+
+        let mut wrong_destination_register = baseline.clone();
+        wrong_destination_register
+            .machine
+            .object_mut(pickup.vm)
+            .unwrap()
+            .set_register(78, 0x24)
+            .unwrap();
+        assert_eq!(
+            wrong_destination_register
+                .take_direct_stormy_cut_content_destination(pickup.vm, player.vm, 0,),
+            Ok(None)
+        );
+
+        let mut ordinary_zero = RetailRuntime::new_for_level(119, LevelId::N_SANITY_BEACH);
+        assert_eq!(
+            ordinary_zero.take_direct_stormy_cut_content_destination(pickup.vm, player.vm, 0),
+            Ok(None),
+            "a valid LID-zero request outside Stormy is not inspected further"
+        );
+        let mut nonzero = baseline;
+        assert_eq!(
+            nonzero.take_direct_stormy_cut_content_destination(pickup.vm, player.vm, 0x24),
+            Ok(None),
+            "the guard cannot rewrite an authored nonzero transition"
+        );
+    }
+
+    #[test]
+    fn carried_bonus_completion_retains_its_parent_snapshot() {
+        let parent = LevelId::new_const(0x0c);
+        let bonus = LevelId::new_const(0x24);
+        let parent_snapshot = level_snapshot(parent);
+        let mut parent_runtime = RetailRuntime::new_for_level(119, parent);
+        parent_runtime.saved_level_state = Some(parent_snapshot.clone());
+        let mut bonus_runtime =
+            RetailRuntime::new_from_session(119, bonus, parent_runtime.export_session_carry())
+                .unwrap();
+        let mut context = level_context(ZONE_B, false, vec![ZONE_B]);
+        context.graphics_flags |= SAVE_RESTRICTED_ZONE_FLAG;
+        bonus_runtime.set_level_state_context(context);
+        let main = spawn_test_object(&mut bonus_runtime, ZONE_B, 5, 0, 0);
+        bonus_runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .configure_test_program_identity_with_eid(
+                Eid::from_name("WillC").expect("fixed retail player EID is valid"),
+                0,
+                0,
+            );
+        bonus_runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .configure_test_state(32);
+
+        assert_eq!(
+            bonus_runtime.take_direct_bonus_completion_destination(main.vm, parent),
+            Ok(None)
+        );
+        assert_eq!(
+            bonus_runtime.saved_level_state(),
+            Some(&parent_snapshot),
+            "the authored different-level LoadState still returns to the parent"
+        );
+        assert_eq!(
+            bonus_runtime.restricted_direct_boot_save,
+            RestrictedDirectBootSave::Disabled
         );
     }
 
@@ -12226,6 +13052,91 @@ mod tests {
     }
 
     #[test]
+    fn watchdog_chunks_preserve_one_native_interpreter_invocation() {
+        const OBSERVED_GLOBAL: usize = 10;
+        const BAD_VALUE: u32 = 0x0bad;
+        const GOOD_VALUE: u32 = 0xc001;
+
+        let mut runtime = RetailRuntime::new(OBSERVED_GLOBAL + 1);
+        let object = spawn_test_object(&mut runtime, ZONE, 9, 2, 0);
+        let no_op = Instruction::encode(0x11, 0x0e3f, 0x0e3f);
+        let mut vm = VmObject::new(
+            object.vm,
+            vec![
+                // Set the interpreter's condition latch, then end the first
+                // two-instruction watchdog chunk.
+                control_flow(3, 1, TEST_CONDITION_REGISTER as u32, 0, 0),
+                no_op,
+                // Condition type three must retain the preceding value across
+                // the artificial chunk boundary and jump over the bad path.
+                control_flow(0, 3, 0, 0, 2),
+                Instruction::encode(0x20, 0, 2),
+                RETURN,
+                Instruction::encode(0x20, 1, 2),
+                RETURN,
+            ],
+        )
+        .unwrap();
+        vm.set_register(TEST_CONDITION_REGISTER, 1).unwrap();
+        vm.set_internal(0, BAD_VALUE).unwrap();
+        vm.set_internal(1, GOOD_VALUE).unwrap();
+        vm.set_internal(2, (OBSERVED_GLOBAL as u32) << 8).unwrap();
+        runtime.machine.upsert_object(vm).unwrap();
+
+        let frame = runtime.run_frame(&mut SnapshotHost, 2).unwrap();
+        let execution = frame
+            .executions
+            .iter()
+            .find(|execution| execution.object == object)
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(execution.reason, HaltReason::Halted);
+        assert!(execution.steps > 2);
+        assert_eq!(runtime.global_word(OBSERVED_GLOBAL), Ok(GOOD_VALUE));
+    }
+
+    #[test]
+    fn unterminated_object_update_is_quarantined_at_the_independent_hard_limit() {
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 9, 2, 0);
+        let loop_forever = control_flow(0, 0, 0, 0, 0x03ff);
+        runtime
+            .machine
+            .upsert_object(VmObject::new(object.vm, vec![loop_forever]).unwrap())
+            .unwrap();
+
+        let frame = runtime.run_frame(&mut SnapshotHost, 67).unwrap();
+        let execution = frame
+            .executions
+            .iter()
+            .find(|execution| execution.object == object)
+            .unwrap()
+            .result
+            .as_ref();
+
+        assert_eq!(
+            execution,
+            Err(&RuntimeError::ObjectUpdateInstructionBudgetExhausted {
+                object,
+                limit: OBJECT_UPDATE_INSTRUCTION_LIMIT,
+            })
+        );
+        assert!(runtime.faulted_objects.contains(&object));
+
+        let following = runtime.run_frame(&mut SnapshotHost, 67).unwrap();
+        assert!(
+            following
+                .executions
+                .iter()
+                .all(|execution| execution.object != object),
+            "a quarantined infinite loop must not consume another source-frame budget"
+        );
+    }
+
+    #[test]
     fn child_spawn_configuration_tail_is_atomic_across_the_watchdog_budget() {
         const SPAWN_EXECUTABLE_FIVE_CHILD: u32 = 0x8a00_5001;
         const CHILD_PID_FLAGS: u16 = 0x0cde;
@@ -12963,6 +13874,155 @@ mod tests {
                 },
             })
         }
+    }
+
+    fn with_paged_card_host<R>(
+        card: Option<VirtualCard>,
+        run: impl FnOnce(&mut PagedNsfProgramHost<'_, '_>) -> R,
+    ) -> R {
+        let (nsd_bytes, nsf_bytes) = object_bound_stream_fixture(false, false);
+        let metadata = parse_nsd(&nsd_bytes, LevelId::TITLE).unwrap();
+        let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
+        let mut pager = Pager::new();
+        let mut host = match card {
+            Some(card) => PagedNsfProgramHost::new(&metadata, &nsf, &nsf_bytes, &mut pager)
+                .with_virtual_card(card),
+            None => PagedNsfProgramHost::new(&metadata, &nsf, &nsf_bytes, &mut pager),
+        };
+        run(&mut host)
+    }
+
+    fn card_request(operation: i32, part_index: i32) -> CardHostRequest {
+        CardHostRequest {
+            object: VmObjectHandle::new(0).unwrap(),
+            operation,
+            part_index,
+        }
+    }
+
+    #[test]
+    fn paged_nsf_host_retains_absent_card_by_default() {
+        with_paged_card_host(None, |host| {
+            assert_eq!(host.virtual_card(), None);
+            assert_eq!(host.update_virtual_card(), None);
+            assert_eq!(
+                host.handle_card_request(card_request(8, 0), SaveData::default()),
+                Ok(CardHostResponse {
+                    result: 1,
+                    ..CardHostResponse::default()
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn paged_nsf_host_empty_virtual_card_runs_authored_rescan_handshake() {
+        with_paged_card_host(Some(VirtualCard::new()), |host| {
+            assert_eq!(host.virtual_card().unwrap().part_count(), 0);
+            assert_eq!(
+                host.handle_card_request(card_request(8, 0), SaveData::default())
+                    .unwrap()
+                    .result,
+                0,
+                "ProbePresent succeeds for the browser-owned card"
+            );
+            assert_eq!(
+                host.handle_card_request(card_request(7, 0), SaveData::default())
+                    .unwrap()
+                    .result,
+                1,
+                "the source browser backend has no PSX directory name"
+            );
+
+            let rescan = host
+                .handle_card_request(card_request(10, 0), SaveData::default())
+                .unwrap();
+            assert_eq!(rescan.result, 0);
+            assert!(
+                rescan
+                    .published
+                    .flags
+                    .contains(crate::card::CardFlags::PENDING)
+            );
+            assert!(
+                rescan
+                    .published
+                    .flags
+                    .contains(crate::card::CardFlags::CHECKING)
+            );
+            assert!(
+                rescan
+                    .published
+                    .flags
+                    .contains(crate::card::CardFlags::FLAG_6)
+            );
+            assert_eq!(host.update_virtual_card(), Some(rescan.published));
+
+            let acknowledged = host
+                .handle_card_request(card_request(2, 0), SaveData::default())
+                .unwrap();
+            assert_eq!(acknowledged.result, 0);
+            assert!(
+                !acknowledged
+                    .published
+                    .flags
+                    .contains(crate::card::CardFlags::FLAG_6)
+            );
+            let published = host.update_virtual_card().unwrap();
+            assert_eq!(published, CardPublishedState::default());
+            assert_eq!(host.virtual_card_mut().unwrap().part_count(), 0);
+        });
+    }
+
+    #[test]
+    fn paged_nsf_host_occupied_virtual_card_overwrites_and_loads_selected_payload() {
+        let initial = SaveData {
+            level_count: 4,
+            initial_lives: 4 << 8,
+            sfx_volume: 255,
+            music_volume: 255,
+            ..SaveData::default()
+        };
+        let overwrite = SaveData {
+            level_count: 17,
+            initial_lives: 9 << 8,
+            sfx_volume: 201,
+            music_volume: 137,
+            item_pool_1: 0x1020_3040,
+            item_pool_2: 0x5060_7080,
+            gem_count: 11,
+            key_count: 2,
+            ..SaveData::default()
+        };
+        let mut card = VirtualCard::new();
+        card.set_slot(
+            0,
+            crate::card::Slot::Valid(crate::card::CardPayload::encode(initial)),
+        )
+        .unwrap();
+        card.control(CardOperation::Rescan, 0, None).unwrap();
+        card.update();
+        card.control(CardOperation::ClearFlag6, 0, None).unwrap();
+        card.update();
+
+        with_paged_card_host(Some(card), |host| {
+            assert_eq!(host.virtual_card().unwrap().part_count(), 1);
+            let saved = host
+                .handle_card_request(card_request(3, 0), overwrite)
+                .unwrap();
+            assert_eq!(saved.result, 0);
+            assert_eq!(saved.loaded, None);
+            assert_eq!(saved.published.part_count, 1);
+            assert_eq!(host.virtual_card().unwrap().current_slot(), Some(0));
+
+            let loaded = host
+                .handle_card_request(card_request(4, 0), SaveData::default())
+                .unwrap();
+            assert_eq!(loaded.result, 0);
+            assert_eq!(loaded.loaded, Some(overwrite));
+            assert_eq!(loaded.published.part_count, 1);
+            assert_eq!(host.virtual_card().unwrap().current_slot(), Some(0));
+        });
     }
 
     #[test]
@@ -13785,6 +14845,14 @@ mod tests {
     fn player_link_keeps_dedicated_allocation_while_main_is_inactive() {
         let mut runtime = RetailRuntime::new_for_level(0, LevelId::TITLE);
         let ordinary = spawn_test_object(&mut runtime, ZONE, 270, 2, 0);
+        let authored_tail = spawn_test_object(&mut runtime, ZONE, 271, 2, 0);
+        let authored_owner = spawn_test_object(&mut runtime, ZONE, 272, 2, 0);
+        runtime
+            .machine
+            .object_mut(authored_owner.vm)
+            .unwrap()
+            .set_retail_pool_link(5, authored_tail.vm, authored_tail.arena.slot())
+            .unwrap();
         let inactive_link = runtime.machine.object(ordinary.vm).unwrap();
         assert_eq!(
             inactive_link.register(crate::gool::REGISTER_COUNT),
@@ -13799,7 +14867,7 @@ mod tests {
             "GoolObjectInit points at the separately allocated player even before it is active"
         );
 
-        let main = spawn_test_object(&mut runtime, ZONE, 271, 0, 0);
+        let main = spawn_test_object(&mut runtime, ZONE, 273, 0, 0);
         assert!(main.arena.is_dedicated_main());
         assert_eq!(
             runtime
@@ -13820,6 +14888,17 @@ mod tests {
             live_link.register_pool_slot(5),
             Ok(Some(DEDICATED_PLAYER_POOL_SLOT))
         );
+        let authored_link = runtime.machine.object(authored_owner.vm).unwrap();
+        assert_eq!(
+            CollisionObjectReference::from_word(authored_link.register(5).unwrap())
+                .map(CollisionObjectReference::object),
+            Some(authored_tail.vm),
+            "main materialization must not replace an authored non-player link five"
+        );
+        assert_eq!(
+            authored_link.register_pool_slot(5),
+            Ok(Some(authored_tail.arena.slot()))
+        );
 
         let mut report = ZoneTerminationReport::<()>::new();
         runtime
@@ -13836,7 +14915,7 @@ mod tests {
             Ok(Some(DEDICATED_PLAYER_POOL_SLOT))
         );
 
-        let replacement = spawn_test_object(&mut runtime, ZONE, 272, 0, 0);
+        let replacement = spawn_test_object(&mut runtime, ZONE, 274, 0, 0);
         assert!(replacement.arena.is_dedicated_main());
         let reused_link = runtime.machine.object(ordinary.vm).unwrap();
         assert_eq!(
@@ -13846,6 +14925,101 @@ mod tests {
         );
         assert_eq!(
             reused_link.register_pool_slot(5),
+            Ok(Some(DEDICATED_PLAYER_POOL_SLOT))
+        );
+        let preserved_authored_link = runtime.machine.object(authored_owner.vm).unwrap();
+        assert_eq!(
+            CollisionObjectReference::from_word(preserved_authored_link.register(5).unwrap())
+                .map(CollisionObjectReference::object),
+            Some(authored_tail.vm),
+            "main replacement must preserve authored non-player link five"
+        );
+        assert_eq!(
+            preserved_authored_link.register_pool_slot(5),
+            Ok(Some(authored_tail.arena.slot()))
+        );
+    }
+
+    #[test]
+    fn child_spawn_preserves_authored_parent_link_five() {
+        const SPAWN_EXECUTABLE_FIVE_CHILD: u32 = 0x8a00_5001;
+
+        let mut runtime = RetailRuntime::new(0);
+        let main = spawn_test_object(&mut runtime, ZONE, 273, 0, 0);
+        let authored_tail = spawn_test_object(&mut runtime, ZONE, 274, 2, 0);
+        let parent = spawn_test_object(&mut runtime, ZONE, 275, 2, 0);
+        let mut parent_vm =
+            VmObject::new(parent.vm, vec![SPAWN_EXECUTABLE_FIVE_CHILD, RETURN]).unwrap();
+        parent_vm
+            .set_retail_pool_link(5, authored_tail.vm, authored_tail.arena.slot())
+            .unwrap();
+        runtime.machine.upsert_object(parent_vm).unwrap();
+
+        let frame = runtime.run_frame(&mut SpawnTailHost, 4).unwrap();
+        assert_eq!(frame.spawned_children.len(), 1);
+        let child = frame.spawned_children[0];
+
+        let live_parent = runtime.machine.object(parent.vm).unwrap();
+        assert_eq!(
+            CollisionObjectReference::from_word(live_parent.register(5).unwrap())
+                .map(CollisionObjectReference::object),
+            Some(authored_tail.vm),
+            "creating an ordinary child must not overwrite an authored link five"
+        );
+        assert_eq!(
+            live_parent.register_pool_slot(5),
+            Ok(Some(authored_tail.arena.slot()))
+        );
+
+        let live_child = runtime.machine.object(child.vm).unwrap();
+        assert_eq!(
+            CollisionObjectReference::from_word(live_child.register(5).unwrap())
+                .map(CollisionObjectReference::object),
+            Some(main.vm),
+            "GoolObjectInit must still initialize the new child's player link"
+        );
+        assert_eq!(
+            live_child.register_pool_slot(5),
+            Ok(Some(DEDICATED_PLAYER_POOL_SLOT))
+        );
+    }
+
+    #[test]
+    fn ordinary_materialization_preserves_authored_link_five() {
+        let mut runtime = RetailRuntime::new(0);
+        let main = spawn_test_object(&mut runtime, ZONE, 276, 0, 0);
+        let authored_tail = spawn_test_object(&mut runtime, ZONE, 277, 2, 0);
+        let owner = spawn_test_object(&mut runtime, ZONE, 278, 2, 0);
+        runtime
+            .machine
+            .object_mut(owner.vm)
+            .unwrap()
+            .set_retail_pool_link(5, authored_tail.vm, authored_tail.arena.slot())
+            .unwrap();
+
+        let newcomer = spawn_test_object(&mut runtime, ZONE, 279, 2, 0);
+
+        let live_owner = runtime.machine.object(owner.vm).unwrap();
+        assert_eq!(
+            CollisionObjectReference::from_word(live_owner.register(5).unwrap())
+                .map(CollisionObjectReference::object),
+            Some(authored_tail.vm),
+            "materializing an ordinary entity must not overwrite an authored link five"
+        );
+        assert_eq!(
+            live_owner.register_pool_slot(5),
+            Ok(Some(authored_tail.arena.slot()))
+        );
+
+        let live_newcomer = runtime.machine.object(newcomer.vm).unwrap();
+        assert_eq!(
+            CollisionObjectReference::from_word(live_newcomer.register(5).unwrap())
+                .map(CollisionObjectReference::object),
+            Some(main.vm),
+            "GoolObjectInit must still initialize an ordinary entity's player link"
+        );
+        assert_eq!(
+            live_newcomer.register_pool_slot(5),
             Ok(Some(DEDICATED_PLAYER_POOL_SLOT))
         );
     }
@@ -19433,6 +20607,8 @@ mod tests {
             .set_global_word(CHECKPOINT_ID_GLOBAL, 7 << 8)
             .unwrap();
         runtime.set_random_seed_b(0xd3dc_167e);
+        runtime.frame_index = 4;
+        runtime.machine.set_frames_elapsed(77);
         let mut checkpoint_save = level_snapshot(level);
         checkpoint_save.player_translation = [111, 222, 333];
         runtime.saved_level_state = Some(checkpoint_save.clone());
@@ -19452,7 +20628,7 @@ mod tests {
         };
 
         runtime
-            .install_retail_demo_start(snapshot.clone(), 0x1234_5678, bound)
+            .install_retail_demo_start_with_draw_stamp(snapshot.clone(), 0x1234_5678, bound, 341)
             .unwrap();
 
         assert_eq!(runtime.saved_level_state(), Some(&checkpoint_save));
@@ -19460,6 +20636,11 @@ mod tests {
         assert_eq!(runtime.random_seed_b(), 0xd3dc_167e);
         assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(u32::MAX));
         assert_eq!(runtime.global_word(PBAK_STATE_GLOBAL), Ok(2));
+        assert_eq!(runtime.frame_index(), 10);
+        assert_eq!(runtime.machine.frames_elapsed(), 77);
+        runtime.publish_retail_demo_draw_stamp(67);
+        assert_eq!(runtime.frame_index(), 1);
+        assert_eq!(runtime.machine.frames_elapsed(), 77);
         assert_eq!(
             runtime
                 .level_state_context()
@@ -19475,6 +20656,29 @@ mod tests {
                 .retail_local_bound(),
             bound
         );
+    }
+
+    #[test]
+    fn retail_demo_absolute_draw_stamps_publish_native_quotient_steps() {
+        let mut runtime = RetailRuntime::new(0);
+        runtime.machine.set_frames_elapsed(0x1234_5678);
+
+        for (draw_stamp, expected) in [
+            (340, 10),
+            (357, 10), // repeat after a 17-tick recorded frame
+            (374, 11), // ordinary +1 quotient
+            (373, 10),
+            (424, 12), // exact +51 ticks can advance the quotient by +2
+            (u32::MAX, u32::MAX / 34),
+        ] {
+            runtime.publish_retail_demo_draw_stamp(draw_stamp);
+            assert_eq!(runtime.frame_index(), u64::from(expected));
+            assert_eq!(
+                runtime.machine.frames_elapsed(),
+                0x1234_5678,
+                "the current restart/traversal word changes only in the following GOOL update"
+            );
+        }
     }
 
     #[test]
@@ -19499,7 +20703,7 @@ mod tests {
     }
 
     #[test]
-    fn level_save_captures_native_fields_and_translation_overrides() {
+    fn level_save_translation_precedence_matches_ntsc_u_branch() {
         let level = LevelId::new(0x03).unwrap();
         let mut runtime = RetailRuntime::new_for_level(BOX_COUNT_GLOBAL + 1, level);
         let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
@@ -19526,10 +20730,7 @@ mod tests {
             (process_register::TRANSLATION_X, -101_i32),
             (process_register::TRANSLATION_Y, -202),
             (process_register::TRANSLATION_Z, -303),
-            (
-                process_register::STATUS_B,
-                SAVE_TRANSLATION_FROM_CALLER_STATUS_B as i32,
-            ),
+            (process_register::STATUS_B, 0),
         ] {
             runtime
                 .machine
@@ -19555,6 +20756,26 @@ mod tests {
         assert!(!caller_save.death_resets_counter);
         assert_eq!(caller_save.spawn_words[42], 0xa5);
         assert_eq!(caller_save.box_count, 0x900);
+
+        runtime
+            .machine
+            .object_mut(caller.vm)
+            .unwrap()
+            .set_register(
+                process_register::STATUS_B,
+                SAVE_SUPPRESS_CALLER_TRANSLATION_STATUS_B,
+            )
+            .unwrap();
+        let RetailSaveStateOutcome::Saved(screen_space_caller_save) =
+            runtime.save_level_state(caller, false).unwrap()
+        else {
+            panic!("screen-space caller save must succeed");
+        };
+        assert_eq!(
+            screen_space_caller_save.player_translation,
+            [11, 22, 33],
+            "retail status bit 0x200 suppresses the caller override and retains live Crash"
+        );
 
         let context = runtime.level_state_context.as_mut().unwrap();
         context.checkpoint_id = 7 << 8;

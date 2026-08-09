@@ -4,10 +4,12 @@
 //! recordings contain 304 spawn words and begin frames at byte 1,324. The
 //! Upstream recording contains 511 spawn words and begins frames at byte
 //! 2,152. The extra words are part of that authored structure, not padding:
-//! its draw stamp, bound, 34-tick cadence, and monotonic frames all occur at
-//! the latter offsets. No legal entry contains the 3,592-word `level_spawns`
-//! array found in the reconstructed PC header; `LevelSaveState` does not copy
-//! that process-lifetime registry either.
+//! its draw stamp, bound, initial 34-tick cadence, and later
+//! byte-swapped-looking raw frame words all occur at the latter offsets. Those
+//! words are preserved exactly as little-endian retail input rather than
+//! normalized. No legal entry contains the 3,592-word `level_spawns` array
+//! found in the reconstructed PC header; `LevelSaveState` does not copy that
+//! process-lifetime registry either.
 
 use crate::binary::{Eid, FormatError, Reader};
 

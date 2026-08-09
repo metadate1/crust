@@ -202,11 +202,12 @@ impl RetailPbakPlayback {
     }
 
     #[must_use]
-    pub fn start_payload(&self) -> (RetailLevelSnapshot, u32, Bounds3) {
+    pub fn start_payload(&self) -> (RetailLevelSnapshot, u32, Bounds3, u32) {
         (
             self.prepared.snapshot.clone(),
             self.prepared.player.seed(),
             self.prepared.crash_bound,
+            self.prepared.player.draw_stamp(),
         )
     }
 
@@ -803,8 +804,9 @@ mod tests {
                 end: None,
             }
         );
-        let (_, seed, _) = playback.start_payload();
+        let (_, seed, _, draw_stamp) = playback.start_payload();
         assert_eq!(seed, 0x1234_5678);
+        assert_eq!(draw_stamp, 100);
         playback.mark_started();
         assert!(playback.uses_crash_boundary());
         assert_eq!(playback.pending_recorded_ticks_per_frame(), Some(34));

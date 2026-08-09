@@ -23,26 +23,62 @@ test("launcher keeps the intentionally simple full-game-first hierarchy", async 
   const insert = html.indexOf('id="dropzone"');
   const eject = html.indexOf('id="clearData"');
   const launch = html.indexOf('id="launch"');
-  const unlock = html.indexOf('id="unlockAll"');
   const level = html.indexOf('id="bootLevel"');
+  const advanced = html.indexOf('class="launcher-advanced"');
+  const unlock = html.indexOf('id="unlockAll"');
+  const display = html.indexOf('id="smoothMotion"');
+  const streamFiles = html.indexOf('id="chooseFiles"');
+  const streamFolder = html.indexOf('id="chooseFolder"');
 
   assert.notEqual(insert, -1, "the local BIN/ISO action must remain present");
   assert.notEqual(eject, -1, "the local-data eject action must remain present");
   assert.notEqual(launch, -1, "the launch action must remain present");
-  assert.notEqual(unlock, -1, "the all-levels option must remain present");
   assert.notEqual(level, -1, "the optional direct-level selector must remain present");
+  assert.notEqual(advanced, -1, "advanced and display controls must remain discoverable");
+  assert.notEqual(unlock, -1, "the all-levels option must remain present");
+  assert.notEqual(display, -1, "display upgrades must remain present");
+  assert.notEqual(streamFiles, -1, "extracted stream-file import must remain present");
+  assert.notEqual(streamFolder, -1, "extracted S0-S3 folder import must remain present");
   assert.ok(insert < launch, "Insert BIN/ISO must precede Launch game");
   assert.ok(eject < launch, "the secondary eject action must stay out of launch step two");
-  assert.ok(launch < unlock, "the all-levels option must stay below Launch game");
-  assert.ok(unlock < level, "the optional level selector must stay below the all-levels option");
+  assert.ok(streamFiles < launch, "extracted file selection must remain inside step one");
+  assert.ok(streamFolder < launch, "extracted folder selection must remain inside step one");
+  assert.ok(launch < level, "the individual-level selector must be the first choice below Launch game");
+  assert.ok(level < advanced, "advanced controls must follow the individual-level selector");
+  assert.ok(advanced < unlock, "all-levels and 999 lives must stay inside the advanced disclosure");
+  assert.ok(unlock < display, "display settings must follow the session unlock option");
   assert.match(html, /Insert BIN \/ ISO/);
   assert.match(html, />\s*Launch game\s*</);
+  assert.match(html, /Choose an individual level/);
+  assert.match(html, /Advanced &amp; display/);
+  assert.match(html, /Use extracted NSD \/ NSF streams instead/);
   assert.match(html, /All levels unlocked/);
   assert.match(html, /Includes 999 lives for this session/);
   assert.match(html, /resume and memory card stay untouched/);
   assert.match(html, /Leave on “full game” to begin at the opening/);
   assert.doesNotMatch(html, /Local-data bay|Runtime monitor|Launch Rust runtime/);
   assert.doesNotMatch(html, /standby-glyph|>◆</);
+});
+
+test("audio status distinguishes an active synth from an autoplay-locked context", async () => {
+  const [manifest, app, webaudio] = await Promise.all([
+    readFile(new URL("crates/web/Cargo.toml", root), "utf8"),
+    readFile(new URL("crates/web/src/app.rs", root), "utf8"),
+    readFile(new URL("crates/web/src/webaudio.rs", root), "utf8"),
+  ]);
+
+  assert.match(manifest, /"AudioContextState"/);
+  assert.match(app, /audio\.status_label\(\)/);
+  assert.match(app, /"audioContextState"/);
+  assert.match(
+    webaudio,
+    /AudioContextState::Running\s*=>\s*"SYNTH ACTIVE"/,
+  );
+  assert.match(
+    webaudio,
+    /AudioContextState::Suspended\s*=>\s*"AUDIO LOCKED"/,
+  );
+  assert.match(webaudio, /pub fn context_state_label\(&self\)/);
 });
 
 test("manual browser stepping stays behind an off-by-default Cargo feature", async () => {

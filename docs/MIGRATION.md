@@ -29,8 +29,10 @@ An external `git archive` copy produced these results:
   `13/14`, and map `15`; initial publisher flow begins at `10`.
 - A bonus return target uses the signed transition sentinel `-2`.
 - Every bonus spawn zone is save-restricted. A normal bonus entry carries its parent snapshot;
-  only a fresh direct boot seeds a one-shot same-level death/restart snapshot. Direct-boot bonus
-  completion still needs an explicit host destination and is not treated as a certified round trip.
+  only a fresh direct boot seeds a one-shot same-level death/restart snapshot. If WillC state 32
+  loads that exact synthetic snapshot, the host consumes it and returns to Title/Main Menu; real
+  parent-carried returns remain unchanged. The browser audit joins at the separately proven parsed
+  state-32 boundary and verifies the production downstream path, not physical portal traversal.
   Each LevelUpdate publishes the destination zone graphics flags to GOOL global 30 before spawning;
   legal bonus zones use `0x2002`, which selects the authored WARP LoadState branch. A
   different-level LoadState clears bonus global 60 and captures its saved level before returning to
@@ -64,8 +66,9 @@ An external `git archive` copy produced these results:
   frame/draw stamps; serialized state PCs and animation offsets never become native pointers.
   Toxic Waste's LEA-created `BaraC` type-zero descriptor is decoded from the live same-object
   process words, draws no geometry, and retains native's standard non-vertex collision bound.
-  Process-local descriptor types one through five are rejected until their complete variable
-  payload and rendering behavior are represented.
+  Process-local descriptor types one through five are represented through the same bounded vertex,
+  sprite, font, text, and fragment decoders as pair-backed animation data; malformed variable
+  payloads remain checked errors rather than borrowed or reinterpreted pointers.
 - ZDAT runtime pointer slots are treated as opaque serialization fields. Zone/world/path EIDs,
   SLST polygon IDs and WGEO word/vertex indices remain validated offsets and values; the Rust scene
   builder never writes host addresses back into source bytes.

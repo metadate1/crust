@@ -42,6 +42,10 @@ function progression(serial) {
     levelCount: 1,
     levelsUnlocked: serial + 1,
     islandCameraState: serial & 1,
+    gemCount: serial & 0x1f,
+    keyCount: serial & 1,
+    itemPool1: 0x1000_0000 + serial,
+    itemPool2: 0x2000_0000 + serial,
   };
 }
 

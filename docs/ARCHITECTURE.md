@@ -68,14 +68,17 @@ generation, mixing, input mapping and storage schemas remain native-testable.
    During attract playback, the PBAK
    adapter installs its checked player/camera snapshot, RNG, bounds and spawn words, then replaces
    live controller input with each recorded 32-bit pad word and following-frame tick cadence.
-   Full progression and the remaining SPU effects/voice-arbitration behavior remain later host
-   boundaries.
+   Authored title, gameplay, bonus, boss, completion, ending, save/load, and campaign progression
+   are mounted through the same host boundary. Remaining certification work concerns exact route
+   coverage and low-level SPU/CD edge behavior, not a separate progression implementation.
 6. User game bytes are released on reload and are never serialized. Only checksummed 128-byte
    progression/options records enter `localStorage`.
 
 ## Rendering
 
-The renderer library keeps a logical 512×240 PSX-style viewport and produces ordered triangles.
+The renderer library defaults to a logical 512×240 PSX-style viewport and produces ordered
+triangles; optional presentation settings can widen or resize that logical viewport without
+changing the authoritative 30 Hz simulation.
 Texture pages are 64 KiB and decoded in 4-bit indexed, 8-bit indexed or BGR555/STP modes. Cache
 keys include page generation, palette, region and blend mode. A bounded generation-aware cache
 prevents stale textures after paging. The live browser stage now submits commands through the same
@@ -275,14 +278,19 @@ The GOOL VM distinguishes external and shared/global code segments with checked 
 values. Logical code PCs, storage indices and entry slots are encoded with zero low bits and
 validated independently from EIDs; animation references intentionally retain byte granularity. It
 implements absolute global calls with typed frames and argument cleanup, returns,
-optional/null pointer input semantics, scalar process operations, state-change yields and the
+optional/null pointer input semantics, scalar process operations, state-change links and the
 child-spawn host effect needed by the characterized Crash boot sequence. Its bounded 32-bit process
 array is also the stack backing store: `init_sp`, frame-relative operands, object-register operands,
 initial frames and global-call frames therefore observe the retail overlap without native pointers.
 The complete validated state-descriptor table supplies target flags for guarded state links. The
 ordinary runner stops at a synchronous host boundary; `run_with_host_effects` applies the callback
 before the following instruction while preserving the same interpreter invocation. Retail
-animation data is retained separately from code. Checked tagged animation references, packed and
+runtime instruction budgets are watchdog chunk sizes, not cooperative-frame yields. A production
+object update resumes through consecutive chunks until an authored return, animation or host halt,
+carrying the opcode-`0x82` condition latch and applying the animation gate only at the native
+invocation boundary. An independent 4,096-instruction ceiling contains malformed nonterminating
+local data without changing the 67-instruction browser chunk size. Retail animation data is
+retained separately from code. Checked tagged animation references, packed and
 operand-selected animation changes use explicit frame/draw counters. Host effects `0x83` and
 `0x84` synchronously refresh the persistent local animation bound before the interpreter proceeds;
 `0x83` honors the status-B `0x18` gate plus its range/force condition, while `0x84` is unconditional.
@@ -444,8 +452,9 @@ title entities retain their MDAT descriptor provenance, while native `cur_zone` 
 object zone, origin and colors; children inherit typed parent state. Any checked
 execution failure quarantines that exact generational object identity, preventing a pre-incremented
 program counter from resuming past an unsupported operation while healthy siblings continue.
-Box special cases, some host effects, full progression and several dynamic object-rendering modes
-remain outside this bridge.
+Box interactions, mounted campaign progression, and all five dynamic object-animation descriptor
+families execute inside this bridge. Unobserved host-effect forms and low-level hardware edge cases
+remain explicit checked gaps rather than falling through to a compatibility runtime.
 
 After the mount-time life/fruit/pickup roots, the bridge applies the object-creating
 `LevelInitMisc(1)` branches under logical root four: level `0x05` uses executable 9/subtype 4,
@@ -464,6 +473,13 @@ same-level restart path. GOOL misc 12/11 applies the global reset synchronously 
 instruction, so a `SaveState` later in the same handler observes checkpoint `-1` rather than a
 stale browser mirror.
 
+`LevelSaveState` starts from Crash's live translation. A spatial caller whose `status_b` bit
+`0x200` is clear may replace it, while a screen-space/2D caller with that bit set must leave the
+Crash translation intact; a nonzero checkpoint translation has final precedence. This ordering is
+pinned to the owned NTSC-U executable: the branch at `0x800264e4` skips the caller-copy block when
+bit `0x200` is set. The historical C transcription inverted that branch, so the Rust runtime
+deliberately follows the retail instruction stream rather than reproducing the transcription bug.
+
 The different-level `LEVEL_END` path carries scalar state into a freshly mounted runtime. A
 same-level `LoadState` issued from inside `LEVEL_END` remains a checked resumable-host boundary:
 continuing the interrupted handler needs a nested restart continuation that is not yet represented.
@@ -471,9 +487,13 @@ A legally local scan of all 44 retail pairs found zero authored occurrences of t
 All five bonus spawn zones carry the source save-restricted flag. A normal session mount retains
 the parent-level snapshot for authored `-2` return. A fresh direct boot has no native parent
 snapshot, so only that advertised host entry path arms a one-shot same-level restart snapshot for
-death recovery; session-carried bonus entry never enables the fallback. Completing a directly
-booted bonus with that synthetic snapshot still needs an explicit host return policy and is not
-claimed as a complete bonus round trip. `set_level_state_context` publishes the current zone's
+death recovery; session-carried bonus entry never enables the fallback. If WillC's authored
+state-32 WARP loads that exact synthetic snapshot, the host consumes it and publishes a coherent
+Title/Main Menu destination rather than trapping the direct selection in a completion loop. Real
+parent-carried bonus returns are not reclassified. The owned-BIN browser audit joins at a
+separately proven parsed state-32 boundary, then exercises the production binder, CardC,
+`LoadState`, classifier, `LEVEL_END`, and asynchronous Title mount; it does not claim physical
+portal traversal. `set_level_state_context` publishes the current zone's
 graphics flags to GOOL global 30 at initial mount, zone changes, remounts, and hard restarts before
 the next spawn/update pass. Legal bonus zones publish `0x2002`; WillC's WARP state tests bit
 `0x2000` before selecting its LoadState return path. Different-level `LoadState` preserves the

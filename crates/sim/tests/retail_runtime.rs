@@ -113,12 +113,14 @@ impl ProgramHost for RecordingHost {
             12 => vec![Instruction::encode(0x00, REG_A, REG_B), 0x9110_5001, RETURN],
             // Read the creator/parent's register zero, proving the typed link.
             5 => vec![Instruction::encode(0x11, PARENT_REG0, REG_A), RETURN],
-            // Yield a retail state change for host-backed state rebinding.
+            // Link to a host-backed state. Native rebinds it and resumes the
+            // target code in this same object update.
             7 => vec![CHANGE_TO_STATE_ONE],
             // Fail after fetch so a retry would incorrectly skip to RETURN.
             8 => vec![Instruction::encode(0xff, REG_A, REG_B), RETURN],
-            // Test the port-zero retail CROSS-tapped control query.
-            10 => vec![0x1a00_1040],
+            // Test the port-zero retail CROSS-tapped control query, followed
+            // by an authored halt so the synthetic program is well formed.
+            10 => vec![0x1a00_1040, RETURN],
             _ => vec![RETURN],
         };
         let mut object = VmObject::new(binding.object.vm(), code).map_err(|_| "VM object")?;
@@ -183,7 +185,9 @@ fn browser_pad_snapshot_reaches_retail_gool_before_the_frame_runs() {
         .unwrap();
     let object = report.spawn_attempts[0].result.as_ref().unwrap();
 
-    assert_eq!(report.frame.executions[0].result.as_ref().unwrap().steps, 1);
+    let execution = report.frame.executions[0].result.as_ref().unwrap();
+    assert_eq!(execution.reason, HaltReason::Halted);
+    assert_eq!(execution.steps, 2);
     assert_eq!(
         runtime
             .machine()
@@ -467,7 +471,7 @@ fn full_native_pool_returns_null_spawns_without_faulting_the_parents() {
 }
 
 #[test]
-fn retail_state_changes_rebind_before_the_next_cooperative_frame() {
+fn retail_state_changes_rebind_and_continue_in_the_same_native_update() {
     let entities = [entity(30, 3, 7, 0)];
     let neighbors = [NeighborZone {
         eid: ZONE_A,
@@ -483,7 +487,7 @@ fn retail_state_changes_rebind_before_the_next_cooperative_frame() {
 
     assert_eq!(
         first.frame.executions[0].result.as_ref().unwrap().reason,
-        HaltReason::StateChanged(1)
+        HaltReason::Halted
     );
     assert_eq!(runtime.machine().object(object.vm()).unwrap().state(), 1);
     assert_eq!(
@@ -493,13 +497,6 @@ fn retail_state_changes_rebind_before_the_next_cooperative_frame() {
             state: 1,
             vm: object.vm().get(),
         })
-    );
-
-    let second = runtime.run_frame(&mut host, 1).unwrap();
-    assert_eq!(second.frame_index, 1);
-    assert_eq!(
-        second.executions[0].result.as_ref().unwrap().reason,
-        HaltReason::Halted
     );
 }
 
@@ -558,7 +555,7 @@ fn production_rebind_runs_transition_block_and_its_host_effect_synchronously() {
 
     assert_eq!(
         report.frame.executions[0].result.as_ref().unwrap().reason,
-        HaltReason::StateChanged(1)
+        HaltReason::Halted
     );
     assert_eq!(runtime.machine().object(object.vm()).unwrap().state(), 1);
     assert!(!runtime.is_object_faulted(object));
@@ -641,7 +638,7 @@ fn transition_state_link_rebinds_the_next_state_before_the_frame_returns() {
     assert!(!runtime.is_object_faulted(object));
     assert_eq!(
         report.frame.executions[0].result.as_ref().unwrap().reason,
-        HaltReason::StateChanged(1)
+        HaltReason::Halted
     );
     assert!(report.frame.effects.iter().any(|effect| matches!(
         effect,

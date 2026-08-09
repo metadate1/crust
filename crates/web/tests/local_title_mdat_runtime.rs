@@ -8,17 +8,20 @@ use crust_formats::stream::{
     LevelId, Nsd, Nsf, ObjectVertexKind, RetailPathId, RetailZoneGraph, StreamKind, StreamName,
     ZoneEntity, ZoneEntityPathPoint, ZoneHeader, load_title_mdat, parse_nsd, parse_nsf,
 };
-use crust_platform::input::{PAD_CROSS, PAD_DOWN, PAD_START, PadState};
+use crust_platform::input::{
+    PAD_CIRCLE, PAD_CROSS, PAD_DOWN, PAD_SQUARE, PAD_START, PAD_TRIANGLE, PadState,
+};
 use crust_sim::camera::{
     RetailCameraEffect, RetailCameraInput, RetailCameraLocation, RetailCameraOutcome,
     RetailCameraRuntime, RetailIslandCameraInput,
 };
-use crust_sim::card::{CardOperation, CardOutcome, SaveData, VirtualCard};
+use crust_sim::card::{CardOperation, CardOutcome, CardPayload, SaveData, Slot, VirtualCard};
 use crust_sim::flow::{TitlePhase, TitleScreen};
 use crust_sim::gool::{
-    CardHostRequest, GAME_STATE_GLOBAL, LEVELS_UNLOCKED_GLOBAL, ModelVertexSource,
-    NEXT_DISPLAY_GLOBAL, RetailPadSnapshot, RetailSolidEnvironment, TITLE_STATE_GLOBAL, VmEffect,
-    VmObject, VmStateProgram,
+    CURRENT_MAP_LEVEL_GLOBAL, CardHostRequest, GAME_STATE_GLOBAL, INITIAL_LIFE_COUNT_GLOBAL,
+    LEVELS_UNLOCKED_GLOBAL, LIFE_COUNT_GLOBAL, ModelVertexSource, NEXT_DISPLAY_GLOBAL,
+    RetailPadSnapshot, RetailSolidEnvironment, SAVED_TITLE_STATE_GLOBAL, TITLE_STATE_GLOBAL,
+    VmEffect, VmObject, VmStateProgram,
 };
 use crust_sim::object_arena::NeighborZone;
 use crust_sim::object_arena::SpawnError;
@@ -34,6 +37,8 @@ use crust_sim::zone_lifecycle::{OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycl
 
 const RETAIL_GLOBAL_WORDS: usize = 256;
 const RETAIL_INSTRUCTION_BUDGET: usize = 67;
+const CARD_SCREEN_MODE_GLOBAL: usize = 1;
+const CARD_SCREEN_SAVE_MODE: u32 = 2;
 const ACTIVE_ZONE_DISPLAY_BIT: u32 = 2;
 // TitleLoadScreen(type = 0) preserves the category tail from the preceding
 // all-enabled word and adds the image/title-loaded bits. TitleUpdate then adds
@@ -141,6 +146,14 @@ impl ProgramHost for TitleMdatHost<'_> {
 struct TitleFlowHost<'assets, 'card> {
     inner: NsfProgramHost<'assets>,
     card: &'card mut VirtualCard,
+    trace: Option<&'card mut Vec<CardRequestTrace>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CardRequestTrace {
+    request: CardHostRequest,
+    current: SaveData,
+    response: CardHostResponse,
 }
 
 impl<'assets, 'card> TitleFlowHost<'assets, 'card> {
@@ -153,6 +166,21 @@ impl<'assets, 'card> TitleFlowHost<'assets, 'card> {
         Self {
             inner: NsfProgramHost::new(metadata, nsf, nsf_bytes),
             card,
+            trace: None,
+        }
+    }
+
+    fn traced(
+        metadata: &'assets Nsd,
+        nsf: &'assets Nsf,
+        nsf_bytes: &'assets [u8],
+        card: &'card mut VirtualCard,
+        trace: &'card mut Vec<CardRequestTrace>,
+    ) -> Self {
+        Self {
+            inner: NsfProgramHost::new(metadata, nsf, nsf_bytes),
+            card,
+            trace: Some(trace),
         }
     }
 }
@@ -230,11 +258,19 @@ impl ProgramHost for TitleFlowHost<'_, '_> {
             Ok(CardOutcome::Loaded(save)) => Some(save),
             Ok(CardOutcome::Complete) | Err(_) => None,
         };
-        Ok(CardHostResponse {
+        let response = CardHostResponse {
             result: i32::from(outcome.is_err()),
             loaded,
             published: self.card.published_state(),
-        })
+        };
+        if let Some(trace) = &mut self.trace {
+            trace.push(CardRequestTrace {
+                request,
+                current,
+                response,
+            });
+        }
+        Ok(response)
     }
 }
 
@@ -400,6 +436,14 @@ fn title_screen_fixture(screen: TitleScreen) -> (&'static str, u32, bool) {
                 | DISPLAY_TITLE_LOADED,
             false,
         ),
+        TitleScreen::GameOver => (
+            "0b_pZ",
+            DISPLAY_WORLD
+                | DISPLAY_OBJECTS_AND_ANIMATION
+                | DISPLAY_CAMERA_UPDATE
+                | DISPLAY_TITLE_LOADED,
+            false,
+        ),
         TitleScreen::Map => (
             "1a_pZ",
             DISPLAY_WORLD
@@ -418,6 +462,178 @@ fn title_screen_fixture(screen: TitleScreen) -> (&'static str, u32, bool) {
         ),
         _ => panic!("the authored menu harness does not mount {screen:?}"),
     }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR or C1_DISC_IMAGE to legally local NTSC-U game data"]
+fn authored_carried_game_over_routes_are_characterized() {
+    let (nsd, nsf, nsf_bytes) = load_legally_local_title_pair();
+
+    let mut neutral = AuthoredTitleHarness::carried_game_over(&nsd, &nsf, &nsf_bytes);
+    assert_eq!(neutral.loaded, [(0, TitleScreen::GameOver)]);
+    assert_eq!(
+        neutral.runtime.level_state_context().unwrap().location.path,
+        (RetailPathId {
+            zone: Eid::from_name("0b_pZ").unwrap(),
+            index: 0,
+        }),
+        "the carried fatal-life state must mount the authored 0b_pZ world"
+    );
+    assert_eq!(neutral.runtime.global_word(GAME_STATE_GLOBAL), Ok(0x200));
+    assert_eq!(
+        neutral.runtime.global_word(TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::GameOver.raw())
+    );
+    assert_eq!(neutral.runtime.global_word(LIFE_COUNT_GLOBAL), Ok(0));
+    assert_eq!(
+        neutral.runtime.global_word(INITIAL_LIFE_COUNT_GLOBAL),
+        Ok(4 << 8)
+    );
+    assert_eq!(
+        neutral
+            .runtime
+            .retail_title_presentation()
+            .unwrap()
+            .unwrap()
+            .phase,
+        TitlePhase::Blank
+    );
+    neutral.wait_until_ready(32);
+    assert_eq!(neutral.frame, 10, "authored Game Over ready-frame drift");
+    assert_eq!(neutral.runtime.arena().len(), 10);
+    while neutral.frame < 157 {
+        neutral.step(0);
+    }
+    assert_eq!(
+        neutral.runtime.arena().len(),
+        11,
+        "the authored Game Over dwell object must appear before pre-frame 158"
+    );
+    while neutral.frame < 277 {
+        neutral.step(0);
+    }
+    assert_eq!(
+        neutral.runtime.arena().len(),
+        10,
+        "the authored Game Over dwell object must retire before pre-frame 278"
+    );
+    while neutral.frame < 400 {
+        neutral.step(0);
+    }
+    let neutral_presentation = neutral
+        .runtime
+        .retail_title_presentation()
+        .unwrap()
+        .unwrap();
+    assert_eq!(neutral_presentation.screen, TitleScreen::GameOver);
+    assert_eq!(neutral_presentation.next_screen, TitleScreen::GameOver);
+    assert_eq!(neutral_presentation.phase, TitlePhase::Ready);
+    assert_eq!(neutral.runtime.global_word(GAME_STATE_GLOBAL), Ok(0x200));
+    assert_eq!(neutral.runtime.global_word(LIFE_COUNT_GLOBAL), Ok(0));
+    assert!(neutral.transitions.is_empty());
+
+    let mut map = AuthoredTitleHarness::carried_game_over(&nsd, &nsf, &nsf_bytes);
+    map.wait_until_ready(32);
+    map.step(PAD_CROSS);
+    assert_eq!(map.frame, 11);
+    let map_fade = map.runtime.retail_title_presentation().unwrap().unwrap();
+    assert_eq!(map_fade.screen, TitleScreen::GameOver);
+    assert_eq!(map_fade.next_screen, TitleScreen::Map);
+    assert_eq!(map_fade.phase, TitlePhase::FadingOut);
+    assert_eq!(
+        map.runtime.global_word(TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::Map.raw())
+    );
+    assert_eq!(
+        map.runtime.global_word(LIFE_COUNT_GLOBAL),
+        Ok(4 << 8),
+        "the default Game Over choice restores the configured life stock immediately"
+    );
+    while map.frame < 19 {
+        map.step(0);
+    }
+    assert_eq!(
+        map.runtime
+            .retail_title_presentation()
+            .unwrap()
+            .unwrap()
+            .phase,
+        TitlePhase::FinishedFadingOut
+    );
+    map.step(0);
+    assert_eq!(map.frame, 20);
+    assert_eq!(map.loaded.last(), Some(&(20, TitleScreen::Map)));
+    let map_blank = map.runtime.retail_title_presentation().unwrap().unwrap();
+    assert_eq!(map_blank.screen, TitleScreen::Map);
+    assert_eq!(map_blank.phase, TitlePhase::Blank);
+    while map.frame < 22 {
+        map.step(0);
+    }
+    assert_eq!(
+        map.runtime.global_word(GAME_STATE_GLOBAL),
+        Ok(0),
+        "the atomic Map controller clears the carried Game Over state on frame 22"
+    );
+    map.step(0);
+    assert_eq!(map.frame, 23);
+    assert_eq!(
+        map.runtime.global_word(GAME_STATE_GLOBAL),
+        Ok(0),
+        "the cleared Map game state remains stable on frame 23"
+    );
+    map.wait_until_ready(32);
+    assert_eq!(map.frame, 30, "post-Game-Over Map ready-frame drift");
+    assert_eq!(map.runtime.global_word(LIFE_COUNT_GLOBAL), Ok(4 << 8));
+    assert!(map.transitions.is_empty());
+
+    let mut menu = AuthoredTitleHarness::carried_game_over(&nsd, &nsf, &nsf_bytes);
+    menu.wait_until_ready(32);
+    menu.step(PAD_DOWN);
+    menu.step(0);
+    menu.step(PAD_CROSS);
+    assert_eq!(menu.frame, 13);
+    assert_eq!(
+        menu.runtime.global_word(TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::MainMenu.raw()),
+        "the atomic alternate-selection tail requests Main Menu on its confirmation frame"
+    );
+    menu.step(0);
+    menu.step(0);
+    assert_eq!(menu.frame, 15);
+    let menu_fade = menu.runtime.retail_title_presentation().unwrap().unwrap();
+    assert_eq!(menu_fade.screen, TitleScreen::GameOver);
+    assert_eq!(menu_fade.next_screen, TitleScreen::MainMenu);
+    assert_eq!(menu_fade.phase, TitlePhase::FadingOut);
+    assert_eq!(
+        menu.runtime.global_word(TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::MainMenu.raw())
+    );
+    while menu.frame < 21 {
+        menu.step(0);
+    }
+    assert_eq!(
+        menu.runtime
+            .retail_title_presentation()
+            .unwrap()
+            .unwrap()
+            .phase,
+        TitlePhase::FinishedFadingOut
+    );
+    menu.step(0);
+    assert_eq!(menu.frame, 22);
+    assert_eq!(menu.loaded.last(), Some(&(22, TitleScreen::MainMenu)));
+    let menu_blank = menu.runtime.retail_title_presentation().unwrap().unwrap();
+    assert_eq!(menu_blank.screen, TitleScreen::MainMenu);
+    assert_eq!(menu_blank.phase, TitlePhase::Blank);
+    menu.wait_until_ready(32);
+    assert_eq!(menu.frame, 32, "post-Game-Over MainMenu ready-frame drift");
+    assert_eq!(menu.runtime.global_word(GAME_STATE_GLOBAL), Ok(0x200));
+    assert_eq!(menu.runtime.global_word(LIFE_COUNT_GLOBAL), Ok(4 << 8));
+    assert_eq!(
+        menu.runtime.global_word(INITIAL_LIFE_COUNT_GLOBAL),
+        Ok(4 << 8)
+    );
+    assert!(menu.transitions.is_empty());
 }
 
 #[test]
@@ -537,6 +753,495 @@ fn authored_main_menu_routes_and_password_card_handshake_are_characterized() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR or C1_DISC_IMAGE to legally local NTSC-U game data"]
+fn authored_card_save_then_later_title_load_round_trip_reaches_gameplay() {
+    let (nsd, nsf, nsf_bytes) = load_legally_local_title_pair();
+    let expected_save = SaveData {
+        level_count: 8,
+        initial_lives: 7 << 8,
+        unknown_6190c: 0x1234_5678,
+        mono: true,
+        sfx_volume: 239,
+        music_volume: 223,
+        item_pool_1: 0x2000_0000,
+        gem_count: 1,
+        ..SaveData::default()
+    };
+
+    // State 13 with CardC mode two is the exact authored save screen entered
+    // from a gameplay carry. Start at that boundary, but let CardC perform its
+    // own rescan, acknowledgement, slot selection, and physical save.
+    let mut saving = AuthoredTitleHarness::main_menu(&nsd, &nsf, &nsf_bytes);
+    saving.wait_until_ready(32);
+    saving
+        .runtime
+        .restore_card_save_data(expected_save)
+        .unwrap();
+    saving
+        .runtime
+        .set_global_word(CARD_SCREEN_MODE_GLOBAL, CARD_SCREEN_SAVE_MODE)
+        .unwrap();
+    saving
+        .runtime
+        .set_global_word(TITLE_STATE_GLOBAL, TitleScreen::Password.raw())
+        .unwrap();
+    saving.step(0);
+    assert_eq!(
+        saving.wait_for_loaded(TitleScreen::Password, 64),
+        Some(20),
+        "carried retail save-screen mount-frame drift"
+    );
+    saving.wait_until_ready(64);
+    for _ in 0..64 {
+        if saving.card.published_state().flags.bits() == 0
+            && saving
+                .card_requests
+                .iter()
+                .any(|trace| trace.request.operation == 2)
+        {
+            break;
+        }
+        saving.step(0);
+    }
+    assert_eq!(
+        saving
+            .card_requests
+            .iter()
+            .map(|trace| (trace.request.operation, trace.request.part_index))
+            .collect::<Vec<_>>(),
+        [(10, 0), (10, 0), (2, 0)],
+        "CardC must complete its authored pre-save rescan handshake"
+    );
+    assert_eq!(saving.card.published_state().part_count, 0);
+    // CardC retains its native empty-card presentation dwell after the host
+    // handshake becomes idle; input during that authored interval is ignored.
+    for _ in 0..96 {
+        saving.step(0);
+    }
+    let card_controller = saving
+        .runtime
+        .arena()
+        .main_object()
+        .and_then(|arena| saving.runtime.object_for_arena(arena))
+        .and_then(|handle| saving.runtime.machine().object(handle.vm()).ok())
+        .expect("CardC must own the save screen's main-object slot");
+    assert_eq!(
+        (card_controller.state(), card_controller.pc()),
+        (24, 2_273),
+        "mode two must be executing CardC's authored save-selection state"
+    );
+
+    saving.tap(PAD_CROSS);
+    for _ in 0..192 {
+        if saving
+            .card_requests
+            .iter()
+            .any(|trace| trace.request.operation == 3)
+        {
+            break;
+        }
+        saving.step(0);
+    }
+    let save_request = saving
+        .card_requests
+        .iter()
+        .find(|trace| trace.request.operation == 3)
+        .copied()
+        .expect("CardC must issue a save request on Cross");
+    assert_eq!(
+        (
+            save_request.request.operation,
+            save_request.request.part_index
+        ),
+        (3, 0),
+        "CardC must use retail SaveSelected for the empty card"
+    );
+    assert_eq!(save_request.current, expected_save);
+    assert_eq!(save_request.response.result, 0);
+    assert_eq!(save_request.response.loaded, None);
+
+    let saved_payload = match saving.card.slots()[0] {
+        Slot::Valid(payload) => payload,
+        slot => panic!("CardC must author slot zero, got {slot:?}"),
+    };
+    assert_eq!(saved_payload.as_bytes().len(), 128);
+    assert!(saved_payload.is_valid());
+    assert_eq!(saved_payload, CardPayload::encode(expected_save));
+    assert_eq!(saved_payload.decode(), Ok(expected_save));
+    assert_eq!(saving.card.current_slot(), Some(0));
+    assert_eq!(saving.card.published_state().part_count, 1);
+    assert!(
+        saving.card.slots()[1..]
+            .iter()
+            .all(|slot| *slot == Slot::Empty)
+    );
+
+    // This carried save presentation has no authored return-to-menu branch:
+    // the ordinary cancel/menu/face inputs all leave CardC in state 13 after
+    // the successful write. A later title session is therefore the honest
+    // persistence boundary for the load half of this round trip.
+    let card_after_save = saving.card.clone();
+    for button in [PAD_TRIANGLE, PAD_START, PAD_CIRCLE, PAD_SQUARE, PAD_DOWN] {
+        saving.tap(button);
+        for _ in 0..64 {
+            saving.step(0);
+        }
+        assert_eq!(
+            saving.runtime.global_word(TITLE_STATE_GLOBAL),
+            Ok(TitleScreen::Password.raw())
+        );
+        assert_eq!(saving.card, card_after_save);
+    }
+
+    // A later browser/title session receives the card object produced above;
+    // no test-side payload injection or high-level restore occurs on this leg.
+    let saved_card = std::mem::take(&mut saving.card);
+    let mut loading = AuthoredTitleHarness::main_menu_with_card(&nsd, &nsf, &nsf_bytes, saved_card);
+    assert_eq!(loading.runtime.card_save_data(), Ok(default_title_save()));
+    loading.wait_until_ready(32);
+    loading.tap(PAD_DOWN);
+    loading.tap(PAD_CROSS);
+    assert_eq!(loading.wait_for_loaded(TitleScreen::Load, 32), Some(22));
+    loading.wait_until_ready(32);
+    for _ in 0..64 {
+        if loading.card.published_state().flags.bits() == 0
+            && loading.card.published_state().part_count == 1
+        {
+            break;
+        }
+        loading.step(0);
+    }
+    assert_eq!(loading.card.published_state().flags.bits(), 0);
+    assert_eq!(loading.card.published_state().part_count, 1);
+    assert_eq!(
+        loading
+            .card_requests
+            .iter()
+            .map(|trace| (trace.request.operation, trace.request.part_index))
+            .collect::<Vec<_>>(),
+        [(10, 0), (2, 0)],
+        "fresh-session CardC must rescan the persisted slot before accepting input"
+    );
+    assert!(loading.card_loads.is_empty());
+    assert_eq!(
+        loading.runtime.card_save_data(),
+        Ok(SaveData {
+            gem_count: 1,
+            ..default_title_save()
+        }),
+        "CardC may preview the selected part's packed gem count, but must not restore the payload before confirmation"
+    );
+
+    loading.tap(PAD_CROSS);
+    for _ in 0..64 {
+        if !loading.card_loads.is_empty()
+            && loading.runtime.global_word(TITLE_STATE_GLOBAL) == Ok(TitleScreen::Map.raw())
+        {
+            break;
+        }
+        loading.step(0);
+    }
+    assert_eq!(loading.card_loads.len(), 1);
+    assert_eq!(loading.card_loads[0].1, expected_save);
+    let load_request = loading
+        .card_requests
+        .iter()
+        .find(|trace| trace.request.operation == 4)
+        .copied()
+        .expect("CardC must issue retail LoadSelected");
+    assert_eq!(load_request.request.part_index, 0);
+    assert_eq!(load_request.response.result, 0);
+    assert_eq!(load_request.response.loaded, Some(expected_save));
+    assert_eq!(
+        loading
+            .card_requests
+            .iter()
+            .map(|trace| (trace.request.operation, trace.request.part_index))
+            .collect::<Vec<_>>(),
+        [(10, 0), (2, 0), (4, 0)],
+        "only the authored rescan and confirmed LoadSelected handshake may touch the card"
+    );
+    assert_eq!(loading.runtime.card_save_data(), Ok(expected_save));
+    assert_eq!(
+        CardPayload::encode(loading.runtime.card_save_data().unwrap()),
+        saved_payload,
+        "the authored load must restore every represented payload byte"
+    );
+    assert_eq!(
+        loading.runtime.global_word(GAME_STATE_GLOBAL),
+        Ok(0x100),
+        "CardC's successful-load branch must enter gameplay state"
+    );
+    assert_eq!(
+        loading.runtime.global_word(TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::Map.raw())
+    );
+
+    assert!(loading.wait_for_loaded(TitleScreen::Map, 64).is_some());
+    loading.wait_until_ready(64);
+    for _ in 0..120 {
+        loading.step(0);
+    }
+    loading.step(PAD_CROSS);
+    assert_eq!(
+        loading.transitions.last(),
+        Some(&(loading.frame, 0x11)),
+        "the restored eighth map node must request Hog Wild"
+    );
+
+    let report = {
+        let mut host = TitleFlowHost::new(&nsd, &nsf, &nsf_bytes, &mut loading.card);
+        loading
+            .runtime
+            .finish_level_transition(&mut host, 0x11)
+            .expect("the loaded map session must export a gameplay carry")
+    };
+    assert!(report.event_failures.is_empty());
+    assert_eq!(report.resolved.level, LevelId::new_const(0x11));
+    let gameplay = RetailRuntime::new_from_session(
+        RETAIL_GLOBAL_WORDS,
+        LevelId::new_const(0x11),
+        report.carry,
+    )
+    .expect("Hog Wild must import the card-restored session carry");
+    assert_eq!(gameplay.card_save_data(), Ok(expected_save));
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR or C1_DISC_IMAGE to legally local NTSC-U game data"]
+fn authored_valid_and_invalid_retail_password_routes_are_characterized() {
+    let (nsd, nsf, nsf_bytes) = load_legally_local_title_pair();
+    let initial_save = default_title_save();
+
+    let mut valid = AuthoredTitleHarness::main_menu(&nsd, &nsf, &nsf_bytes);
+    let valid_card_before = valid.card.clone();
+    valid.wait_until_ready(32);
+    valid.tap(PAD_DOWN);
+    valid.tap(PAD_DOWN);
+    valid.tap(PAD_CROSS);
+    assert_eq!(valid.wait_for_loaded(TitleScreen::Load, 32), Some(24));
+    valid.wait_until_ready(32);
+    assert_eq!(valid.frame, 34, "authored Password ready-frame drift");
+
+    // Eight-symbol retail password for the first 2%-progress save point.
+    for button in [
+        PAD_CIRCLE,
+        PAD_SQUARE,
+        PAD_CIRCLE,
+        PAD_SQUARE,
+        PAD_CIRCLE,
+        PAD_CIRCLE,
+        PAD_TRIANGLE,
+        PAD_SQUARE,
+    ] {
+        valid.tap(button);
+    }
+    let restored = SaveData {
+        level_count: 2,
+        ..initial_save
+    };
+    assert_eq!(
+        valid.frame, 50,
+        "eight password pulses must consume 16 frames"
+    );
+    assert_eq!(valid.runtime.card_save_data(), Ok(restored));
+    assert_eq!(
+        valid.runtime.global_word(LEVELS_UNLOCKED_GLOBAL),
+        Ok(2),
+        "the retail decoder must publish the restored unlock count"
+    );
+    assert_eq!(
+        valid.runtime.global_word(CURRENT_MAP_LEVEL_GLOBAL),
+        Ok(2),
+        "the retail decoder must select the restored map position"
+    );
+    assert_eq!(
+        valid.card, valid_card_before,
+        "password restore must not manufacture a virtual-card write"
+    );
+
+    valid.tap(PAD_CROSS);
+    assert_eq!(valid.frame, 52);
+    assert_eq!(
+        valid.runtime.global_word(TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::Map.raw()),
+        "Cross must accept a decoded password and request the world map"
+    );
+    assert_eq!(valid.wait_for_loaded(TitleScreen::Map, 32), Some(60));
+    valid.wait_until_ready(32);
+    assert_eq!(valid.frame, 70, "restored Map ready-frame drift");
+    assert_eq!(valid.runtime.card_save_data(), Ok(restored));
+    assert_eq!(valid.card, valid_card_before);
+    assert!(valid.transitions.is_empty());
+
+    let mut invalid = AuthoredTitleHarness::main_menu(&nsd, &nsf, &nsf_bytes);
+    let invalid_card_before = invalid.card.clone();
+    let invalid_resume_payload_before = CardPayload::encode(initial_save);
+    invalid.wait_until_ready(32);
+    invalid.tap(PAD_DOWN);
+    invalid.tap(PAD_DOWN);
+    invalid.tap(PAD_CROSS);
+    assert_eq!(invalid.wait_for_loaded(TitleScreen::Load, 32), Some(24));
+    invalid.wait_until_ready(32);
+    for _ in 0..8 {
+        invalid.tap(PAD_CIRCLE);
+    }
+    assert_eq!(invalid.frame, 50);
+    assert_eq!(
+        invalid.runtime.card_save_data(),
+        Ok(initial_save),
+        "the rejected code must not mutate browser-resumable progression"
+    );
+    assert_eq!(invalid.card, invalid_card_before);
+    assert_eq!(
+        CardPayload::encode(invalid.runtime.card_save_data().unwrap()),
+        invalid_resume_payload_before,
+        "the invalid code must not dirty the browser-resume payload"
+    );
+
+    // The first acknowledgement falls inside the authored error dwell and is
+    // deliberately ignored. This proves the invalid path rather than merely
+    // entering eight symbols and observing that no save decoded.
+    invalid.tap(PAD_CROSS);
+    assert_eq!(invalid.frame, 52);
+    assert_eq!(
+        invalid.runtime.global_word(TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::Load.raw())
+    );
+    assert_eq!(invalid.runtime.card_save_data(), Ok(initial_save));
+    assert_eq!(invalid.card, invalid_card_before);
+    assert_eq!(
+        CardPayload::encode(invalid.runtime.card_save_data().unwrap()),
+        invalid_resume_payload_before
+    );
+    for _ in 0..38 {
+        invalid.step(0);
+    }
+    assert_eq!(invalid.frame, 90);
+    assert_eq!(
+        invalid.runtime.global_word(TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::Load.raw()),
+        "the invalid-password error dwell must remain on the shared screen"
+    );
+    assert_eq!(invalid.runtime.card_save_data(), Ok(initial_save));
+    assert_eq!(invalid.card, invalid_card_before);
+    assert_eq!(
+        CardPayload::encode(invalid.runtime.card_save_data().unwrap()),
+        invalid_resume_payload_before
+    );
+
+    invalid.step(PAD_CROSS);
+    assert_eq!(invalid.frame, 91);
+    assert_eq!(
+        invalid.runtime.global_word(TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::MainMenu.raw()),
+        "the acknowledged invalid-password error must request MainMenu"
+    );
+    assert_eq!(invalid.runtime.card_save_data(), Ok(initial_save));
+    invalid.step(0);
+    assert_eq!(
+        invalid.wait_for_loaded(TitleScreen::MainMenu, 32),
+        Some(100)
+    );
+    invalid.wait_until_ready(32);
+    assert_eq!(invalid.frame, 110, "returned MainMenu ready-frame drift");
+    assert_eq!(invalid.runtime.card_save_data(), Ok(initial_save));
+    assert_eq!(invalid.card, invalid_card_before);
+    assert_eq!(
+        CardPayload::encode(invalid.runtime.card_save_data().unwrap()),
+        invalid_resume_payload_before,
+        "the MainMenu reset/restore must retain the unmodified resume payload"
+    );
+    assert!(invalid.transitions.is_empty());
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR or C1_DISC_IMAGE to legally local NTSC-U game data"]
+fn authored_damaged_slot_and_unreadable_card_routes_fail_closed() {
+    let (nsd, nsf, nsf_bytes) = load_legally_local_title_pair();
+    let mut title = AuthoredTitleHarness::main_menu(&nsd, &nsf, &nsf_bytes);
+    title
+        .card
+        .set_slot(0, Slot::Corrupt)
+        .expect("damaged fixture must fit virtual-card slot zero");
+
+    title.wait_until_ready(32);
+    title.tap(PAD_DOWN);
+    title.tap(PAD_CROSS);
+    assert_eq!(title.wait_for_loaded(TitleScreen::Load, 32), Some(22));
+    title.wait_until_ready(32);
+    for _ in 0..64 {
+        title.step(0);
+    }
+    assert_eq!(title.card.published_state().flags.bits(), 0);
+    assert_eq!(title.card.published_state().part_count, 1);
+    assert_eq!(
+        title.card.published_state().partinfos[0],
+        3,
+        "a damaged physical slot must remain visible as the retail damaged-part word"
+    );
+
+    let damaged_before = title.card.clone();
+    title.tap(PAD_CROSS);
+    for _ in 0..32 {
+        title.step(0);
+    }
+    assert_eq!(title.card, damaged_before);
+    assert_eq!(
+        title.runtime.global_word(TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::Load.raw()),
+        "a damaged individual save is visible but cannot be loaded"
+    );
+    title.tap(PAD_TRIANGLE);
+    assert_eq!(
+        title.runtime.global_word(TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::MainMenu.raw()),
+        "Triangle must leave the damaged-slot list without altering the card"
+    );
+    assert_eq!(title.card, damaged_before);
+
+    let mut unreadable = AuthoredTitleHarness::main_menu(&nsd, &nsf, &nsf_bytes);
+    unreadable.card.set_storage_available(false);
+    assert!(
+        unreadable
+            .card
+            .control(CardOperation::Rescan, 0, None)
+            .is_err(),
+        "a malformed storage envelope must reject its initial browser rescan"
+    );
+    assert_eq!(unreadable.card.published_state().flags.bits(), 0x06);
+    unreadable.wait_until_ready(32);
+    unreadable.tap(PAD_DOWN);
+    unreadable.tap(PAD_CROSS);
+    assert_eq!(unreadable.wait_for_loaded(TitleScreen::Load, 32), Some(22));
+    unreadable.wait_until_ready(32);
+    for _ in 0..64 {
+        unreadable.step(0);
+    }
+    assert_eq!(unreadable.card.published_state().flags.bits(), 0x06);
+    assert_eq!(unreadable.card.published_state().part_count, 0);
+    let unreadable_before = unreadable.card.clone();
+    for button in [PAD_CROSS, PAD_SQUARE, PAD_CIRCLE, PAD_START] {
+        unreadable.tap(button);
+        assert_eq!(
+            unreadable.runtime.global_word(TITLE_STATE_GLOBAL),
+            Ok(TitleScreen::Load.raw())
+        );
+        assert_eq!(
+            unreadable.card, unreadable_before,
+            "ordinary Load-screen inputs must not mutate an unreadable card"
+        );
+    }
+    unreadable.tap(PAD_TRIANGLE);
+    assert_eq!(
+        unreadable.runtime.global_word(TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::MainMenu.raw()),
+        "the authored UI must let the player leave an unreadable-card error"
+    );
+    assert_eq!(unreadable.card, unreadable_before);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR or C1_DISC_IMAGE to legally local NTSC-U game data"]
 fn authored_main_menu_map_to_n_sanity_handoff_preserves_session_carry() {
     let (nsd, nsf, nsf_bytes) = load_legally_local_title_pair();
     let mut title = AuthoredTitleHarness::main_menu(&nsd, &nsf, &nsf_bytes);
@@ -571,7 +1276,7 @@ fn authored_main_menu_map_to_n_sanity_handoff_preserves_session_carry() {
     );
     assert_eq!(
         title.island_level_updates.first(),
-        Some(&(23, 7, -1, 1, 1, true)),
+        Some(&(22, 7, -1, 1, 1, true)),
         "mode-seven state must be visible before its first cross-zone LevelUpdate"
     );
     assert!(
@@ -688,6 +1393,8 @@ struct AuthoredTitleHarness<'assets> {
     frame: u32,
     loaded: Vec<(u32, TitleScreen)>,
     transitions: Vec<(u32, i32)>,
+    card_requests: Vec<CardRequestTrace>,
+    card_loads: Vec<(u32, SaveData)>,
     /// Frame, mode, state before, state at the `LevelUpdate` boundary, state
     /// after, and whether the effect crosses a zone boundary. A production
     /// cross-zone `LevelUpdate` exposes the boundary value to synchronous TERM.
@@ -696,6 +1403,48 @@ struct AuthoredTitleHarness<'assets> {
 
 impl<'assets> AuthoredTitleHarness<'assets> {
     fn main_menu(nsd: &'assets Nsd, nsf: &'assets Nsf, nsf_bytes: &'assets [u8]) -> Self {
+        Self::main_menu_with_card(nsd, nsf, nsf_bytes, VirtualCard::new())
+    }
+
+    fn main_menu_with_card(
+        nsd: &'assets Nsd,
+        nsf: &'assets Nsf,
+        nsf_bytes: &'assets [u8],
+        card: VirtualCard,
+    ) -> Self {
+        let (graph, zones, lifecycle) = title_zone_catalog(nsd, nsf, nsf_bytes);
+        let camera = RetailCameraRuntime::new(&graph).expect("title camera must initialize");
+        let mut harness = Self {
+            nsd,
+            nsf,
+            nsf_bytes,
+            graph,
+            zones,
+            lifecycle,
+            camera,
+            runtime: RetailRuntime::new_for_level(RETAIL_GLOBAL_WORDS, LevelId::TITLE),
+            card,
+            pad: PadState::default(),
+            frame: 0,
+            loaded: Vec::new(),
+            transitions: Vec::new(),
+            card_requests: Vec::new(),
+            card_loads: Vec::new(),
+            island_level_updates: Vec::new(),
+        };
+        harness
+            .runtime
+            .restore_card_save_data(default_title_save())
+            .unwrap();
+        harness
+            .runtime
+            .configure_retail_title(TitleScreen::MainMenu, false)
+            .unwrap();
+        harness.mount(TitleScreen::MainMenu);
+        harness
+    }
+
+    fn carried_game_over(nsd: &'assets Nsd, nsf: &'assets Nsf, nsf_bytes: &'assets [u8]) -> Self {
         let (graph, zones, lifecycle) = title_zone_catalog(nsd, nsf, nsf_bytes);
         let camera = RetailCameraRuntime::new(&graph).expect("title camera must initialize");
         let mut harness = Self {
@@ -712,17 +1461,27 @@ impl<'assets> AuthoredTitleHarness<'assets> {
             frame: 0,
             loaded: Vec::new(),
             transitions: Vec::new(),
+            card_requests: Vec::new(),
+            card_loads: Vec::new(),
             island_level_updates: Vec::new(),
         };
         harness
             .runtime
             .restore_card_save_data(default_title_save())
             .unwrap();
+        for (index, value) in [
+            (GAME_STATE_GLOBAL, 0x200),
+            (TITLE_STATE_GLOBAL, TitleScreen::GameOver.raw()),
+            (SAVED_TITLE_STATE_GLOBAL, u32::MAX),
+            (LIFE_COUNT_GLOBAL, 0),
+        ] {
+            harness.runtime.set_global_word(index, value).unwrap();
+        }
         harness
             .runtime
-            .configure_retail_title(TitleScreen::MainMenu, false)
+            .configure_retail_title(TitleScreen::GameOver, false)
             .unwrap();
-        harness.mount(TitleScreen::MainMenu);
+        harness.mount(TitleScreen::GameOver);
         harness
     }
 
@@ -822,7 +1581,13 @@ impl<'assets> AuthoredTitleHarness<'assets> {
             })
             .collect::<Vec<_>>();
         let attempts = {
-            let mut host = TitleFlowHost::new(self.nsd, self.nsf, self.nsf_bytes, &mut self.card);
+            let mut host = TitleFlowHost::traced(
+                self.nsd,
+                self.nsf,
+                self.nsf_bytes,
+                &mut self.card,
+                &mut self.card_requests,
+            );
             self.runtime
                 .spawn_current_zone_neighbors(&neighbors, &mut host)
         };
@@ -839,8 +1604,14 @@ impl<'assets> AuthoredTitleHarness<'assets> {
             "title frame {} spawn mismatch: {attempts:?}",
             self.frame
         );
-        self.update_map_camera();
-        let mut host = TitleFlowHost::new(self.nsd, self.nsf, self.nsf_bytes, &mut self.card);
+        self.update_title_world_camera();
+        let mut host = TitleFlowHost::traced(
+            self.nsd,
+            self.nsf,
+            self.nsf_bytes,
+            &mut self.card,
+            &mut self.card_requests,
+        );
         let pad = &mut self.pad;
         let report = self
             .runtime
@@ -883,6 +1654,9 @@ impl<'assets> AuthoredTitleHarness<'assets> {
                 VmEffect::Transition(level) => Some((self.frame, *level)),
                 _ => None,
             }));
+        if let Some(save) = self.runtime.take_card_load() {
+            self.card_loads.push((self.frame, save));
+        }
         let action = self.runtime.begin_retail_title_update().unwrap();
         if let Some(RetailTitleAction::LoadScreen { screen, .. }) = action {
             self.mount(screen);
@@ -891,11 +1665,15 @@ impl<'assets> AuthoredTitleHarness<'assets> {
         self.runtime.finish_deferred_display_frame().unwrap();
     }
 
-    fn update_map_camera(&mut self) {
+    fn update_title_world_camera(&mut self) {
         let Some(presentation) = self.runtime.retail_title_presentation().unwrap() else {
             return;
         };
-        if presentation.screen != TitleScreen::Map || self.runtime.arena().main_object().is_none() {
+        if !matches!(
+            presentation.screen,
+            TitleScreen::GameOver | TitleScreen::Map
+        ) || self.runtime.arena().main_object().is_none()
+        {
             return;
         }
         let snapshot = self.pad.snapshot();
@@ -905,16 +1683,18 @@ impl<'assets> AuthoredTitleHarness<'assets> {
                 .unwrap()
                 .cast_signed(),
         );
-        let island_cam_state = self
-            .runtime
-            .global_word(ISLAND_CAMERA_STATE_GLOBAL)
-            .unwrap()
-            .cast_signed();
-        let island_cam_rot_x = self
-            .runtime
-            .global_word(ISLAND_CAMERA_ROTATION_GLOBAL)
-            .unwrap()
-            .cast_signed();
+        let island = (presentation.screen == TitleScreen::Map).then(|| RetailIslandCameraInput {
+            island_cam_state: self
+                .runtime
+                .global_word(ISLAND_CAMERA_STATE_GLOBAL)
+                .unwrap()
+                .cast_signed(),
+            island_cam_rot_x: self
+                .runtime
+                .global_word(ISLAND_CAMERA_ROTATION_GLOBAL)
+                .unwrap()
+                .cast_signed(),
+        });
         let step = self
             .camera
             .update_with_island(
@@ -922,12 +1702,9 @@ impl<'assets> AuthoredTitleHarness<'assets> {
                 RetailCameraInput {
                     tapped: snapshot.tapped,
                 },
-                Some(RetailIslandCameraInput {
-                    island_cam_state,
-                    island_cam_rot_x,
-                }),
+                island,
             )
-            .expect("authored world-map camera update must execute");
+            .expect("authored title-world camera update must execute");
         let island_writeback = match step.outcome {
             RetailCameraOutcome::IslandAdvanced {
                 mode,

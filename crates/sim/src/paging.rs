@@ -3834,6 +3834,44 @@ mod tests {
     }
 
     #[test]
+    fn copied_cd_reservations_can_transiently_block_a_physical_open_despite_available_pages() {
+        let mut pager = Pager::new();
+        pager.set_physical_slot_count(2).unwrap();
+        for index in 0..2 {
+            let page = PageIndex::new(index);
+            pager.register_page(page, []).unwrap();
+            pager
+                .bind_page_eid(texture_eid(index as usize), page)
+                .unwrap();
+            pager.open_page_virtual_with_outcome(page).unwrap();
+        }
+        let physical = PageIndex::new(2);
+        pager.register_page(physical, []).unwrap();
+        enable_cd_transfer(&mut pager, 3, [(0, 1), (1, 1)]);
+
+        assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        assert_eq!(pager.available_physical_page_count(), 2);
+        assert_eq!(pager.resident_physical_page_count(), 2);
+        assert_eq!(
+            pager.open_page(physical),
+            Err(PagingError::NoFreePhysicalSlot(physical)),
+            "the in-flight clone owns both transfer slots even though copied pages are uncounted"
+        );
+
+        for _ in 0..10 {
+            assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        }
+        assert_eq!(
+            expect_resolution(pager.update_pending_virtual_page().unwrap().unwrap()).page,
+            PageIndex::new(0)
+        );
+        assert!(
+            pager.open_page(physical).is_ok(),
+            "publishing the copied page releases its ordinary transfer slot"
+        );
+    }
+
+    #[test]
     fn retail_cd_reservation_keeps_existing_oldest_first_eviction_direction() {
         let mut pager = Pager::new();
         pager.set_physical_slot_count(2).unwrap();

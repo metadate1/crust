@@ -4623,8 +4623,18 @@ impl VmObject {
         category: u32,
         object_type: u32,
     ) {
+        self.configure_test_program_identity_with_eid(Eid::from_raw(0), category, object_type);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configure_test_program_identity_with_eid(
+        &mut self,
+        global_eid: Eid,
+        category: u32,
+        object_type: u32,
+    ) {
         self.program_identity = Some(GoolProgramIdentity {
-            global_eid: Eid::from_raw(0),
+            global_eid,
             object_type,
             category,
         });
@@ -4799,6 +4809,12 @@ pub struct Machine {
     pending_card_host_request: Option<CardHostRequest>,
     completed_card_load: Option<SaveData>,
     level_restart_requested: bool,
+    /// Native's process-global `next_lid`, initialized to `-1` for every
+    /// mounted stream and written synchronously by misc 12/9. The browser
+    /// still consumes the ordered [`VmEffect::Transition`], but retaining the
+    /// latch here preserves same-frame engine behavior such as suppressing a
+    /// late Crash spawn-save after a bonus transition has already started.
+    next_lid: i32,
     checkpoint_globals_changed_since_context: bool,
     spawn_flags: [u32; SPAWN_TABLE_CAPACITY],
     level_spawn_tags: Box<[u16]>,
@@ -4880,6 +4896,7 @@ impl Machine {
             pending_card_host_request: None,
             completed_card_load: None,
             level_restart_requested: false,
+            next_lid: -1,
             checkpoint_globals_changed_since_context: false,
             spawn_flags: [0; SPAWN_TABLE_CAPACITY],
             level_spawn_tags: vec![0; RETAIL_LEVEL_SPAWN_CAPACITY].into_boxed_slice(),
@@ -5142,6 +5159,18 @@ impl Machine {
 
     pub fn clear_level_restart_request(&mut self) {
         self.level_restart_requested = false;
+    }
+
+    /// Current native `next_lid` latch for the mounted stream.
+    #[must_use]
+    pub const fn next_lid(&self) -> i32 {
+        self.next_lid
+    }
+
+    /// Publishes a source-ordered level request before the platform consumes
+    /// the matching effect at the end of the cooperative frame.
+    pub(crate) fn set_next_lid(&mut self, next_lid: i32) {
+        self.next_lid = next_lid;
     }
 
     /// Reads one checked logical GOOL global word.
@@ -6778,6 +6807,22 @@ impl Machine {
         handle: ObjectHandle,
     ) -> Result<Option<ObjectHandle>, VmError> {
         self.resolve_process_link(handle, PROCESS_LINK_COLLIDER)
+    }
+
+    /// Publishes the VM half of an event state change whose sender-side gate
+    /// was proven separately. The stream-owning browser harness immediately
+    /// follows this with the ordinary checked state-program rebind.
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    pub(crate) fn browser_test_prepare_resolved_event_state(
+        &mut self,
+        handle: ObjectHandle,
+        event: u32,
+        state: u16,
+    ) -> Result<(), VmError> {
+        let object = self.object_mut(handle)?;
+        object.set_register(process_register::EVENT, event)?;
+        object.state = state;
+        Ok(())
     }
 
     /// Clears the collider pair named by `object`, in retail source order.
@@ -9259,6 +9304,38 @@ impl Machine {
         )
     }
 
+    /// Runs one bounded chunk of an already-active interpreter invocation.
+    ///
+    /// The caller owns `condition` because retail opcode `0x82` condition type
+    /// three reuses the preceding control-flow result for the duration of one
+    /// `GoolObjectInterpret` call. A host watchdog may divide that call into
+    /// chunks, but the artificial boundary must neither reset the condition
+    /// nor reapply the animation gate.
+    pub(crate) fn run_with_host_requests_chunk<F>(
+        &mut self,
+        handle: ObjectHandle,
+        budget: usize,
+        host: F,
+        condition: &mut bool,
+        apply_animation_gate: bool,
+    ) -> Result<Execution, VmError>
+    where
+        F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
+    {
+        self.run_with_host_requests_mode_and_condition(
+            handle,
+            budget,
+            host,
+            HostRunOptions {
+                suspend_on_animation: true,
+                apply_animation_gate,
+                service_audio: true,
+                return_link_halt: None,
+            },
+            condition,
+        )
+    }
+
     fn run_with_host_effects_mode<F>(
         &mut self,
         handle: ObjectHandle,
@@ -9297,8 +9374,29 @@ impl Machine {
         &mut self,
         handle: ObjectHandle,
         budget: usize,
+        host: F,
+        options: HostRunOptions,
+    ) -> Result<Execution, VmError>
+    where
+        F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
+    {
+        let mut condition = false;
+        self.run_with_host_requests_mode_and_condition(
+            handle,
+            budget,
+            host,
+            options,
+            &mut condition,
+        )
+    }
+
+    fn run_with_host_requests_mode_and_condition<F>(
+        &mut self,
+        handle: ObjectHandle,
+        budget: usize,
         mut host: F,
         options: HostRunOptions,
+        condition: &mut bool,
     ) -> Result<Execution, VmError>
     where
         F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
@@ -9367,9 +9465,8 @@ impl Machine {
         if apply_animation_gate && let Some(execution) = self.animation_gate(handle)? {
             return Ok(execution);
         }
-        let mut condition = false;
         for steps in 0..budget {
-            if let Some(reason) = self.step(handle, &mut condition, return_link_halt)? {
+            if let Some(reason) = self.step(handle, condition, return_link_halt)? {
                 if reason == HaltReason::HostEffect {
                     if self.pending_send_event_index(handle).is_some() {
                         match self.service_pending_send_event(handle, &mut host)? {
@@ -11846,6 +11943,7 @@ impl Machine {
                     })?;
                     let level = (self.read_storage_reference(input)? >> 8) as i32;
                     self.emit(VmEffect::Transition(level))?;
+                    self.next_lid = level;
                     Ok(false)
                 }
                 11 => {
@@ -17627,12 +17725,39 @@ mod tests {
             sound: adio.raw(),
         }));
         assert!(machine.effects().contains(&VmEffect::Transition(9)));
+        assert_eq!(machine.next_lid(), 9);
         assert_eq!(
             machine
                 .object(a)
                 .unwrap()
                 .register(process_register::VOICE_ID),
             Ok(41)
+        );
+    }
+
+    #[test]
+    fn failed_transition_enqueue_does_not_publish_next_lid() {
+        let object = handle(0);
+        let mut process = VmObject::new(object, vec![misc(12, 9, REG0)]).unwrap();
+        process.set_register(0, 9 << 8).unwrap();
+
+        let mut machine = Machine::new(1);
+        machine.insert_object(process).unwrap();
+        for _ in 0..MAX_EFFECTS {
+            machine
+                .emit(VmEffect::ResetMasterFadeStep { object })
+                .unwrap();
+        }
+
+        assert_eq!(machine.next_lid(), -1);
+        assert_eq!(machine.run(object, 1), Err(VmError::EffectQueueFull));
+        assert_eq!(machine.next_lid(), -1);
+        assert!(
+            machine
+                .effects()
+                .iter()
+                .all(|effect| !matches!(effect, VmEffect::Transition(_))),
+            "a rejected host observation must not leave an unobservable transition latch"
         );
     }
 
@@ -21732,6 +21857,77 @@ mod tests {
         assert_eq!(
             machine.retired_retail_pool_translation(1),
             Some([value as i32, 0, 0])
+        );
+    }
+
+    #[test]
+    fn authored_link_five_chain_write_targets_child_instead_of_player() {
+        let first_child = handle(0);
+        let next_child = handle(1);
+        let controller = handle(2);
+        let player = handle(3);
+        let player_sentinel = 0x5566_7788;
+        let mut player_object = VmObject::new(player, vec![0]).unwrap();
+        player_object
+            .set_register(process_register::MISC_A_Y, player_sentinel)
+            .unwrap();
+        let mut controller_object = VmObject::new(
+            controller,
+            vec![Instruction::encode(
+                0x11, 0x0e0a, 0x0d52, // MOV register 10 -> link 5, register 18.
+            )],
+        )
+        .unwrap();
+        controller_object
+            .set_retail_pool_link(5, first_child, 10)
+            .unwrap();
+        controller_object
+            .set_register_with_pool_slot(
+                10,
+                CollisionObjectReference::new(next_child).to_word(),
+                Some(11),
+            )
+            .unwrap();
+
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(first_child, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(first_child, 10).unwrap();
+        machine
+            .insert_object(VmObject::new(next_child, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(next_child, 11).unwrap();
+        machine.insert_object(controller_object).unwrap();
+        machine.insert_object(player_object).unwrap();
+        machine.bind_retail_pool_slot(player, 96).unwrap();
+
+        machine.run(controller, 1).unwrap();
+
+        let controller_object = machine.object(controller).unwrap();
+        assert_eq!(controller_object.register_pool_slot(5), Ok(Some(10)));
+        let first_child_object = machine.object(first_child).unwrap();
+        assert_eq!(
+            CollisionObjectReference::from_word(
+                first_child_object
+                    .register(process_register::MISC_A_Y)
+                    .unwrap()
+            )
+            .map(CollisionObjectReference::object),
+            Some(next_child)
+        );
+        assert_eq!(
+            first_child_object.register_pool_slot(process_register::MISC_A_Y),
+            Ok(Some(11)),
+            "BonoC-style authored child chains must retain the next physical pool slot"
+        );
+        assert_eq!(
+            machine
+                .object(player)
+                .unwrap()
+                .register(process_register::MISC_A_Y),
+            Ok(player_sentinel),
+            "an authored link-five write must never be redirected into WillC"
         );
     }
 

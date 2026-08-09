@@ -44,7 +44,7 @@ const CHECKPOINT_FIELDS = [
 const BROWSER_OBSERVED_ONLY_CHECKPOINT_FIELDS = Object.freeze([
   "retailRandomSeedB",
 ]);
-const PROGRESSION_FIELDS = [
+const REQUIRED_PROGRESSION_FIELDS = [
   "gameState",
   "titleState",
   "savedTitleState",
@@ -53,6 +53,15 @@ const PROGRESSION_FIELDS = [
   "levelsUnlocked",
   "islandCameraState",
 ];
+const OPTIONAL_INVENTORY_PROGRESSION_FIELDS = [
+  "gemCount",
+  "keyCount",
+  "itemPool1",
+  "itemPool2",
+];
+const BROWSER_INVENTORY_EXPECTATION_FIELDS = Object.freeze([
+  ...OPTIONAL_INVENTORY_PROGRESSION_FIELDS,
+]);
 const PAD_SNAPSHOT_FIELDS = [
   "tapped",
   "held",
@@ -63,7 +72,10 @@ const PAD_SNAPSHOT_FIELDS = [
 const ALL_CHECKPOINT_FIELDS = new Set([
   ...CHECKPOINT_FIELDS,
 ]);
-const ALL_PROGRESSION_FIELDS = new Set(PROGRESSION_FIELDS);
+const ALL_PROGRESSION_FIELDS = new Set([
+  ...REQUIRED_PROGRESSION_FIELDS,
+  ...OPTIONAL_INVENTORY_PROGRESSION_FIELDS,
+]);
 const ALL_PAD_SNAPSHOT_FIELDS = new Set(PAD_SNAPSHOT_FIELDS);
 const PHASE_KEYS = new Set([
   "entry",
@@ -150,18 +162,56 @@ function normalizeCheckpoint(raw, label) {
 function normalizeProgression(raw, label) {
   if (!isObject(raw)) throw new Error(`${label} must be an object`);
   assertOnlyKeys(raw, ALL_PROGRESSION_FIELDS, label);
-  const missing = PROGRESSION_FIELDS.filter((field) => raw[field] === undefined);
+  const missing = REQUIRED_PROGRESSION_FIELDS.filter(
+    (field) => raw[field] === undefined,
+  );
   if (missing.length > 0) {
     throw new Error(
       `${label} is missing exact progression fields: ${missing.join(", ")}`,
     );
   }
+  const presentInventory = OPTIONAL_INVENTORY_PROGRESSION_FIELDS.filter(
+    (field) => raw[field] !== undefined,
+  );
+  if (
+    presentInventory.length !== 0
+    && presentInventory.length !== OPTIONAL_INVENTORY_PROGRESSION_FIELDS.length
+  ) {
+    const missingInventory = OPTIONAL_INVENTORY_PROGRESSION_FIELDS.filter(
+      (field) => raw[field] === undefined,
+    );
+    throw new Error(
+      `${label} has an incomplete inventory progression group: `
+        + `missing ${missingInventory.join(", ")}`,
+    );
+  }
+  const fields = [
+    ...REQUIRED_PROGRESSION_FIELDS,
+    ...(presentInventory.length === 0
+      ? []
+      : OPTIONAL_INVENTORY_PROGRESSION_FIELDS),
+  ];
   return Object.fromEntries(
-    PROGRESSION_FIELDS.map((field) => [
+    fields.map((field) => [
       field,
       wholeNumber(raw[field], `${label}.${field}`, 0xffff_ffff),
     ]),
   );
+}
+
+function progressionDifference(left, right) {
+  const fields = [
+    ...REQUIRED_PROGRESSION_FIELDS,
+    ...OPTIONAL_INVENTORY_PROGRESSION_FIELDS.filter(
+      (field) => left[field] !== undefined && right[field] !== undefined,
+    ),
+  ];
+  return fields
+    .filter((field) => left[field] !== right[field])
+    .map(
+      (field) =>
+        `${field} ${JSON.stringify(left[field])} != ${JSON.stringify(right[field])}`,
+    );
 }
 
 function hasOpposingPhysicalDirections(held) {
@@ -530,7 +580,7 @@ export function discoverLongestCampaignManifest(
   };
   const follows = (left, right) => {
     if (!exactMetadataMatch(left.exit, right.entry)) return false;
-    if (!exactMetadataMatch(left.exitProgression, right.entryProgression)) {
+    if (progressionDifference(left.exitProgression, right.entryProgression).length > 0) {
       return false;
     }
     const expectedPad =
@@ -880,6 +930,15 @@ function guardedPhaseSegments(
     observableExit,
     `fragment for phase ${JSON.stringify(phase.id)} final expectation`,
   );
+  last.expect = mergeExpectations(
+    last.expect,
+    Object.fromEntries(
+      BROWSER_INVENTORY_EXPECTATION_FIELDS
+        .filter((field) => captureMetadata.exitProgression[field] !== undefined)
+        .map((field) => [field, captureMetadata.exitProgression[field]]),
+    ),
+    `fragment for phase ${JSON.stringify(phase.id)} inventory expectation`,
+  );
   for (const field of BROWSER_OBSERVED_ONLY_CHECKPOINT_FIELDS) {
     delete last.expect[field];
   }
@@ -1000,7 +1059,7 @@ export async function composeCampaignReplay(rawManifest, loadFragment) {
       previousCaptureMetadata?.exitProgression !== undefined
       && captureMetadata.entryProgression !== undefined
     ) {
-      const differences = checkpointDifference(
+      const differences = progressionDifference(
         previousCaptureMetadata.exitProgression,
         captureMetadata.entryProgression,
       );

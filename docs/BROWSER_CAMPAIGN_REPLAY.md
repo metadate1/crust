@@ -207,7 +207,10 @@ emits exact observer metadata:
   manifest, including `titleState`;
 - `entryProgression` and `exitProgression` contain `gameState`, `titleState`,
   `savedTitleState`, `currentMapLevel`, `levelCount`, `levelsUnlocked`, and
-  `islandCameraState`;
+  `islandCameraState`. Current exports also include the complete inventory group
+  `gemCount`, `keyCount`, `itemPool1`, and `itemPool2`. The composer remains compatible with
+  older schema-1 captures that omit that entire group; it rejects a partial group, and compares
+  or emits browser inventory expectations only where the source capture actually recorded it;
 - `initialPad` and `finalPad` contain `tapped`, `held`, `tappedPrevious`, `heldPrevious`, and
   `heldPrevious2`; and
 - every emitted segment explicitly has `"inputKind": "physical"` or `"recorded"`.
@@ -267,9 +270,10 @@ runtime/GOOL/zone/spawn, console, network, or WebGL failure. A separate nine-pha
 exact branch still proves The Great Gate's physical Tawna path, Bonus 2, its `-2` save-state return,
 and the remounted Great Gate checkpoint. The completed browser campaign is authoritative for the
 ordinary route. A separate direct-boot replay completes Stormy Ascent's 9,334 captured frames and
-mounts Level Complete at exact draw/RNG state with no recovery or skipped frame. Natural key
-earning plus the authored Whole Hog/Fumbling map branches, alternate completion, and other
-explicitly documented edge routes remain separate parity gates.
+mounts Level Complete at exact draw/RNG state with no recovery or skipped frame. The natural
+Sunset/Whole Hog and Jaws/Fumbling key branches each pass independently from fresh browser storage;
+joining both in the same empty-card campaign, alternate completion, and other explicitly documented
+edge routes remain separate parity gates.
 
 Every composed gameplay, completion, and island-map segment receives:
 
@@ -280,8 +284,10 @@ Every composed gameplay, completion, and island-map segment receives:
 using that phase's actual entry LID. If an authored transition occurs before a run ends, the
 harness stops at the mount request and skips the remainder after the destination mount instead of
 leaking old-level input into the new stream. The final segment of every phase receives the exact
-exit expectation and its bounded settle budget. A transition that is missing, late, points to the
-wrong LID, or reaches the right LID with the wrong draw/RNG/counter state therefore fails closed.
+exit expectation and its bounded settle budget. Those boundary expectations include the exact gem
+count, key count, and both retail item-pool words in addition to the mount, draw, RNG-A, recovery,
+and title-state checkpoint. A transition that is missing, late, points to the wrong LID, loses
+inventory, or reaches the right LID with the wrong draw/RNG/counter state therefore fails closed.
 
 `retailRandomSeedB` remains exact native capture metadata: discovery and composition reject a
 fragment whose entry or exit RNG-B word breaks the native chain. The composed browser replay lists

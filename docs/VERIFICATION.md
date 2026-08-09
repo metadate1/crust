@@ -93,8 +93,8 @@ not copy any disc or stream bytes into the repository:
   offsets. Focused tests cover argument addressing, packed frames, frame-relative access and links.
 - State rebind captures and clears the once pointer, runs its nested code synchronously before the
   state stamp, then runs the target external transition block after the stamp. Nested calls/returns,
-  animation selection and hosted child spawns preserve this order; target state code resumes on a
-  later object execution.
+  animation selection and hosted child spawns preserve this order; target state code then resumes
+  in the same native object update, as pinned by the focused continuation regression.
 - Focused native tests prove `GoolObjectColors` delivers the category-`0x300` collider's authored
   `0x0a00` hit synchronously before physics. An event interrupt changes Crash's X velocity and the
   same 34-tick update moves him to X=544; its frame-relative argument is the checked zero word used
@@ -987,7 +987,7 @@ is 1,322,866 bytes with SHA-256
   `BoxsC` state 24, spawns subtype-13 `FruiC`, sends `[0x6900, pid]` to the live `DispC` pickup HUD,
   and sends token kind `0x6900` to Crash. The observed counter sequence is
   `0 → 0x100 → 0x200 → 0x300`.
-- Only the third token makes the HUD emit `SaveState`, on local frame 4 and before Crash increments
+- Only the third token makes the HUD emit `SaveState`, on local frame 2 and before Crash increments
   the counter. After that increment, `DispC` sends completion `0x2700 [0]` on frame 1, resets the
   master-fade step on frame 38, sends status `0x0f00 [0x500]` and emits `Transition(0x24)` on frame
   53, writes checkpoint `79 << 8`, and clears the token counter. Completing `LEVEL_END` resolves
@@ -1003,6 +1003,14 @@ is 1,322,866 bytes with SHA-256
   CardC, frame-301 `LoadState`, protected `-2` return, and the complete parent remount. These tests
   deliberately join at controlled program boundaries: they do not steer Crash to the crates or
   portal through collision broadphase, and they are not one uninterrupted browser playthrough.
+
+- An owned-disc executable oracle resolves the translation selected by that `DispC` save. The
+  NTSC-U `LevelSaveState` sequence loads caller `status_b` at `0x800264d8`, masks `0x0200` at
+  `0x800264e0`, and branches over the caller-translation copy at `0x800264e4` when the result is
+  nonzero. Thus world-space callers override Crash, 2D/HUD callers retain live Crash, and a
+  checkpoint overrides either. A focused unit regression pins all three cases. This corrects the
+  inverted condition in the historical C transcription and prevents a third Tawna token from
+  saving `DispC`'s HUD coordinates as the bonus-return position.
 - The stable checkpoint passed Rustfmt, 870 locked default tests with zero failures and 76 ignored,
   all 76 legally local opt-in tests with zero failures, warnings-denied native and Wasm Clippy, and
   optimized native and `wasm32-unknown-unknown` builds. `npm run build` regenerated the served
@@ -1578,14 +1586,16 @@ is 1,322,866 bytes with SHA-256
   not overwrite a replacement's checked bound with invented data. The dedicated player's extra
   0x100-byte allocation tail remains separately open.
 
-### Current campaign frontier (2026-07-31)
+### Current campaign frontier (2026-08-01)
 
 - The legally local native
-  `authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry` regression passes
-  on the current tree. It starts at the retail publisher/title opening, preserves process/session
-  state and physical pad history across the authored main-map mounts, defeats Dr. Neo Cortex,
-  executes Ending, and remounts Title. This is the canonical native campaign proof; it is not a
-  browser playthrough.
+  `authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry` regression does
+  **not** currently pass. The exact carried phase reaches Sunset Vista with no reset, crosses the
+  earlier projectile seam, then a late-c3 rotating-wall interaction displaces Crash from the
+  roughly 233k depth lane to roughly 486k as c4 begins; Crash misses the authored support and the
+  level restarts. The focused controller is being synchronized against the live collision bound.
+  Until this regression passes repeatedly and the complete chain is rerun, the earlier
+  publisher-to-Title capture is historical evidence rather than current completion proof.
 - The canonical Ending boundary requests Title on frame 3,396. `GAME_STATE` is `0x600` both before
   Ending's checked `LEVEL_END` and in the freshly mounted frame-zero Title carry; the first authored
   Title tick then clears it to zero. This exact handshake is distinct from the earlier bounded
@@ -1596,15 +1606,45 @@ is 1,322,866 bytes with SHA-256
   transition-gate settle step at exact draw/process count 9,334 and RNG-A `0x10448346`. Retail
   IsldC has no Stormy destination; natural key integration instead concerns the distinct Whole Hog
   and Fumbling in the Dark map branches.
+- The focused natural-key regressions both pass on the current tree.
+  `sunset_vista_cortex_tokens_round_trip_the_exact_parent_snapshot` physically collects Sunset's
+  three Cortex tokens, traverses the bonus, earns the first key, restores the exact parent, reaches
+  its normal exit, selects Whole Hog through authored IsldC, and completes it using ordinary pad
+  input. `jaws_cortex_bonus_key_round_trip_reaches_the_authored_end_warp` does the corresponding
+  Jaws bonus/key/parent-return handshake, selects Fumbling in the Dark, activates its checkpoint,
+  and reaches its authored exit. These are exact carried native chains; composing both secret
+  branches into the same uninterrupted empty-card owned-BIN browser campaign remains a separate
+  test.
+- Sunset's Cortex-key branch additionally passed in an owned-raw-BIN Chrome campaign before the
+  current carried-route changes. It
+  starts from publisher/title with empty browser storage, follows ordinary physical pad words
+  through the preceding authored map progression, physically collects Sunset Vista's three Cortex
+  tokens, completes Bonus 1, earns the first key, restores and completes Sunset, selects the newly
+  unlocked Whole Hog through authored IsldC, completes Whole Hog, and returns through Level
+  Complete to Title. Chrome executed 77,151 frames (77,139 replay frames plus 12 transition-settle
+  frames), skipped zero replay frames, recognized all 44 stream pairs, and finished at mounted
+  `0x19` with key count one and 17 unlocked levels. Browser-event, console, runtime-fault,
+  execution-error, faulted-object, and zone-event-failure counts were all zero. The final screenshot
+  SHA-256 is `bd3dd91504e5a7a30c54b4440d4096687294fb1a22e5f3f791b79504f1bdcdc3`.
+- Jaws' Cortex-key branch also passed independently in Chrome from fresh browser storage. The owned-BIN run
+  carries ordinary campaign progression through Lights Out, physically collects Jaws' three Cortex
+  tokens, completes Bonus 1 and its occupied-slot CardC handshake, earns the second key, restores
+  and completes Jaws, selects Fumbling in the Dark through authored IsldC, completes Fumbling, and
+  returns through Level Complete to Title. Chrome executed 127,134 frames (127,127 replay frames
+  plus seven transition-settle frames), skipped zero replay frames, recognized all 44 stream pairs,
+  and finished at mounted `0x19` with key count one, item-pool-two `0x400`, and 27 unlocked levels.
+  Browser-event, console, runtime-fault, execution-error, faulted-object, and zone-event-failure
+  counts were all zero. The final screenshot SHA-256 is
+  `c753f4af99d8ec3a9a9110bc2f8c62a4099ed987d8fb89e7dbd146d0f0939a15`.
 - Castle Machinery's current exact carried golden passes at 6,071 frames. Its controller no longer
   relies on an impossible opposing-direction fallback, so that characterization is not a remaining
   campaign blocker.
-- The completed owned-BIN browser campaign executes the canonical 89-phase, 141,776-frame
+- The earlier owned-BIN browser campaign executed a canonical 89-phase, 141,776-frame
   Title-to-Title replay from 92 captures plus 96 bounded settle frames. It consumes all 14,429 input
   runs, excludes three diagnostic alternatives, inserts no synthetic handoff, and skips zero replay
   frames. The route starts at the real publisher/title sequence, crosses every ordinary campaign
   gameplay, boss, bonus, completion and map phase, defeats Cortex, executes Ending, and remounts
-  Title.
+  Title. It must be repeated on the final tree and is not currently sufficient to claim completion.
 - Its terminal checkpoint is `currentLid == mountedLid == 0x19`, draw/process count 130,740, and
   RNG-A `0x3b704e12`. The 141,872 executed harness frames report three source hard-restart calls
   and two LoadState effects: one same-level pair from Jungle Rollers' authored terminal fall, then
@@ -1616,18 +1656,49 @@ is 1,322,866 bytes with SHA-256
   the Brio bonus and returns cleanly. The owned raw-BIN extraction regression also matches all 44
   local stream pairs and their bootable graph.
 
+### Current browser-harness spot checks (2026-08-01)
+
+The feature-gated harness build
+`79a1b818c979-b6486bda0801-300db162149e-dirty` was generated from the active worktree and served
+only on loopback. These checks use the user's legally local NTSC-U data and do not copy it into the
+repository. They are current subsystem evidence, not a substitute for repeating the complete
+campaign after the Sunset Vista route is fixed.
+
+- Raw-BIN discovery found all 44 pairs. Extracted `s0000009.nsd`/`.nsf` selection separately
+  mounted N. Sanity Beach and ran 180 frames with one live player and no browser, WebGL, runtime,
+  GOOL-object, or zone error. A generated non-proprietary cooked ISO fixture was discovered through
+  bounded Blob ranges as all 88 files/44 pairs, with no post-selection network request.
+- The browser virtual-card audit authored one exact 128-byte payload, occupied one of 15 slots,
+  reloaded the page, removed the transient resume record, completed the authored load handshake,
+  and returned to live gameplay at LID `0x11`. It reported one reload and zero browser, WebGL,
+  runtime, GOOL-object, or zone error.
+- Direct Road to Nowhere boot with the optional unlock mode published `999 << 8` to both life
+  globals, set the map access gate to 99, exposed both key-path bits, left card/resume storage
+  absent, and ran 180 clean frames.
+- The direct Tawna Bonus 1 return audit joined only at its separately proven parsed state-32 portal
+  boundary, then executed CardC, one real `LoadState`, direct-boot classification, `LEVEL_END`, and
+  the asynchronous Title/Main Menu return with no diagnostic failure.
+- All seven Title-reachable retail PBAKs (`pb0aB`, `pb0cB`, `pb0eB`, `pb0iB`, `pb0tB`, `pb0wB`,
+  and `pb0FB`) completed and returned to a live Title mount. The two dormant but valid recordings,
+  Upstream `pb0fB` and Temple Ruins `pb0sB`, also completed through their isolated feature-gated
+  mount audits. All nine runs ended with zero execution, faulted-object, zone, console, network, or
+  WebGL error.
+
 ## Reproducible commands
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy -p crust-web --target wasm32-unknown-unknown --locked -- -D warnings
-cargo test --workspace --all-targets --locked
+cargo clippy -p crust-web --features browser-test-harness \
+  --target wasm32-unknown-unknown --locked -- -D warnings
+npm test
 C1_DISC_IMAGE=/path/to/disc.bin C1_STREAM_DIR=/path/to/streams \
-  cargo test -p crust-formats --test local_disc -- --ignored --nocapture
+  cargo test -p crust-formats --test local_disc --locked -- --ignored --nocapture
 C1_STREAM_DIR=/path/to/streams \
-  cargo test -p crust-renderer --test local_loading_images -- --ignored --nocapture
+  cargo test -p crust-renderer --test local_loading_images --locked -- --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin C1_STREAM_DIR=/path/to/streams \
+  RUST_MIN_STACK=67108864 \
   cargo test --workspace --all-targets --locked -- --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin \
   cargo test -p crust-formats --test local_pbak --locked -- --ignored --nocapture
@@ -1729,6 +1800,9 @@ C1_STREAM_DIR=/path/to/streams \
   tawna_bonus_warpc_uses_the_exact_authored_player_proximity_gate \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_level_complete_rewards --locked \
+  -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_runtime --locked \
   n_sanity_a3_authored_crate_pair_has_native_bidirectional_links -- --ignored --exact
 C1_STREAM_DIR=/path/to/streams \
@@ -1792,7 +1866,14 @@ C1_DISC_IMAGE=/path/to/disc.bin \
   builds_every_fractional_spawn_snapshot_directly_from_raw_disc -- --ignored --nocapture
 cargo build --workspace --release --locked
 cargo build --release --locked --target wasm32-unknown-unknown -p crust-web
+cargo build --release --locked --target wasm32-unknown-unknown -p crust-web \
+  --features browser-test-harness
 npm run build
+npm run verify:dist
+npm run build:browser-harness
+npm run verify:browser-harness
+node scripts/browser-harness-smoke.mjs --synthetic-cooked-iso-import
 ```
 
-The delivery summary identifies the exact published commit.
+After every final gate passes, the delivery summary must identify the exact commit pushed to the
+private remote. Until that push is verified, no working-tree fingerprint is a published artifact.

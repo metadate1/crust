@@ -38,6 +38,15 @@ function browserCheckpoint(value) {
   return checkpoint;
 }
 
+function browserInventory(value) {
+  return Object.fromEntries(
+    ["gemCount", "keyCount", "itemPool1", "itemPool2"].map((field) => [
+      field,
+      value[field],
+    ]),
+  );
+}
+
 function phase(id, fragment, entry, exit, extra = {}) {
   return { id, fragment, entry, exit, ...extra };
 }
@@ -89,6 +98,10 @@ function progressionForCheckpoint(value) {
     levelCount: 1,
     levelsUnlocked: value.retailDrawCount & 0xff,
     islandCameraState: value.currentLid & 1,
+    gemCount: value.retailDrawCount & 0x1f,
+    keyCount: value.currentLid & 1,
+    itemPool1: 0x1000_0000 + value.retailDrawCount,
+    itemPool2: 0x2000_0000 + value.retailDrawCount,
   };
 }
 
@@ -101,6 +114,10 @@ function progression(salt) {
     levelCount: 1,
     levelsUnlocked: 1 + salt,
     islandCameraState: salt & 1,
+    gemCount: salt & 0x1f,
+    keyCount: salt & 1,
+    itemPool1: 0x3000_0000 + salt,
+    itemPool2: 0x4000_0000 + salt,
   };
 }
 
@@ -729,12 +746,22 @@ test("composer inserts authored title-map fragments with guards and exact exits"
     browserCheckpoint(checkpoints.completionEntry),
   );
   assert.deepEqual(
+    browserInventory(replay.segments[1].expect),
+    browserInventory(progressionForCheckpoint(checkpoints.completionEntry)),
+    "the exact completion boundary must retain its captured inventory",
+  );
+  assert.deepEqual(
     Object.fromEntries(
       Object.entries(replay.segments[4].expect).filter(([key]) =>
         key.startsWith("retail") || key.endsWith("Lid") || key === "titleState",
       ),
     ),
     browserCheckpoint(checkpoints.jungleEntry),
+  );
+  assert.deepEqual(
+    browserInventory(replay.segments[4].expect),
+    browserInventory(progressionForCheckpoint(checkpoints.jungleEntry)),
+    "the exact destination mount must retain its captured inventory",
   );
   assert.equal(
     replay.segments[4].expect.minRetailExecutions,
@@ -775,6 +802,33 @@ test("composer inserts authored title-map fragments with guards and exact exits"
   assert.equal(replay.canonicalCampaign, false);
   assert.ok(
     replay.segments.every((segment) => segment.inputKind === "physical"),
+  );
+});
+
+test("composer preserves legacy schema-1 captures without inventory progression", async () => {
+  const { manifest, fragments } = syntheticCampaign();
+  for (const fragment of fragments.values()) {
+    for (const progression of [
+      fragment.entryProgression,
+      fragment.exitProgression,
+    ]) {
+      for (const field of ["gemCount", "keyCount", "itemPool1", "itemPool2"]) {
+        delete progression[field];
+      }
+    }
+  }
+
+  const replay = await composeCampaignReplay(
+    manifest,
+    async (reference) => fragments.get(reference),
+  );
+  assert.ok(
+    replay.segments.every((segment) =>
+      ["gemCount", "keyCount", "itemPool1", "itemPool2"].every(
+        (field) => segment.expect[field] === undefined,
+      ),
+    ),
+    "legacy captures must not manufacture inventory expectations they never recorded",
   );
 });
 
@@ -1003,6 +1057,17 @@ test("composer rejects non-local fragments and inconsistent export metadata", as
       async (reference) => incompleteCapture.fragments.get(reference),
     ),
     /missing exact capture metadata: initialPad/,
+  );
+
+  const incompleteInventory = syntheticCampaign();
+  delete incompleteInventory.fragments.get("./complete.json").exitProgression
+    .itemPool2;
+  await assert.rejects(
+    composeCampaignReplay(
+      incompleteInventory.manifest,
+      async (reference) => incompleteInventory.fragments.get(reference),
+    ),
+    /exitProgression has an incomplete inventory progression group: missing itemPool2/,
   );
 });
 

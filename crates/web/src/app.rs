@@ -118,10 +118,13 @@ use crate::webgl::{GlStage, RetailBackgroundFill, VisualState};
 #[cfg(feature = "browser-test-harness")]
 use crate::{BrowserTestClock, BrowserTestCumulativeMetrics, BrowserTestPadInput};
 use crate::{
-    RetailIslandWritebackPhase, RetailRestartResume, RetailTickState, apply_all_levels_override,
-    authoritative_save_or_last, core_objects_pad_update, initial_retail_level_state,
-    require_render_object_snapshot, retail_game_state_after_pbak_choose,
+    RetailIslandWritebackPhase, RetailRestartResume, RetailTickState,
+    STORMY_CUT_CONTENT_RECOVERY_DIAGNOSTIC, StormyCutContentEffectGate, apply_all_levels_override,
+    authoritative_save_or_last, boot_level_option_label, core_objects_pad_update,
+    initial_retail_level_state, require_render_object_snapshot,
+    retail_core_frame_transition_request, retail_game_state_after_pbak_choose,
     retail_initial_level_update_is_active, retail_island_state_writeback, retail_ldat_initial_path,
+    retail_source_frame_completed,
 };
 #[cfg(feature = "browser-test-harness")]
 use crust_sim::gool::{INITIAL_LIFE_COUNT_GLOBAL, LIFE_COUNT_GLOBAL};
@@ -241,6 +244,12 @@ struct App {
     browser_test_input: BrowserTestPadInput,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AppFrameOutcome {
+    requested_level: Option<FormatLevelId>,
+    simulation_stepped: bool,
+}
+
 impl App {
     fn rebuild_keyboard_bits(&mut self) {
         self.keyboard_bits = self
@@ -264,7 +273,7 @@ impl App {
             .fold(0_u16, |value, bit| value | bit)
     }
 
-    fn frame(&mut self, timestamp_ms: f64) -> Result<Option<FormatLevelId>, JsValue> {
+    fn frame(&mut self, timestamp_ms: f64) -> Result<AppFrameOutcome, JsValue> {
         let display_settings = self.dom.display_settings();
         if display_settings != self.display_settings {
             self.display_settings = display_settings;
@@ -280,18 +289,25 @@ impl App {
         let (held, recorded_override) = self.browser_test_input.frame_input();
         if let Some(runtime) = &mut self.runtime {
             #[cfg(not(feature = "browser-test-harness"))]
-            runtime.frame(timestamp_ms, held, &self.dom)?;
+            let simulation_stepped = runtime.frame(timestamp_ms, held, &self.dom)?;
             #[cfg(feature = "browser-test-harness")]
-            runtime.frame(timestamp_ms, held, recorded_override, &self.dom)?;
+            let simulation_stepped =
+                runtime.frame(timestamp_ms, held, recorded_override, &self.dom)?;
             update_debug(&self.debug, runtime, &self.assets)?;
-            return Ok(runtime.take_asset_request());
+            return Ok(AppFrameOutcome {
+                requested_level: runtime.take_asset_request(),
+                simulation_stepped,
+            });
         }
         Reflect::set(
             &self.debug,
             &JsValue::from_str("pairs"),
             &JsValue::from_f64(self.assets.pair_count() as f64),
         )?;
-        Ok(None)
+        Ok(AppFrameOutcome {
+            requested_level: None,
+            simulation_stepped: false,
+        })
     }
 
     fn refresh_assets(&mut self) -> Result<(), JsValue> {
@@ -311,11 +327,7 @@ impl App {
             let option: HtmlOptionElement =
                 self.dom.document.create_element("option")?.dyn_into()?;
             option.set_value(&level.get().to_string());
-            let label = if *level == FormatLevelId::TITLE {
-                "Full game — from the beginning".to_owned()
-            } else {
-                format!("{name} — {level}")
-            };
+            let label = boot_level_option_label(*level, name);
             option.set_text(&label);
             self.dom.boot_level.append_child(&option)?;
         }
@@ -514,6 +526,21 @@ impl RetailRuntimeMetrics {
 struct RetailPbakPadBoundary {
     physical_held: u16,
     timing: PbakFrameTiming,
+}
+
+/// Source-frame inputs retained while native's synchronous physical PBAK
+/// `NSOpen` is represented by one or more asynchronous browser callbacks.
+/// Only the pager may advance until the open succeeds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetailPbakPagerWait {
+    wall_ticks_current_frame: i32,
+    wall_ticks_per_frame: i32,
+    /// Tapped edges already consumed from the global latch at the start of
+    /// this suspended source frame. Current held input is deliberately not
+    /// retained: native samples the pad only after its synchronous open
+    /// returns, so the resumed callback must use the latest browser state.
+    pending_buttons: u16,
+    pad_snapshot: PlatformPadSnapshot,
 }
 
 /// Short-lived stream borrows around the persistent audio engine owned by a
@@ -875,6 +902,13 @@ enum PbakArmedPresentation {
     LoadingImage,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetailPbakStart {
+    Unchanged,
+    Started,
+    WaitingForPager,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RetailPairMount {
     target: FormatLevelId,
@@ -957,6 +991,7 @@ struct Runtime {
     retail_audio: RetailAudioEngine,
     retail_master_fade: RetailMasterFade,
     retail_pbak: Option<RetailPbakPlayback>,
+    retail_pbak_pager_waiting: Option<RetailPbakPagerWait>,
     audio: Option<WebAudio>,
     storage: Option<StorageState>,
     card: VirtualCard,
@@ -972,6 +1007,12 @@ struct Runtime {
     pending_mount: Option<RetailPairMount>,
     loading_mount: Option<RetailPairMount>,
     next_lid: i32,
+    #[cfg(feature = "browser-test-harness")]
+    browser_test_title_attract_lid: Option<i32>,
+    #[cfg(feature = "browser-test-harness")]
+    browser_test_direct_bonus_queued_state: Option<u16>,
+    #[cfg(feature = "browser-test-harness")]
+    browser_test_direct_bonus_state_boundary: Option<u16>,
     title_seen: bool,
     asset_load_error: Option<String>,
     muted: bool,
@@ -1268,6 +1309,7 @@ impl Runtime {
             retail_audio,
             retail_master_fade: RetailMasterFade::new(),
             retail_pbak: None,
+            retail_pbak_pager_waiting: None,
             audio,
             storage: storage.take(),
             card,
@@ -1283,6 +1325,12 @@ impl Runtime {
             pending_mount: None,
             loading_mount: None,
             next_lid: -1,
+            #[cfg(feature = "browser-test-harness")]
+            browser_test_title_attract_lid: None,
+            #[cfg(feature = "browser-test-harness")]
+            browser_test_direct_bonus_queued_state: None,
+            #[cfg(feature = "browser-test-harness")]
+            browser_test_direct_bonus_state_boundary: None,
             title_seen,
             asset_load_error: None,
             muted: false,
@@ -2052,15 +2100,15 @@ impl Runtime {
             .ok_or_else(|| "playable level has no LDAT camera projection".to_owned())
     }
 
-    fn start_armed_retail_pbak(&mut self, dom: &Dom) -> Result<(), JsValue> {
+    fn start_armed_retail_pbak(&mut self, dom: &Dom) -> Result<RetailPbakStart, JsValue> {
         let Some(pbak) = self.retail_pbak.as_ref() else {
-            return Ok(());
+            return Ok(RetailPbakStart::Unchanged);
         };
         if !pbak.is_armed() || self.retail_objects.arena().main_object().is_none() {
-            return Ok(());
+            return Ok(RetailPbakStart::Unchanged);
         }
         let eid = pbak.eid();
-        let (snapshot, seed, crash_bound) = pbak.start_payload();
+        let (snapshot, seed, crash_bound, draw_stamp) = pbak.start_payload();
         let captured_saved_level = snapshot.level;
         let transactional_storage = self
             .storage
@@ -2079,14 +2127,28 @@ impl Runtime {
                 // the selected recording before creating the caption or
                 // calling `PbakStart`. Keep that reference in this same staged
                 // owner set so any following failure drops it atomically.
-                let pbak_open = transaction
-                    .retail_zone_pager
-                    .open_eid_with_outcome(eid)
-                    .map_err(|error| {
-                        JsValue::from_str(&format!(
+                let pbak_open = match transaction.retail_zone_pager.open_eid_with_outcome(eid) {
+                    Ok(open) => open,
+                    // `NSCountAvailablePages` deliberately excludes copied
+                    // texture/audio PTEs, while an in-flight contiguous CD
+                    // clone can still reserve every ordinary transfer slot.
+                    // Native's synchronous physical `NSOpen` waits behind
+                    // that transfer. Drop this staged owner clone unchanged
+                    // and retry after this frame's `NSUpdate` advances it.
+                    Err(PagingError::NoFreePhysicalSlot(_))
+                        if transaction
+                            .retail_zone_pager
+                            .available_physical_page_count()
+                            > 0 =>
+                    {
+                        return Ok::<_, JsValue>(None);
+                    }
+                    Err(error) => {
+                        return Err(JsValue::from_str(&format!(
                             "could not physically open retail PBAK {eid}: {error:?}"
-                        ))
-                    })?;
+                        )));
+                    }
+                };
                 if pbak_open.resolved {
                     transaction
                         .retail_objects
@@ -2122,15 +2184,29 @@ impl Runtime {
                 })?;
                 transaction
                     .retail_objects
-                    .install_retail_demo_start(snapshot.clone(), seed, crash_bound)
+                    .install_retail_demo_start_with_draw_stamp(
+                        snapshot.clone(),
+                        seed,
+                        crash_bound,
+                        draw_stamp,
+                    )
                     .map_err(|error| {
                         JsValue::from_str(&format!(
                             "could not install retail PBAK {eid}: {error:?}"
                         ))
                     })?;
-                Ok::<_, JsValue>(caption)
+                Ok::<_, JsValue>(Some(caption))
             },
         )?;
+        let Some(caption) = caption else {
+            dom.log(
+                &format!(
+                    "Retail PBAK {eid} physical open is waiting for the in-flight CD page transfer."
+                ),
+                false,
+            );
+            return Ok(RetailPbakStart::WaitingForPager);
+        };
         self.apply_retail_hard_restart_transaction(
             dom,
             captured_saved_level,
@@ -2152,6 +2228,28 @@ impl Runtime {
             ),
             false,
         );
+        Ok(RetailPbakStart::Started)
+    }
+
+    fn advance_waiting_retail_pbak_pager(&mut self) -> Result<(), String> {
+        let before = (
+            self.retail_objects.draw_count(),
+            self.retail_objects.machine().random_seed(),
+            self.retail_objects.random_seed_b(),
+            self.retail_metrics.executions,
+        );
+        self.update_pending_retail_page()?;
+        let after = (
+            self.retail_objects.draw_count(),
+            self.retail_objects.machine().random_seed(),
+            self.retail_objects.random_seed_b(),
+            self.retail_metrics.executions,
+        );
+        if after != before {
+            return Err(format!(
+                "PBAK physical-open wait advanced draw/RNG/GOOL state: before {before:?}, after {after:?}"
+            ));
+        }
         Ok(())
     }
 
@@ -2203,7 +2301,7 @@ impl Runtime {
         held: u16,
         #[cfg(feature = "browser-test-harness")] recorded_override: Option<u32>,
         dom: &Dom,
-    ) -> Result<(), JsValue> {
+    ) -> Result<bool, JsValue> {
         #[cfg(not(feature = "browser-test-harness"))]
         let recorded_override = None;
         debug_assert!(
@@ -2215,132 +2313,240 @@ impl Runtime {
         // the current physical state instead of the source level's last tick.
         self.latest_physical_held = held;
         let now_us = (timestamp_ms.max(0.0) * 1_000.0).round() as u64;
-        let shader_wall_ticks = (timestamp_ms.max(0.0) / 0.963_765).trunc() as u32;
         let assets_stalled = self.assets_stalled();
         // Native GetTicksElapsed continues through synchronous NSKill/NSInit.
         // Browser validation is asynchronous, so sample its wall-clock gap on
         // every callback even while the cooperative scheduler is frozen.
-        // Authored pause remains the sole ordinary wall-time exclusion.
-        let shader_clock_was_paused =
-            !assets_stalled && self.retail_objects.retail_pause_state().paused();
-        advance_retail_shader_clock(
-            &mut self.retail_shader_ticks_elapsed,
-            &mut self.previous_shader_wall_ticks,
-            shader_wall_ticks,
-            shader_clock_was_paused,
-        );
-        #[cfg(feature = "browser-test-harness")]
+        // Authored pause remains the sole ordinary wall-time exclusion. A
+        // physical PBAK open is different: its resumed callbacks represent
+        // one still-blocked source frame, so only NSUpdate may run there.
+        if self.retail_pbak_pager_waiting.is_none() {
+            let shader_wall_ticks = (timestamp_ms.max(0.0) / 0.963_765).trunc() as u32;
+            let shader_clock_was_paused =
+                !assets_stalled && self.retail_objects.retail_pause_state().paused();
+            advance_retail_shader_clock(
+                &mut self.retail_shader_ticks_elapsed,
+                &mut self.previous_shader_wall_ticks,
+                shader_wall_ticks,
+                shader_clock_was_paused,
+            );
+        }
         let mut simulation_stepped = false;
         if !assets_stalled && self.scheduler.sample(now_us) == FrameDecision::Step {
-            #[cfg(feature = "browser-test-harness")]
-            {
-                simulation_stepped = true;
-            }
-            let wall_ticks_current_frame = self.previous_step_us.map_or(34, |previous| {
-                i32::try_from(now_us.saturating_sub(previous) / 1_000).unwrap_or(i32::MAX)
-            });
-            self.previous_step_us = Some(now_us);
-            let wall_ticks_per_frame = round_retail_ticks(wall_ticks_current_frame);
-            // CoreFrame's pause event sees the current wall timing. PBAK may
-            // replace it with its prior/Crash boundary later in this frame.
-            self.retail_objects
-                .set_frame_timing(wall_ticks_current_frame, wall_ticks_per_frame);
-            let pending_buttons = std::mem::take(&mut self.pending_buttons);
-            let physical_held = if recorded_override.is_some() {
-                0
-            } else {
-                held | pending_buttons
-            };
-            self.card.update();
-            self.retail_objects
-                .publish_card_state(self.card.published_state())
-                .map_err(|error| {
-                    JsValue::from_str(&format!(
-                        "could not publish retail card frame state: {error:?}"
-                    ))
-                })?;
-            // CoreFrame reads the snapshot published at Crash's preceding
-            // traversal. The physical/demonstration update is deferred to the
-            // next BeforeMainObjectUpdate hook below, matching native order.
-            let snapshot = self.pad.snapshot();
-            let retail_state = is_retail_runtime_state(self.flow.state());
-            if retail_state && self.retail_runtime_error.is_none() {
-                let title_mdat = self.live_title_mdat_eid();
-                let current_zone = self.retail_camera.location().path.zone;
-                let pause_update = {
-                    let mut host = if let Some(mdat) = title_mdat {
-                        BrowserProgramHost::for_title_mdat(
-                            &self.level_assets.nsd,
-                            &self.level_assets.nsf,
-                            &self.level_assets.nsf_bytes,
-                            &mut self.retail_audio,
-                            &mut self.retail_zone_pager,
-                            &mut self.card,
-                            &mut self.storage,
-                            mdat,
-                        )
-                    } else {
-                        BrowserProgramHost::new(
-                            &self.level_assets.nsd,
-                            &self.level_assets.nsf,
-                            &self.level_assets.nsf_bytes,
-                            &mut self.retail_audio,
-                            &mut self.retail_zone_pager,
-                            &mut self.card,
-                            &mut self.storage,
-                        )
-                    };
-                    self.retail_objects.update_retail_pause(
-                        snapshot.tapped & u32::from(PAD_START) != 0,
-                        current_zone,
-                        &mut host,
-                    )
-                };
-                match pause_update {
-                    Ok(RetailPauseUpdate::Paused { .. }) => {
-                        dom.log("Authored retail pause controller opened.", false);
+            let resumed_pbak_pager_wait = self.retail_pbak_pager_waiting;
+            if resumed_pbak_pager_wait.is_some() {
+                // Scheduler timestamps are host bookkeeping and must remain
+                // current, but the cooperative source frame itself is still
+                // blocked inside native's synchronous physical `NSOpen`.
+                self.previous_step_us = Some(now_us);
+                if let Err(error) = self.advance_waiting_retail_pbak_pager() {
+                    let message = format!("retail PBAK paging wait failed: {error}");
+                    dom.log(&message, true);
+                    self.retail_runtime_error = Some(message);
+                    self.retail_tick_state = RetailTickState::Paused;
+                    self.retail_pbak_pager_waiting = None;
+                    return Ok(false);
+                }
+                match self.start_armed_retail_pbak(dom) {
+                    Ok(RetailPbakStart::WaitingForPager) => return Ok(false),
+                    Ok(RetailPbakStart::Started) => {
+                        self.retail_pbak_pager_waiting = None;
                     }
-                    Ok(RetailPauseUpdate::Failed) => {
-                        dom.log(
-                            "Authored retail pause controller was unavailable; gameplay continues.",
-                            true,
-                        );
-                    }
-                    Ok(RetailPauseUpdate::Resumed {
-                        event_faulted: false,
-                        ..
-                    }) => {
-                        dom.log("Authored retail pause controller resumed.", false);
-                    }
-                    // The typed diagnostic queue below owns the single C00
-                    // fault report while native still completes the resume.
-                    Ok(
-                        RetailPauseUpdate::Resumed {
-                            event_faulted: true,
-                            ..
-                        }
-                        | RetailPauseUpdate::Unchanged
-                        | RetailPauseUpdate::Blocked,
-                    ) => {}
-                    Err(error) => {
-                        let message = format!("retail pause handshake failed: {error:?}");
+                    Ok(RetailPbakStart::Unchanged) => {
+                        let message = "retail PBAK paging wait lost its armed playback".to_owned();
                         dom.log(&message, true);
                         self.retail_runtime_error = Some(message);
                         self.retail_tick_state = RetailTickState::Paused;
+                        self.retail_pbak_pager_waiting = None;
+                        return Ok(false);
+                    }
+                    Err(error) => {
+                        let message = format!("retail PBAK start failed: {}", js_message(&error));
+                        dom.log(&message, true);
+                        self.retail_runtime_error = Some(message);
+                        self.retail_tick_state = RetailTickState::Paused;
+                        self.retail_pbak_pager_waiting = None;
+                        return Ok(false);
                     }
                 }
-                self.drain_retail_reclaim_diagnostics(dom);
             }
+            let (wall_ticks_current_frame, wall_ticks_per_frame, physical_held, snapshot) =
+                if let Some(wait) = resumed_pbak_pager_wait {
+                    let newly_pending_buttons = std::mem::take(&mut self.pending_buttons);
+                    let physical_held = if recorded_override.is_some() {
+                        0
+                    } else {
+                        self.latest_physical_held | wait.pending_buttons | newly_pending_buttons
+                    };
+                    (
+                        wait.wall_ticks_current_frame,
+                        wait.wall_ticks_per_frame,
+                        physical_held,
+                        wait.pad_snapshot,
+                    )
+                } else {
+                    let wall_ticks_current_frame = self.previous_step_us.map_or(34, |previous| {
+                        i32::try_from(now_us.saturating_sub(previous) / 1_000).unwrap_or(i32::MAX)
+                    });
+                    self.previous_step_us = Some(now_us);
+                    let wall_ticks_per_frame = round_retail_ticks(wall_ticks_current_frame);
+                    // CoreFrame's pause event sees the current wall timing.
+                    // PBAK may replace it with its prior/Crash boundary later
+                    // in this same source frame.
+                    self.retail_objects
+                        .set_frame_timing(wall_ticks_current_frame, wall_ticks_per_frame);
+                    let pending_buttons = std::mem::take(&mut self.pending_buttons);
+                    let physical_held = if recorded_override.is_some() {
+                        0
+                    } else {
+                        held | pending_buttons
+                    };
+                    self.card.update();
+                    self.retail_objects
+                        .publish_card_state(self.card.published_state())
+                        .map_err(|error| {
+                            JsValue::from_str(&format!(
+                                "could not publish retail card frame state: {error:?}"
+                            ))
+                        })?;
+                    // CoreFrame reads the snapshot published at Crash's
+                    // preceding traversal. The physical/demonstration update
+                    // is deferred to the next BeforeMainObjectUpdate hook.
+                    let snapshot = self.pad.snapshot();
+                    let retail_state = is_retail_runtime_state(self.flow.state());
+                    if retail_state && self.retail_runtime_error.is_none() {
+                        let title_mdat = self.live_title_mdat_eid();
+                        let current_zone = self.retail_camera.location().path.zone;
+                        let pause_update = {
+                            let mut host = if let Some(mdat) = title_mdat {
+                                BrowserProgramHost::for_title_mdat(
+                                    &self.level_assets.nsd,
+                                    &self.level_assets.nsf,
+                                    &self.level_assets.nsf_bytes,
+                                    &mut self.retail_audio,
+                                    &mut self.retail_zone_pager,
+                                    &mut self.card,
+                                    &mut self.storage,
+                                    mdat,
+                                )
+                            } else {
+                                BrowserProgramHost::new(
+                                    &self.level_assets.nsd,
+                                    &self.level_assets.nsf,
+                                    &self.level_assets.nsf_bytes,
+                                    &mut self.retail_audio,
+                                    &mut self.retail_zone_pager,
+                                    &mut self.card,
+                                    &mut self.storage,
+                                )
+                            };
+                            self.retail_objects.update_retail_pause(
+                                snapshot.tapped & u32::from(PAD_START) != 0,
+                                current_zone,
+                                &mut host,
+                            )
+                        };
+                        match pause_update {
+                            Ok(RetailPauseUpdate::Paused { .. }) => {
+                                dom.log("Authored retail pause controller opened.", false);
+                            }
+                            Ok(RetailPauseUpdate::Failed) => {
+                                dom.log(
+                                    "Authored retail pause controller was unavailable; gameplay continues.",
+                                    true,
+                                );
+                            }
+                            Ok(RetailPauseUpdate::Resumed {
+                                event_faulted: false,
+                                ..
+                            }) => {
+                                dom.log("Authored retail pause controller resumed.", false);
+                            }
+                            // The typed diagnostic queue below owns the single
+                            // C00 fault report while native still resumes.
+                            Ok(
+                                RetailPauseUpdate::Resumed {
+                                    event_faulted: true,
+                                    ..
+                                }
+                                | RetailPauseUpdate::Unchanged
+                                | RetailPauseUpdate::Blocked,
+                            ) => {}
+                            Err(error) => {
+                                let message = format!("retail pause handshake failed: {error:?}");
+                                dom.log(&message, true);
+                                self.retail_runtime_error = Some(message);
+                                self.retail_tick_state = RetailTickState::Paused;
+                            }
+                        }
+                        self.drain_retail_reclaim_diagnostics(dom);
+                    }
 
-            // Native PbakPlay follows the CoreFrame pause gate. Starting an
-            // armed recording before that gate would incorrectly publish a
-            // nonzero PBAK state one boundary too early.
-            if let Err(error) = self.start_armed_retail_pbak(dom) {
-                let message = format!("retail PBAK start failed: {}", js_message(&error));
-                dom.log(&message, true);
-                self.retail_runtime_error = Some(message);
-                self.retail_tick_state = RetailTickState::Paused;
-            }
+                    // Native PbakPlay follows the CoreFrame pause gate.
+                    match self.start_armed_retail_pbak(dom) {
+                        Ok(RetailPbakStart::WaitingForPager) => {
+                            self.retail_pbak_pager_waiting = Some(RetailPbakPagerWait {
+                                wall_ticks_current_frame,
+                                wall_ticks_per_frame,
+                                pending_buttons,
+                                pad_snapshot: snapshot,
+                            });
+                            // Native's physical NSOpen blocks synchronously
+                            // behind an in-flight contiguous CD clone. Advance
+                            // only NSUpdate; all other source state is retained.
+                            // If that one update releases the transfer slot,
+                            // native's blocking open returns in this same
+                            // source frame, so retry before yielding the host.
+                            if let Err(error) = self.advance_waiting_retail_pbak_pager() {
+                                let message = format!("retail PBAK paging wait failed: {error}");
+                                dom.log(&message, true);
+                                self.retail_runtime_error = Some(message);
+                                self.retail_tick_state = RetailTickState::Paused;
+                                self.retail_pbak_pager_waiting = None;
+                                return Ok(false);
+                            }
+                            match self.start_armed_retail_pbak(dom) {
+                                Ok(RetailPbakStart::WaitingForPager) => return Ok(false),
+                                Ok(RetailPbakStart::Started) => {
+                                    self.retail_pbak_pager_waiting = None;
+                                }
+                                Ok(RetailPbakStart::Unchanged) => {
+                                    let message = "retail PBAK paging wait lost its armed playback"
+                                        .to_owned();
+                                    dom.log(&message, true);
+                                    self.retail_runtime_error = Some(message);
+                                    self.retail_tick_state = RetailTickState::Paused;
+                                    self.retail_pbak_pager_waiting = None;
+                                    return Ok(false);
+                                }
+                                Err(error) => {
+                                    let message =
+                                        format!("retail PBAK start failed: {}", js_message(&error));
+                                    dom.log(&message, true);
+                                    self.retail_runtime_error = Some(message);
+                                    self.retail_tick_state = RetailTickState::Paused;
+                                    self.retail_pbak_pager_waiting = None;
+                                    return Ok(false);
+                                }
+                            }
+                        }
+                        Ok(RetailPbakStart::Unchanged | RetailPbakStart::Started) => {}
+                        Err(error) => {
+                            let message =
+                                format!("retail PBAK start failed: {}", js_message(&error));
+                            dom.log(&message, true);
+                            self.retail_runtime_error = Some(message);
+                            self.retail_tick_state = RetailTickState::Paused;
+                        }
+                    }
+                    (
+                        wall_ticks_current_frame,
+                        wall_ticks_per_frame,
+                        physical_held,
+                        snapshot,
+                    )
+                };
+            let retail_state = is_retail_runtime_state(self.flow.state());
             // Pause/caption/restart handlers above can allocate voices. Native
             // exposes those draws to the same RNG-B word used by lighting and
             // by a following cross-stream transition.
@@ -2352,6 +2558,8 @@ impl Runtime {
                 .and_then(RetailPbakPlayback::pre_shader_ticks_elapsed)
             {
                 self.retail_shader_ticks_elapsed = recorded_ticks;
+                self.retail_objects
+                    .publish_retail_demo_draw_stamp(recorded_ticks);
             }
             let pbak_boundary = self
                 .retail_pbak
@@ -2407,6 +2615,7 @@ impl Runtime {
             let transition_queued = retail_state
                 && self.retail_runtime_error.is_none()
                 && self.process_retail_level_transition(dom)?;
+            let mut retail_pad_boundary_completed = false;
 
             if retail_state
                 && !transition_queued
@@ -2521,7 +2730,8 @@ impl Runtime {
                 if self.retail_runtime_error.is_none()
                     && self.retail_tick_state == RetailTickState::Running
                 {
-                    self.tick_retail_runtime(dom, pbak_boundary, physical_held, demo_override);
+                    retail_pad_boundary_completed =
+                        self.tick_retail_runtime(dom, pbak_boundary, physical_held, demo_override);
                     // GOOL audio commands run through the external browser
                     // host; reconcile their voice-allocation draws before
                     // any carry can be captured on the following frame.
@@ -2603,6 +2813,11 @@ impl Runtime {
                 let trace = self.retail_frame.tick();
                 self.show_loading_image = matches!(trace.presented(), PresentedFrame::LoadingImage);
             }
+            simulation_stepped = retail_source_frame_completed(
+                retail_state,
+                transition_queued,
+                retail_pad_boundary_completed,
+            );
 
             if !transition_queued {
                 self.handle_events(dom);
@@ -2694,7 +2909,7 @@ impl Runtime {
         )?;
         self.last_gl_error = self.stage.error();
         self.render_ui(dom)?;
-        Ok(())
+        Ok(simulation_stepped)
     }
 
     fn spawn_retail_objects(&mut self, dom: &Dom, log_scan: bool) -> Result<(), String> {
@@ -2784,11 +2999,12 @@ impl Runtime {
         pbak_boundary: Option<RetailPbakPadBoundary>,
         physical_held: u16,
         demo_override: Option<u32>,
-    ) {
+    ) -> bool {
         let authored_title = self.authored_title_runtime_active();
         let title_mdat = self.live_title_mdat_eid();
         let mut pbak_finish = None;
         let mut pbak_finish_effects_applied = false;
+        let mut pad_boundary_completed = false;
         let result = {
             let mut host = if let Some(mdat) = title_mdat {
                 BrowserProgramHost::for_title_mdat(
@@ -2821,6 +3037,7 @@ impl Runtime {
                         RETAIL_INSTRUCTION_BUDGET,
                         |runtime, host, point| {
                             let RetailTraversalBoundary::BeforeMainObjectUpdate { .. } = point;
+                            pad_boundary_completed = true;
                             let released_return = playback
                                 .as_ref()
                                 .is_some_and(RetailPbakPlayback::is_returning)
@@ -2873,16 +3090,44 @@ impl Runtime {
                     )
             } else {
                 let pad = &mut self.pad;
+                #[cfg(feature = "browser-test-harness")]
+                let direct_bonus_queued_state = &mut self.browser_test_direct_bonus_queued_state;
+                #[cfg(feature = "browser-test-harness")]
+                let direct_bonus_state_boundary =
+                    &mut self.browser_test_direct_bonus_state_boundary;
                 self.retail_objects
                     .run_frame_before_display_with_traversal_hook(
                         &mut host,
                         RETAIL_INSTRUCTION_BUDGET,
-                        |runtime, _host, point| {
-                            let RetailTraversalBoundary::BeforeMainObjectUpdate { .. } = point;
+                        |runtime, host, point| {
+                            let RetailTraversalBoundary::BeforeMainObjectUpdate { object, .. } =
+                                point;
+                            #[cfg(not(feature = "browser-test-harness"))]
+                            let _ = (host, object);
+                            pad_boundary_completed = true;
                             pad.update(physical_held, 0, demo_override);
                             runtime
                                 .set_pad_snapshot(0, retail_pad_snapshot(pad.snapshot()))
-                                .map_err(RuntimeError::Vm)
+                                .map_err(RuntimeError::Vm)?;
+                            #[cfg(feature = "browser-test-harness")]
+                            if let Some(state) = direct_bonus_queued_state.take() {
+                                // The parsed WarpC gate has a separate legal-
+                                // data regression proving that 0x1600 [0]
+                                // selects WillC state 32. Join at that resolved
+                                // event boundary here; the production state
+                                // binder, CardC ceremony, LoadState, app effect
+                                // routing, LEVEL_END, and destination mount all
+                                // remain live under the browser audit.
+                                runtime.browser_test_enter_resolved_event_state(
+                                    host,
+                                    object,
+                                    0x1600,
+                                    state,
+                                    &[0],
+                                )?;
+                                *direct_bonus_state_boundary = Some(state);
+                            }
+                            Ok(())
                         },
                     )
             }
@@ -3009,6 +3254,7 @@ impl Runtime {
             self.retail_runtime_error = Some(error);
             self.retail_tick_state = RetailTickState::Paused;
         }
+        pad_boundary_completed
     }
 
     fn update_pending_retail_page(&mut self) -> Result<(), String> {
@@ -3231,7 +3477,24 @@ impl Runtime {
         if !self.retail_tick_state.can_resolve_core_frame_transition() {
             return Ok(false);
         }
-        if self.next_lid == -1 && self.level_assets.level != FormatLevelId::TITLE {
+        #[cfg(feature = "browser-test-harness")]
+        if let Some(requested_lid) = self.browser_test_title_attract_lid {
+            if self.next_lid != -1 {
+                return Err(JsValue::from_str(
+                    "browser-test Title attract mount collided with an authored level request",
+                ));
+            }
+            self.retail_objects
+                .set_global_word(crust_sim::gool::GAME_STATE_GLOBAL, 0x600)
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not publish browser-test GAME_STATE_TITLE boundary: {error:?}"
+                    ))
+                })?;
+            self.next_lid = requested_lid;
+            self.browser_test_title_attract_lid = None;
+        }
+        let game_state = if self.next_lid == -1 && self.level_assets.level != FormatLevelId::TITLE {
             let game_state = self
                 .retail_objects
                 .global_word(crust_sim::gool::GAME_STATE_GLOBAL)
@@ -3240,15 +3503,16 @@ impl Runtime {
                         "could not read retail transition game state: {error:?}"
                     ))
                 })?;
-            if matches!(game_state, 0x200 | 0x300 | 0x400) {
-                self.next_lid = i32::try_from(FormatLevelId::TITLE.get())
-                    .expect("retail title level fits signed 32-bit");
-            }
-        }
-        let Some(requested_lid) = self
-            .retail_tick_state
-            .explicit_core_frame_transition(self.next_lid)
-        else {
+            game_state.cast_signed()
+        } else {
+            0
+        };
+        let Some(requested_lid) = retail_core_frame_transition_request(
+            self.retail_tick_state,
+            self.next_lid,
+            self.level_assets.level,
+            game_state,
+        ) else {
             return Ok(false);
         };
         self.next_lid = -1;
@@ -3354,6 +3618,7 @@ impl Runtime {
         effects: &[VmEffect],
         dom: &Dom,
     ) -> Result<(), String> {
+        let mut stormy_completion = StormyCutContentEffectGate::default();
         for effect in effects {
             match *effect {
                 VmEffect::MidiTogglePlayback { object, value } => {
@@ -3380,7 +3645,7 @@ impl Runtime {
                 }
                 VmEffect::LoadState {
                     saved_level: Some(saved_level),
-                    ..
+                    object,
                 } => {
                     #[cfg(feature = "browser-test-harness")]
                     {
@@ -3389,6 +3654,27 @@ impl Runtime {
                             .load_states
                             .saturating_add(1);
                     }
+                    let direct_bonus_destination = self
+                        .retail_objects
+                        .take_direct_bonus_completion_destination(object, saved_level)
+                        .map_err(|error| {
+                            format!("could not classify direct-bonus LoadState boundary: {error:?}")
+                        })?;
+                    if let Some(destination) = direct_bonus_destination {
+                        self.next_lid = i32::try_from(destination.get())
+                            .expect("validated retail Title LID fits signed 32-bit");
+                        // The sim published a coherent GAME_STATE_TITLE /
+                        // Main Menu pair. Treat it as an explicit host return,
+                        // not as the first publisher-logo boot of this direct
+                        // selection session.
+                        self.title_seen = true;
+                        dom.log(
+                            "Completed a directly selected bonus without a parent snapshot; returning to the Main Menu.",
+                            false,
+                        );
+                        break;
+                    }
+
                     let replaces_live_objects = saved_level == self.level_assets.level;
                     self.apply_retail_hard_restart_from_effect(dom, saved_level)?;
                     if replaces_live_objects {
@@ -3402,7 +3688,37 @@ impl Runtime {
                 VmEffect::LoadState {
                     saved_level: None, ..
                 } => return Err("GOOL LoadState reached the browser without a saved level".into()),
+                VmEffect::SendEvent(request) => {
+                    stormy_completion.observe_send(
+                        self.level_assets.level,
+                        request.sender,
+                        request.target,
+                        request.event,
+                        request.arguments(),
+                    );
+                }
                 VmEffect::Transition(level) => {
+                    if let Some((sender, recipient)) =
+                        stormy_completion.take_for_transition(self.level_assets.level, level)
+                    {
+                        let destination = self
+                            .retail_objects
+                            .take_direct_stormy_cut_content_destination(sender, recipient, level)
+                            .map_err(|error| {
+                                format!(
+                                    "could not classify Stormy cut-content transition: {error:?}"
+                                )
+                            })?;
+                        if let Some(destination) = destination {
+                            self.next_lid = i32::try_from(destination.get())
+                                .expect("validated retail Title LID fits signed 32-bit");
+                            self.title_seen = true;
+                            let message = STORMY_CUT_CONTENT_RECOVERY_DIAGNOSTIC.to_owned();
+                            dom.log(&message, true);
+                            self.retail_runtime_warning = Some(message);
+                            break;
+                        }
+                    }
                     self.next_lid = level;
                 }
                 _ => {
@@ -5292,8 +5608,8 @@ impl Runtime {
             .set_text_content(Some(&format!("0x{:02X}", current_level(&self.flow).raw())));
         dom.audio_state.set_text_content(Some(if self.muted {
             "MUTED"
-        } else if self.audio.is_some() {
-            "SYNTH ACTIVE"
+        } else if let Some(audio) = &self.audio {
+            audio.status_label()
         } else {
             "UNAVAILABLE"
         }));
@@ -5954,17 +6270,25 @@ fn launch(app: Rc<RefCell<App>>) {
 }
 
 #[cfg(feature = "browser-test-harness")]
+#[derive(Debug, Default)]
+struct BrowserTestStepState {
+    clock: BrowserTestClock,
+    host_callbacks: u64,
+    simulation_steps: u64,
+}
+
+#[cfg(feature = "browser-test-harness")]
 fn step_browser_test_frame(
     app: &Rc<RefCell<App>>,
     harness: &Object,
-    clock_and_count: &Rc<RefCell<(BrowserTestClock, u64)>>,
+    state: &Rc<RefCell<BrowserTestStepState>>,
     input: BrowserTestPadInput,
 ) {
-    let (timestamp_ms, step_count) = {
-        let mut state = clock_and_count.borrow_mut();
-        let timestamp_ms = state.0.take_timestamp_ms();
-        state.1 = state.1.wrapping_add(1);
-        (timestamp_ms, state.1)
+    let (timestamp_ms, host_callback_count) = {
+        let mut state = state.borrow_mut();
+        let timestamp_ms = state.clock.take_timestamp_ms();
+        state.host_callbacks = state.host_callbacks.wrapping_add(1);
+        (timestamp_ms, state.host_callbacks)
     };
     let (frame_result, effective_held) = {
         let mut app = app.borrow_mut();
@@ -5976,12 +6300,19 @@ fn step_browser_test_frame(
             .map_or_else(|| input.held_word(), |runtime| runtime.pad.snapshot().held);
         (frame_result, effective_held)
     };
-    let requested_lid = match frame_result {
-        Ok(Some(level)) => {
-            load_level_pair(Rc::clone(app), level);
-            JsValue::from_f64(f64::from(level.get()))
+    let direct_bonus_state_boundary = app
+        .borrow()
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.browser_test_direct_bonus_state_boundary);
+    let (requested_lid, simulation_stepped) = match frame_result {
+        Ok(outcome) => {
+            let requested_lid = outcome.requested_level.map_or(JsValue::NULL, |level| {
+                load_level_pair(Rc::clone(app), level);
+                JsValue::from_f64(f64::from(level.get()))
+            });
+            (requested_lid, outcome.simulation_stepped)
         }
-        Ok(None) => JsValue::NULL,
         Err(error) => {
             let message = js_message(&error);
             let _ = Reflect::set(
@@ -5990,17 +6321,39 @@ fn step_browser_test_frame(
                 &JsValue::from_str(&message),
             );
             app.borrow_mut().fail(&message);
-            JsValue::NULL
+            (JsValue::NULL, false)
         }
+    };
+    let step_count = {
+        let mut state = state.borrow_mut();
+        if simulation_stepped {
+            state.simulation_steps = state.simulation_steps.wrapping_add(1);
+        }
+        state.simulation_steps
     };
     for (name, value) in [
         ("lastHeld", JsValue::from_f64(f64::from(effective_held))),
         ("lastInputKind", JsValue::from_str(input.input_kind())),
         ("lastTimestampMs", JsValue::from_f64(timestamp_ms)),
+        (
+            "lastSimulationStepped",
+            JsValue::from_bool(simulation_stepped),
+        ),
+        (
+            "hostCallbackCount",
+            JsValue::from_f64(host_callback_count as f64),
+        ),
         ("stepCount", JsValue::from_f64(step_count as f64)),
         ("lastRequestedLid", requested_lid),
     ] {
         let _ = Reflect::set(harness.as_ref(), &JsValue::from_str(name), &value);
+    }
+    if let Some(state) = direct_bonus_state_boundary {
+        let _ = Reflect::set(
+            harness.as_ref(),
+            &JsValue::from_str("directBonusStateBoundary"),
+            &JsValue::from_f64(f64::from(state)),
+        );
     }
 }
 
@@ -6024,6 +6377,16 @@ fn install_browser_test_harness(
         harness.as_ref(),
         &JsValue::from_str("stepCount"),
         &JsValue::from_f64(0.0),
+    )?;
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("hostCallbackCount"),
+        &JsValue::from_f64(0.0),
+    )?;
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("lastSimulationStepped"),
+        &JsValue::FALSE,
     )?;
     Reflect::set(
         harness.as_ref(),
@@ -6063,10 +6426,229 @@ fn install_browser_test_harness(
         snapshot_retail_objects.as_ref().unchecked_ref(),
     )?;
 
-    let clock_and_count = Rc::new(RefCell::new((BrowserTestClock::default(), 0_u64)));
+    let app_for_title_attract = Rc::clone(app);
+    let harness_for_title_attract = harness.clone();
+    let queue_title_attract_mount = Closure::<dyn FnMut(u32)>::new(move |raw_lid| {
+        let result = (|| {
+            let target = FormatLevelId::new(raw_lid).map_err(|error| {
+                JsValue::from_str(&format!(
+                    "browser-test Title attract LID is invalid: {error}"
+                ))
+            })?;
+            if target == FormatLevelId::TITLE {
+                return Err(JsValue::from_str(
+                    "browser-test Title attract destination cannot be Title",
+                ));
+            }
+            if !matches!(target.get(), 0x0f | 0x1c) {
+                return Err(JsValue::from_str(
+                    "browser-test isolated Title attract destination must be Upstream or Temple Ruins",
+                ));
+            }
+            let mut app = app_for_title_attract.try_borrow_mut().map_err(|_| {
+                JsValue::from_str("runtime is busy while queuing a Title attract mount")
+            })?;
+            if !app.assets.has_pair(target) {
+                return Err(JsValue::from_str(
+                    "browser-test Title attract destination is not mounted in the local catalog",
+                ));
+            }
+            let runtime = app.runtime.as_mut().ok_or_else(|| {
+                JsValue::from_str("browser-test Title attract mount requires a running runtime")
+            })?;
+            if runtime.level_assets.level != FormatLevelId::TITLE {
+                return Err(JsValue::from_str(
+                    "browser-test Title attract mount must begin in the Title pair",
+                ));
+            }
+            if runtime.browser_test_title_attract_lid.is_some() || runtime.next_lid != -1 {
+                return Err(JsValue::from_str(
+                    "browser-test Title attract mount is already queued",
+                ));
+            }
+            runtime.browser_test_title_attract_lid = Some(
+                i32::try_from(target.get())
+                    .expect("validated retail Title attract LID fits signed 32-bit"),
+            );
+            Ok(())
+        })();
+        let error = result.err().map_or(JsValue::NULL, |error| {
+            JsValue::from_str(&js_message(&error))
+        });
+        let _ = Reflect::set(
+            harness_for_title_attract.as_ref(),
+            &JsValue::from_str("lastError"),
+            &error,
+        );
+    });
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("queueTitleAttractMount"),
+        queue_title_attract_mount.as_ref().unchecked_ref(),
+    )?;
+
+    let app_for_direct_bonus = Rc::clone(app);
+    let harness_for_direct_bonus = harness.clone();
+    let queue_direct_bonus_state_boundary = Closure::<dyn FnMut()>::new(move || {
+        let result = (|| {
+            let mut app = app_for_direct_bonus.try_borrow_mut().map_err(|_| {
+                JsValue::from_str("runtime is busy while queuing the direct-bonus state boundary")
+            })?;
+            let runtime = app.runtime.as_mut().ok_or_else(|| {
+                JsValue::from_str("browser-test direct-bonus completion requires a running runtime")
+            })?;
+            if runtime.level_assets.level.get() != 0x24 {
+                return Err(JsValue::from_str(
+                    "browser-test direct-bonus completion requires direct Tawna Bonus 1 LID 0x24",
+                ));
+            }
+            if runtime.browser_test_direct_bonus_queued_state.is_some()
+                || runtime.next_lid != -1
+                || runtime.pending_mount.is_some()
+                || runtime.loading_mount.is_some()
+            {
+                return Err(JsValue::from_str(
+                    "browser-test direct-bonus completion collided with a queued transition",
+                ));
+            }
+            if runtime.retail_pbak.is_some() {
+                return Err(JsValue::from_str(
+                    "browser-test direct-bonus completion cannot interrupt a retail demo",
+                ));
+            }
+            let main_arena = runtime
+                .retail_objects
+                .arena()
+                .main_object()
+                .ok_or_else(|| {
+                    JsValue::from_str(
+                        "browser-test direct-bonus completion requires a live Crash object",
+                    )
+                })?;
+            let main = runtime
+                .retail_objects
+                .object_for_arena(main_arena)
+                .ok_or_else(|| {
+                    JsValue::from_str(
+                        "browser-test direct-bonus Crash object has no live VM binding",
+                    )
+                })?;
+            let live_main = runtime
+                .retail_objects
+                .browser_test_live_objects()
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not inspect direct-bonus Crash object: {error:?}"
+                    ))
+                })?
+                .into_iter()
+                .find(|snapshot| snapshot.handle == main)
+                .ok_or_else(|| {
+                    JsValue::from_str(
+                        "browser-test direct-bonus Crash object is absent from the live snapshot",
+                    )
+                })?;
+            let will = Eid::from_name("WillC")
+                .expect("fixed retail player EID must be a valid five-character name");
+            if !live_main.is_player || live_main.faulted || live_main.program_eid != Some(will) {
+                return Err(JsValue::from_str(
+                    "browser-test direct-bonus main object is not a live WillC player",
+                ));
+            }
+            if runtime
+                .retail_objects
+                .saved_level_state()
+                .is_none_or(|snapshot| snapshot.level.get() != 0x24)
+            {
+                return Err(JsValue::from_str(
+                    "browser-test direct-bonus boot has no same-level restart snapshot",
+                ));
+            }
+            runtime.browser_test_direct_bonus_queued_state = Some(32);
+            Ok(())
+        })();
+        let error = result.err().map_or(JsValue::NULL, |error| {
+            JsValue::from_str(&js_message(&error))
+        });
+        let _ = Reflect::set(
+            harness_for_direct_bonus.as_ref(),
+            &JsValue::from_str("lastError"),
+            &error,
+        );
+    });
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("queueDirectBonusState32Boundary"),
+        queue_direct_bonus_state_boundary.as_ref().unchecked_ref(),
+    )?;
+
+    let app_for_card_save = Rc::clone(app);
+    let harness_for_card_save = harness.clone();
+    let queue_card_save_screen = Closure::<dyn FnMut()>::new(move || {
+        let result = (|| {
+            let mut app = app_for_card_save.try_borrow_mut().map_err(|_| {
+                JsValue::from_str("runtime is busy while queuing the card-save screen")
+            })?;
+            let runtime = app.runtime.as_mut().ok_or_else(|| {
+                JsValue::from_str("browser-test card save requires a running runtime")
+            })?;
+            if runtime.level_assets.level != FormatLevelId::TITLE {
+                return Err(JsValue::from_str(
+                    "browser-test card save must begin in the Title pair",
+                ));
+            }
+            if runtime.browser_test_title_attract_lid.is_some() || runtime.next_lid != -1 {
+                return Err(JsValue::from_str(
+                    "browser-test card save cannot replace a queued level transition",
+                ));
+            }
+            let save = SaveData {
+                level_count: 8,
+                initial_lives: 7 << 8,
+                unknown_6190c: 0x1234_5678,
+                mono: true,
+                sfx_volume: 239,
+                music_volume: 223,
+                item_pool_1: 0x2000_0000,
+                gem_count: 1,
+                ..SaveData::default()
+            };
+            runtime
+                .retail_objects
+                .restore_card_save_data(save)
+                .and_then(|()| runtime.retail_objects.set_global_word(1, 2))
+                .and_then(|()| {
+                    runtime
+                        .retail_objects
+                        .set_global_word(TITLE_STATE_GLOBAL, TitleScreen::Password.raw())
+                })
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not queue the authored card-save screen: {error:?}"
+                    ))
+                })?;
+            runtime.last_authoritative_save = save;
+            Ok(())
+        })();
+        let error = result.err().map_or(JsValue::NULL, |error| {
+            JsValue::from_str(&js_message(&error))
+        });
+        let _ = Reflect::set(
+            harness_for_card_save.as_ref(),
+            &JsValue::from_str("lastError"),
+            &error,
+        );
+    });
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("queueCardSaveScreen"),
+        queue_card_save_screen.as_ref().unchecked_ref(),
+    )?;
+
+    let step_state = Rc::new(RefCell::new(BrowserTestStepState::default()));
     let app_for_step = Rc::clone(app);
     let harness_for_step = harness.clone();
-    let clock_and_count_for_step = Rc::clone(&clock_and_count);
+    let step_state_for_step = Rc::clone(&step_state);
     let step = Closure::<dyn FnMut(u32)>::new(move |raw_held| {
         let input = match BrowserTestPadInput::physical(raw_held) {
             Ok(input) => input,
@@ -6082,18 +6664,18 @@ fn install_browser_test_harness(
         step_browser_test_frame(
             &app_for_step,
             &harness_for_step,
-            &clock_and_count_for_step,
+            &step_state_for_step,
             input,
         );
     });
     let app_for_recorded_step = Rc::clone(app);
     let harness_for_recorded_step = harness.clone();
-    let clock_and_count_for_recorded_step = Rc::clone(&clock_and_count);
+    let step_state_for_recorded_step = Rc::clone(&step_state);
     let step_recorded = Closure::<dyn FnMut(u32)>::new(move |held| {
         step_browser_test_frame(
             &app_for_recorded_step,
             &harness_for_recorded_step,
-            &clock_and_count_for_recorded_step,
+            &step_state_for_recorded_step,
             BrowserTestPadInput::recorded(held),
         );
     });
@@ -6114,6 +6696,9 @@ fn install_browser_test_harness(
     )?;
     step.forget();
     step_recorded.forget();
+    queue_card_save_screen.forget();
+    queue_direct_bonus_state_boundary.forget();
+    queue_title_attract_mount.forget();
     snapshot_retail_objects.forget();
     Ok(())
 }
@@ -6300,8 +6885,11 @@ fn start_animation_loop(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
     *callback_slot.borrow_mut() = Some(Closure::new(move |timestamp| {
         let frame_result = app_inner.borrow_mut().frame(timestamp);
         match frame_result {
-            Ok(Some(level)) => load_level_pair(Rc::clone(&app_inner), level),
-            Ok(None) => {}
+            Ok(outcome) => {
+                if let Some(level) = outcome.requested_level {
+                    load_level_pair(Rc::clone(&app_inner), level);
+                }
+            }
             Err(error) => app_inner.borrow_mut().fail(&js_message(&error)),
         }
         if let Some(callback) = callback_slot_inner.borrow().as_ref() {
@@ -6802,6 +7390,11 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
         )?;
         Reflect::set(
             debug,
+            &JsValue::from_str("audioContextState"),
+            &JsValue::from_str(audio.context_state_label()),
+        )?;
+        Reflect::set(
+            debug,
             &JsValue::from_str("sfxVolume"),
             &JsValue::from_f64(f64::from(output.sfx_volume())),
         )?;
@@ -6852,6 +7445,9 @@ fn update_browser_test_globals(debug: &Object, runtime: &Runtime) -> Result<(), 
         ("lifeCount", LIFE_COUNT_GLOBAL),
         ("initialLifeCount", INITIAL_LIFE_COUNT_GLOBAL),
         ("levelsUnlocked", LEVELS_UNLOCKED_GLOBAL),
+        ("gemCount", GEM_COUNT_GLOBAL),
+        ("keyCount", KEY_COUNT_GLOBAL),
+        ("itemPool1", ITEM_POOL_1_GLOBAL),
         ("itemPool2", ITEM_POOL_2_GLOBAL),
     ] {
         Reflect::set(

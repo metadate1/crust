@@ -12,7 +12,7 @@ committed. Release builds use fat LTO, one codegen unit, stripped symbols and ab
 ## Checks
 
 Run formatting, native and Wasm Clippy, native tests, native release, and both production and
-browser-harness Wasm builds before publishing:
+browser-harness Wasm builds before committing or pushing a private release candidate:
 
 ```bash
 npm run fmt
@@ -62,11 +62,15 @@ npm run serve:browser-harness
 
 It writes only to ignored `target/browser-test-dist/` and serves on
 `http://127.0.0.1:4175`; it never replaces production `dist/`. This feature build does not start
-the ordinary animation-frame loop. Instead, `window.__crustTest.step(heldMask)` advances exactly one
-34 ms sample through the same `App::frame` and asynchronous pair-remount path used by production.
-The hook accepts only a 16-bit pad mask and exposes no GOOL-state mutation or forced-transition
-operation. It is intended for an ignored, legally local browser campaign test; the normal
-`npm run build` artifact does not contain or expose `window.__crustTest`.
+the ordinary animation-frame loop. Instead, `window.__crustTest.step(heldMask)` runs one host
+callback through the same `App::frame` and asynchronous pair-remount path used by production. Most
+callbacks complete one 34 ms source sample. A callback that only advances asynchronous destination
+or pager work—including a transient physical-page wait during retail PBAK startup—reports a
+zero-step callback; the runner retains the same pad sample until that source frame completes. The
+step hook accepts only a 16-bit pad mask. The feature build also exposes narrowly scoped boundary
+helpers for the isolated Title-attract, direct-bonus, and virtual-card audits documented below.
+They are absent from the normal `npm run build` artifact, which does not contain or expose
+`window.__crustTest`.
 
 Run the deterministic Chrome smoke with one raw image or enough extracted pairs for the selected
 boot stream:
@@ -87,6 +91,28 @@ Use repeated `--asset` arguments for a BIN/ISO or additional extracted pairs. `-
 the browser executable. Add `--unlock-all` to assert in the feature-only read-only debug snapshot
 that both retail life globals equal `999 << 8`, the map access gate equals 99, and both key-path
 bits are present.
+
+Storage-specific browser regressions can opt into one local versioned record with
+`--seed-card /path/to/card.json` and/or `--seed-resume /path/to/resume.json`. The runner accepts
+only the exact v1 envelope, canonical base64 for each 128-byte retail payload, 15 card slots, and a
+16 KiB maximum input. It installs the validated text before navigation and then verifies the exact
+requested key/value without printing payload contents. With neither option the temporary profile
+must still begin with both Crust storage keys absent.
+
+A directly selected Tawna Bonus 1 has an owned-assets browser return audit:
+
+```bash
+node scripts/browser-harness-smoke.mjs \
+  --asset /path/to/legally-owned-disc.bin \
+  --audit-direct-bonus-return
+```
+
+The harness joins at the parsed WillC state-32 boundary already proven by the separate WarpC
+`0x1600 [0]` proximity-gate regression. From there it runs the production state binder and key
+ceremony, supplies CardC's ordinary physical confirmation edges, observes the real `LoadState`,
+requires the direct-boot classifier and `LEVEL_END`, waits for the asynchronous Title pair mount,
+and asserts Title state 5 (Main Menu). The audit fails on browser console/network/WebGL/runtime or
+object faults; it does not claim to steer Crash physically through the bonus portal.
 
 Cooked 2,048-byte ISO discovery has a separate non-proprietary import check:
 
@@ -133,12 +159,16 @@ Segments default to `"inputKind": "physical"` and accept only the console's 16-b
 mask. A legally local diagnostic reconstructed from PBAK may instead mark a segment
 `"inputKind": "recorded"`; only the feature-gated harness then supplies its complete 32-bit `held`
 word through the existing demo override while physical input remains zero. Never commit such local
-recordings. The completed ordinary-route browser proof uses a captured and reviewed pad-mask
-timeline plus exact level/checkpoint expectations for all 89 phases from publisher/title through
-Cortex, Ending, and the return to Title. It executes 141,776 replay frames without a skipped frame
-or synthetic handoff. The browser hook intentionally cannot force a transition or mutate GOOL
-state, so future secret, alternate-completion, or fault-recovery traces must meet the same standard
-rather than using test-only game-state shortcuts.
+recordings. A previously captured ordinary-route browser replay uses a reviewed pad-mask timeline
+plus exact level/checkpoint expectations for all 89 phases from publisher/title through Cortex,
+Ending, and the return to Title. It executed 141,776 replay frames without a skipped frame or
+synthetic handoff. It is historical evidence until the current exact carried-state Sunset Vista
+regression is fixed and the whole replay is repeated. The campaign-replay hook intentionally cannot
+force a transition or mutate GOOL state, so secret, alternate-completion, fault-recovery, and final
+release traces must meet the same standard rather than using test-only game-state shortcuts. The
+separate attract-audit hook described below has one narrower purpose: it supplies a dormant
+destination LID at an exact Title transition boundary, but never supplies a PBAK EID, snapshot,
+RNG seed, or recorded input.
 
 Opt-in survey exports can be assembled into one ignored campaign replay without copying their
 input into repository source. Keep one route's exported fragments under an ignored/local path,
@@ -165,6 +195,41 @@ It rejects missing RNG/draw/restart continuity, mismatched fragment metadata, no
 and handoffs that bypass the retail Title / Island Map mount. See
 [Local browser campaign replay discovery and composition](BROWSER_CAMPAIGN_REPLAY.md) for the
 manifest contract and safety rules.
+
+## Retail attract playback audit
+
+The shipped Title `GamOC` program contains Intro plus seven attract destinations: `0x0c`, `0x12`,
+`0x0a`, `0x0e`, `0x20`, `0x1d`, and `0x29`. It has no attract edge to Upstream `0x0f` or Temple
+Ruins `0x1c`, even though those pairs contain valid `pb0fB` and `pb0sB` recordings. Consequently an
+"all nine through untouched Title idle" test can never terminate. Verify authored behavior as
+seven natural Title returns plus two isolated dormant mounts:
+
+```bash
+npm run verify:browser-harness:smoke -- \
+  --asset /path/to/owned-disc.bin \
+  --frames 100000 \
+  --audit-retail-pbaks
+
+npm run verify:browser-harness:smoke -- \
+  --asset /path/to/owned-disc.bin \
+  --frames 10000 \
+  --audit-isolated-retail-pbak 0x0f
+
+npm run verify:browser-harness:smoke -- \
+  --asset /path/to/owned-disc.bin \
+  --frames 10000 \
+  --audit-isolated-retail-pbak 0x1c
+```
+
+The isolated feature-gated mount publishes `GAME_STATE_TITLE` and the destination LID at the
+ordinary checked transition boundary. Production `PbakChoose` still counts the mounted pair's
+type-19 entries, consumes RNG-B, constructs `pb0<level>B`, parses the user-owned recording, and
+runs its complete caption/return handshake. The harness rejects missing or faulted captions,
+non-acknowledged `0xE00`, malformed metadata, premature returns, runtime/GOOL/WebGL/network errors,
+or an incomplete first occurrence. A legal repeated recording may remain armed only after all
+required returns were already observed. Coverage is complete only after the final `LEVEL_END`
+request has mounted a live Title pair again: the runtime must be running at current and mounted LID
+`0x19`, with resident pages and entries and no pending browser-test destination request.
 
 ## Local-data verification
 

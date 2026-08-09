@@ -1,19 +1,32 @@
 # Compatibility and known limits
 
-`crust` is a runnable Rust/Wasm interoperability implementation. Its ordinary NTSC-U campaign now
-has a complete owned-BIN browser proof, but the project does not yet claim parity for every secret,
+`crust` is a runnable Rust/Wasm interoperability implementation. Legally local native and
+owned-BIN browser captures cover the ordinary NTSC-U campaign in coherent sections, but the
+current tree is **not yet certified as a complete opening-to-ending playthrough**. An exact
+session-carried Sunset Vista regression is being repaired before the earlier full-route capture is
+accepted as current evidence. The project also does not yet claim parity for every secret,
 alternate-completion, damaged-save, demo, hardware, SPU, or mechanical-CD edge case. The
 distinction below is intentional: a subsystem can be parsed and unit-tested without being
 connected to the live browser gameplay path.
 
-The current native canonical regression starts at the retail publisher/title opening, carries the
-same process/session and physical-pad history through the main-map campaign, defeats Dr. Neo
-Cortex, executes Ending, and remounts Title. The matching real-browser proof now completes that
-ordinary route across all 44 mounted pairs and 141,776 replay frames with no skipped frame or
-failed checkpoint. Stormy Ascent separately reaches its authored end warp from a direct boot in
-both native characterization and an exact 9,334-frame owned-BIN browser replay. Natural key
-earning and the authored Whole Hog/Fumbling map branches remain separate checks; retail IsldC has
-no Stormy Ascent destination.
+An earlier native/browser capture starts at the retail publisher/title opening, carries the same
+process/session and physical-pad history through the main-map campaign, defeats Dr. Neo Cortex,
+executes Ending, and remounts Title. Subsequent exact carried-state work exposed a reproducible
+Sunset Vista route failure, so that 141,776-frame capture is retained below as historical evidence,
+not a current release gate. Stormy Ascent separately reaches its authored end warp from a direct
+boot in both native characterization and an exact 9,334-frame owned-BIN browser replay. Both
+authored keys and their Whole Hog/Fumbling map branches have focused ordinary-input carried
+proofs, but those secret branches are not yet joined into the empty-card full-campaign browser
+chain; retail IsldC has no Stormy Ascent destination.
+
+Stormy Ascent's three Cortex-token boxes are authentic cut content with no authored bonus
+destination: retail `DispC` handles only LIDs `0x23` and `0x1d`, then Stormy's `0x22` path falls
+through to `LLEV 0`. Because level-zero metadata does not exist, a directly selected Stormy stream
+would otherwise fail after the third token. The browser recognizes only that exact non-retail
+direct-boot handshake—Stormy LID, live `DispC` pickup controller/state, player-directed completion
+event, zero destination/counters, one of the three serialized token checkpoints, and a Stormy save
+snapshot—and returns to Title's Main Menu with a visible diagnostic. It does not invent a Cortex
+bonus layout, and session-carried or otherwise valid LID-zero transitions are not rewritten.
 
 ## What is connected in the browser
 
@@ -512,8 +525,14 @@ no Stormy Ascent destination.
   a one-shot same-level snapshot only when a fresh host boot encounters their source save-restricted
   spawn zone, making direct-
   boot death/restart deterministic. Normal parent-to-bonus session mounts retain the parent
-  snapshot exactly. Authored `-2` completion after a synthetic direct boot still lacks a distinct
-  host return destination, so this is not evidence of a complete bonus round trip. LevelUpdate now
+  snapshot exactly. Authored `-2` completion after that exact host-seeded direct boot is classified
+  only when live WillC state 32 loads the same-level synthetic snapshot; the host discards that
+  one-shot snapshot and returns to Title/Main Menu. Real parent-carried bonus returns remain
+  unchanged. An owned-BIN Chrome audit joins at the separately proven parsed state-32 boundary,
+  runs the actual CardC, `LoadState`, app classification, `LEVEL_END`, and asynchronous Title mount
+  path, and asserts Main Menu without console, network, WebGL, runtime, or object faults. It is
+  downstream browser-path evidence, not a claim that automation physically traversed the portal.
+  LevelUpdate now
   publishes the current zone graphics flags into GOOL global 30 before the next object pass. All
   five legal bonus spawn zones produce `0x2002`, and the exact Tawna-bonus WillC WARP program tests
   bit `0x2000` before its LoadState branch. A legally local cross-stream test carries the authentic
@@ -809,9 +828,11 @@ no Stormy Ascent destination.
   completes that real operation-two handshake, and the shared `0e` Password selection bypasses it
   as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
-- The canonical legally local native session-carry regression begins at the retail
-  publisher/title opening and reaches Cortex, Ending, and the final Title remount without a process
-  reset. Independent deterministic routes also reach authored exits throughout the retail
+- The intended canonical legally local native session-carry regression begins at the retail
+  publisher/title opening and is required to reach Cortex, Ending, and the final Title remount
+  without a process reset. The current exact run instead stops in Sunset Vista after a late-c3
+  rotating-wall interaction displaces Crash outside the c4 support. Independent deterministic
+  routes do reach authored exits throughout the retail
   campaign, including N. Sanity Beach, Jungle Rollers, Hog Wild, Whole Hog, Boulder Dash, Native
   Fortress, and current-phase Rolling Stones. N. Sanity's fresh ordinary-pad golden
   activates checkpoint 19, reaches `0xa00` counted boxes, executes `WarpC` states zero through four,
@@ -824,7 +845,7 @@ no Stormy Ascent destination.
   carried frame 5,041 through its authored Level Complete request. Temple's completion graph
   requests Title on frame 633, the next Map selects Road to Nowhere on frame 253, and Road reaches
   its authored Level Complete request on frame 2,449 with zero deaths or restarts. The independent
-  carried fixture then continues through Boulder Dash and every remaining main-map level and boss,
+  previously captured carried fixture continues through Boulder Dash and every remaining main-map level and boss,
   retains the exact inherited Jaws, Castle Machinery, and Lab phases, crosses Great Hall, defeats
   Cortex, executes Ending, and remounts Title with level 32 unlocked. This complete native
   main-map chain still includes its documented legally local PBAK-assisted sections and Lost
@@ -844,9 +865,10 @@ no Stormy Ascent destination.
   replay segments whose destination mount has already completed; no skipped segment advances the
   simulation. The same zero-recovery owned-BIN session then completes Up the Creek and Ripper Roo
   before visibly mounting The Lost City at draw 37,277. That historical 37,313-frame checkpoint
-  has since been superseded by the completed 141,776-frame Title-to-Title browser replay. The final
-  run crosses every later campaign mount, Cortex, Ending, and the return to Title with no skipped
-  replay frame, death-camera frame, or failed runtime/checkpoint assertion. Its three hard-restart
+  was followed by a 141,776-frame Title-to-Title browser replay. That historical run crossed every
+  later campaign mount, Cortex, Ending, and the return to Title with no skipped replay frame,
+  death-camera frame, or failed runtime/checkpoint assertion, but it must be repeated after the
+  current carried-state regression is fixed. Its three hard-restart
   and two LoadState calls comprise Jungle Rollers' authored fall load/restart plus The Great Gate's
   different-stream bonus load/restart and protected parent restart.
   Representative Tawna, second-Tawna, and Cortex bonus layouts have complete ordinary-pad native
@@ -858,7 +880,32 @@ no Stormy Ascent destination.
   BIN Chrome replay consumes all 9,334 captured frames, skips none, and mounts Level Complete with
   exact draw/process count 9,334 and RNG-A `0x10448346`. Castle Machinery's corrected exact carried
   route also passes at 6,071 frames without the former impossible opposing-direction fallback.
-  Natural key earning and the Whole Hog/Fumbling map branches remain separate.
+  Lights Out retains a dead retail `DispC` branch that would select Bonus 2 layout 16, but the
+  owned NTSC-U pair serializes zero Tawna-token crates. Crust preserves that data exactly and does
+  not invent a player-reachable bonus entrance; an owned-disc regression pins both the selector
+  words and the complete absence of token sources.
+  The natural gem handshake is now independently pinned across all 26 obtainable parents: each
+  gameplay `WillC` retains the no-death/route eligibility gate and publishes completed LID plus
+  destroyed-box count to globals 71/70, while Level Complete's `GamOC` retains all 26 retail crate
+  totals, Stormy Ascent's additional cut-content row, the exact box comparison, and both
+  map-ordinal inventory-bit branches. The owned-stream matrix passes without injecting an award or
+  changing runtime state. This proves the data-authored award contract; physically breaking every
+  crate in one continuous empty-card campaign remains a separate end-to-end gate.
+  Sunset's natural Cortex-bonus key → Whole Hog chain and Jaws' natural Cortex-bonus key → Fumbling
+  chain both pass as focused exact-carry ordinary-input regressions. Sunset's branch also passes in
+  a current-tree owned-BIN Chrome campaign from publisher/title and empty storage through its three
+  physical Cortex tokens, Bonus 1, the first key, protected Sunset parent restore, normal exit,
+  authored Island Map unlock, Whole Hog completion, and return to Title. The browser consumed all
+  77,139 replay inputs across 77,151 executed frames, skipped none, retained key count one and 17
+  unlocked levels, and reported zero browser, console, runtime, GOOL-object, or zone failures.
+  Jaws' branch independently passes from fresh browser storage as well: the current-tree owned-BIN
+  Chrome campaign physically collects all three Jaws Cortex tokens, traverses Bonus 1, earns the
+  second key, restores and completes Jaws, selects the newly unlocked Fumbling in the Dark through
+  authored Island Map logic, completes Fumbling, and returns to Title. Chrome executed 127,134
+  frames (127,127 replay inputs plus seven transition-settle frames), skipped none, retained key
+  count one in retail item-pool-two bit 10 and 27 unlocked levels, and reported zero browser,
+  console, runtime, GOOL-object, or zone failures. Joining both independently clean secret paths
+  into the same longer empty-card browser campaign remains separate.
   Other remaining gates include unfinished bonus-layout variants, broader death/checkpoint
   sequences, alternate completion, long soak, mobile audio sessions, and a multiple physical-
   gamepad matrix.

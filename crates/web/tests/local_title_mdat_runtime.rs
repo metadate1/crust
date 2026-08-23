@@ -1660,6 +1660,9 @@ impl<'assets> AuthoredTitleHarness<'assets> {
         let action = self.runtime.begin_retail_title_update().unwrap();
         if let Some(RetailTitleAction::LoadScreen { screen, .. }) = action {
             self.mount(screen);
+            self.runtime
+                .continue_retail_title_update_after_load()
+                .unwrap();
         }
         self.runtime.finish_retail_title_update().unwrap();
         self.runtime.finish_deferred_display_frame().unwrap();

@@ -159,11 +159,11 @@ Segments default to `"inputKind": "physical"` and accept only the console's 16-b
 mask. A legally local diagnostic reconstructed from PBAK may instead mark a segment
 `"inputKind": "recorded"`; only the feature-gated harness then supplies its complete 32-bit `held`
 word through the existing demo override while physical input remains zero. Never commit such local
-recordings. A previously captured ordinary-route browser replay uses a reviewed pad-mask timeline
-plus exact level/checkpoint expectations for all 89 phases from publisher/title through Cortex,
-Ending, and the return to Title. It executed 141,776 replay frames without a skipped frame or
-synthetic handoff. It is historical evidence until the current exact carried-state Sunset Vista
-regression is fixed and the whole replay is repeated. The campaign-replay hook intentionally cannot
+recordings. The current ordinary-route browser replay uses a reviewed pad-mask timeline plus exact
+level/checkpoint expectations for all 89 phases from publisher/title through Cortex, Ending, and
+the return to Title. Strict discovery joins all 89 fresh exporter fragments into one unique path;
+the current browser artifact consumes all 146,501 replay frames plus two declared transition-settle
+frames without a skipped frame or synthetic handoff. The campaign-replay hook intentionally cannot
 force a transition or mutate GOOL state, so secret, alternate-completion, fault-recovery, and final
 release traces must meet the same standard rather than using test-only game-state shortcuts. The
 separate attract-audit hook described below has one narrower purpose: it supplies a dormant
@@ -195,6 +195,43 @@ It rejects missing RNG/draw/restart continuity, mismatched fragment metadata, no
 and handoffs that bypass the retail Title / Island Map mount. See
 [Local browser campaign replay discovery and composition](BROWSER_CAMPAIGN_REPLAY.md) for the
 manifest contract and safety rules.
+
+Legally local PCSX-RR `.pxm` and PSXjin `.pjm` input movies can be parsed and converted into the
+same ignored replay format. The importer validates the version-two movie header, standard pads,
+player-two/control-byte inactivity, native frame bounds, and the documented pad layout. It samples
+one 60 Hz native input from each two-frame group by default, preserves recorded opposing
+directions, and run-length encodes the result:
+
+```bash
+npm run import:psx-movie-replay -- \
+  --movie /path/to/movie.pxm --check
+
+npm run import:psx-movie-replay -- \
+  --movie /path/to/movie.pxm \
+  --start-frame 1737 --end-frame 2400 \
+  --boot-lid 0x09 \
+  --prefix-replay target/local-campaign/publisher-opening/lid-19-draw-00000000-publisher-title-to-09.json \
+  --expect-clean \
+  --output target/local-native-movie/n-sanity-aligned.replay.json
+
+npm run verify:browser-harness:smoke -- \
+  --asset /path/to/owned-disc.bin \
+  --replay target/local-native-movie/n-sanity-aligned.replay.json
+```
+
+`--prefix-replay` requires a legally-local, noncanonical replay with an exact terminal expectation.
+The importer moves that expectation onto the prefix's final segment, so the browser must prove the
+destination mount before the first movie input. `--expect-clean` checks restart, LoadState, and
+death-camera counters after every imported tick and stops at the first change.
+
+The last example is deliberately a diagnostic, not an automatic parity verdict. A power-on
+emulator movie inherits BIOS, publisher/title, RNG, process, checkpoint, card, and loading state.
+The verified prefix preserves Crust's equivalent session carry but does not prove that every hidden
+native value is identical. PCSX-RR movies also contain 60 Hz emulator samples whose actual
+game-input poll/lag map must be observed rather than inferred indefinitely with a fixed 2:1 sample.
+Use `--start-frame`, `--end-frame`, `--sample-index`, and `--native-step` only after establishing an
+observable alignment boundary, and keep the movie, converted replay, captures, and logs ignored.
+The importer never treats a TAS movie as game data or as a canonical Crust campaign fixture.
 
 ## Retail attract playback audit
 
@@ -237,15 +274,75 @@ Legally owned data may be placed under ignored `local-data/` or selected from an
 Never add fixtures cut from game streams. Synthetic pages and malformed byte arrays belong inline
 in tests. If local golden hashes or screenshots are generated, keep them in ignored `artifacts/`.
 
-The hosted retail-runtime and all-pair fractional camera checks can be run directly against a local
-raw image without extracting or copying it into the repository:
+The two raw-disc `local_retail_runtime` checks and the all-pair fractional camera check can be run
+without extracting or copying the image into the repository:
 
 ```bash
 C1_DISC_IMAGE=/path/to/disc.bin \
-  cargo test -p crust-sim --test local_retail_runtime --locked -- --ignored --nocapture
+  cargo test -p crust-sim --test local_retail_runtime --locked \
+  n_sanity_szon_resolves_last_serialized_neighbor_at_inclusive_origin \
+  -- --ignored --exact --nocapture
+C1_DISC_IMAGE=/path/to/disc.bin \
+  cargo test -p crust-sim --test local_retail_runtime --locked \
+  n_sanity_neighbors_spawn_and_crash_hosts_both_boot_children \
+  -- --ignored --exact --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin \
   cargo test -p crust-web --lib --locked \
   builds_every_fractional_spawn_snapshot_directly_from_raw_disc -- --ignored --nocapture
+```
+
+Checks that use `C1_STREAM_DIR` need extracted files. The extractor accepts only an explicit disc
+and output path, validates and stages all 88 known streams, atomically claims a new output
+directory, and publishes canonical lowercase files with create-new semantics. It never replaces an
+existing path. The claimed directory can be visible while publication finishes, so consume it only
+after the command succeeds. A publication failure or interruption deliberately leaves the exact
+claimed output path in place: inspect and remove it manually before retrying, since automatic
+rollback could delete a replacement installed by another same-user process. Ordinary failures
+remove the private sibling staging directory or return its cleanup error. Any termination that
+bypasses Rust cleanup—including `SIGKILL`—or a power loss can leave
+`.OUTPUT-NAME.crust-extract-PID-N`; confirm that PID is no longer running, inspect the path, and
+remove that stale staging directory manually:
+
+```bash
+cargo run --locked -p crust-formats --bin extract-streams -- \
+  /path/to/disc.bin local-data/streams
+```
+
+The current all-target inventory contains 1,359 tests: 1,099 default-active and 260 ignored. The
+main current-fixture sweep explicitly excludes the replay exporter and nine opt-in historical
+fixtures, so it executes 250 entries serially. One of those entries validates its current
+Up-the-Creek/Ripper/Map prefix and deliberately stops before a separately opt-in legacy Lost City
+tail. The raw-disc checks read the whole image, and several route tests need a 64 MiB thread stack.
+Run it from a shell where no other behavior-changing `C1_*` variables are set; the command below
+then supplies only the disc, stream, and stack inputs and explicitly clears the known opt-ins.
+`--no-fail-fast` lets the inventory continue past any remaining current-fixture failure so the
+complete current-fixture diagnostic result is reported:
+
+```bash
+env -u C1_BROWSER_REPLAY_EXPORT \
+  -u C1_LEGACY_SLIPPERY_CARRY -u C1_LEGACY_SUNSET_CARRY \
+  -u C1_LEGACY_LOST_RESTART_ROUTE -u C1_LEGACY_SYNTHETIC_CAMPAIGN \
+  C1_DISC_IMAGE=/path/to/disc.bin \
+  C1_STREAM_DIR="$(pwd)/local-data/streams" \
+  RUST_MIN_STACK=67108864 \
+  cargo test --workspace --all-targets --locked --no-fail-fast -- \
+  --ignored --test-threads=1 \
+  --skip legacy_ \
+  --skip lost_city_completion_route_reaches_title_after_checkpoint_recovery \
+  --skip exported_publisher_opening_composes_through_jungle_mount
+```
+
+The replay-export test opts into writing legally local replay fragments and must run alone because
+ordinary surveys deliberately reject that export mode. Give every run a fresh ignored directory:
+
+```bash
+mkdir -p "$(pwd)/target/local-campaign"
+C1_STREAM_DIR="$(pwd)/local-data/streams" \
+  C1_BROWSER_REPLAY_EXPORT="$(mktemp -d "$(pwd)/target/local-campaign/publisher-opening.XXXXXX")" \
+  RUST_MIN_STACK=67108864 \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  exported_publisher_opening_composes_through_jungle_mount -- \
+  --ignored --exact --test-threads=1
 ```
 
 These tests are ignored by default because they require user-supplied copyrighted data. Do not

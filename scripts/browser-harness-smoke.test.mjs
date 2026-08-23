@@ -699,6 +699,32 @@ test("browser smoke arguments keep the harness local and assets explicit", () =>
   assert.equal(parsed.cardStorageSeed.endsWith("/local-data/card.json"), true);
   assert.equal(parsed.resumeStorageSeed.endsWith("/local-data/resume.json"), true);
   assert.equal(parsed.assets.length, 2);
+  const video = parseArguments(
+    [
+      "--asset",
+      "./disc.bin",
+      "--replay",
+      "./campaign.json",
+      "--video",
+      "./target/campaign.mp4",
+      "--chapters",
+      "./target/campaign-chapters.json",
+    ],
+    {},
+  );
+  assert.equal(video.video.endsWith("/target/campaign.mp4"), true);
+  assert.equal(
+    video.chapters.endsWith("/target/campaign-chapters.json"),
+    true,
+  );
+  assert.throws(
+    () => parseArguments(["--video", "./target/campaign.mp4"], {}),
+    /requires --replay/,
+  );
+  assert.throws(
+    () => parseArguments(["--replay", "./campaign.json", "--video", "./target/campaign.mp4"], {}),
+    /requires --chapters/,
+  );
   const audit = parseArguments(
     ["--asset", "./disc.bin", "--frames", "1000000", "--audit-retail-pbaks"],
     {},
@@ -1299,8 +1325,64 @@ test("recorded replay segments preserve full 32-bit PBAK words explicitly", () =
         bootLid: 0x0e,
         segments: [{ frames: 1, inputKind: "demo", held: 0 }],
       }),
-    /must be "physical" or "recorded"/,
+    /must be "physical", "recorded", or "snapshot"/,
   );
+});
+
+test("snapshot replay segments preserve complete native pad history", () => {
+  const replay = normalizeReplay({
+    schema: 1,
+    bootLid: 0x19,
+    segments: [{
+      frames: 1,
+      inputKind: "snapshot",
+      held: 0,
+      tapped: 0,
+      heldPrevious: 0x0800,
+      tappedPrevious: 0x0800,
+      heldPrevious2: 0,
+    }],
+  });
+  assert.deepEqual(replay.segments[0], {
+    frames: 1,
+    inputKind: "snapshot",
+    held: 0,
+    tapped: 0,
+    heldPrevious: 0x0800,
+    tappedPrevious: 0x0800,
+    heldPrevious2: 0,
+    beforeHeld: 0,
+    beforeTapped: 0,
+    beforeHeldPrevious: 0x0800,
+    beforeTappedPrevious: 0x0800,
+    beforeHeldPrevious2: 0,
+    expect: {},
+    while: undefined,
+    settleFrames: 0,
+    settleHeld: 0,
+  });
+  assert.equal(replayStepMethod("snapshot"), "stepSnapshotBoundary");
+  for (const invalid of [
+    { frames: 2 },
+    { frames: 1, settleFrames: 1 },
+  ]) {
+    assert.throws(
+      () => normalizeReplay({
+        schema: 1,
+        bootLid: 0x19,
+        segments: [{
+          inputKind: "snapshot",
+          held: 0,
+          tapped: 0,
+          heldPrevious: 0,
+          tappedPrevious: 0,
+          heldPrevious2: 0,
+          ...invalid,
+        }],
+      }),
+      /snapshot input/,
+    );
+  }
 });
 
 test("browser snapshot rejects runtime, fault, console, and WebGL errors", () => {

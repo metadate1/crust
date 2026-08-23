@@ -5,9 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "extract-streams"
+path = "src/bin/extract_streams.rs"
+
 [dev-dependencies]
 proptest.workspace = true
 
 [lints]
 workspace = true
-

@@ -1,12 +1,16 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createReadStream } from "node:fs";
 import {
   access,
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   stat,
+  statfs,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -28,8 +32,12 @@ const DIRECT_BONUS_AUDIT_LID = 0x24;
 const DEFAULT_FRAMES = 120;
 const REPLAY_BATCH_FRAME_LIMIT = 128;
 const REPLAY_ZERO_STEP_CALLBACK_LIMIT = 512;
+const VIDEO_FRAME_RATE = 30;
+const VIDEO_MINIMUM_FREE_BYTES = 3 * 1024 * 1024 * 1024;
+const VIDEO_DISK_CHECK_INTERVAL = 300;
 const PHYSICAL_INPUT_KIND = "physical";
 const RECORDED_INPUT_KIND = "recorded";
+const SNAPSHOT_INPUT_KIND = "snapshot";
 const ALL_LEVELS_MAX_LIVES = 999 << 8;
 const ALL_LEVELS_UNLOCK_GATE = 99;
 const ALL_LEVELS_SECRET_PATH_BITS = (1 << 10) | (1 << 20);
@@ -89,8 +97,9 @@ function normalizeReplayInputKind(raw, label) {
   if (
     inputKind !== PHYSICAL_INPUT_KIND
     && inputKind !== RECORDED_INPUT_KIND
+    && inputKind !== SNAPSHOT_INPUT_KIND
   ) {
-    throw new Error(`${label} must be "physical" or "recorded"`);
+    throw new Error(`${label} must be "physical", "recorded", or "snapshot"`);
   }
   return inputKind;
 }
@@ -98,7 +107,27 @@ function normalizeReplayInputKind(raw, label) {
 export function replayStepMethod(inputKind) {
   if (inputKind === PHYSICAL_INPUT_KIND) return "step";
   if (inputKind === RECORDED_INPUT_KIND) return "stepRecorded";
+  if (inputKind === SNAPSHOT_INPUT_KIND) return "stepSnapshotBoundary";
   throw new Error(`unsupported replay input kind ${JSON.stringify(inputKind)}`);
+}
+
+function replayStepArguments(inputKind, input) {
+  if (inputKind !== SNAPSHOT_INPUT_KIND) return String(input);
+  return `[${[
+    input.held,
+    input.tapped,
+    input.heldPrevious,
+    input.tappedPrevious,
+    input.heldPrevious2,
+    input.beforeHeld,
+    input.beforeTapped,
+    input.beforeHeldPrevious,
+    input.beforeTappedPrevious,
+    input.beforeHeldPrevious2,
+    input.frameStamp ?? 0xffff_ffff,
+    input.ticksCurrentFrame ?? 0xffff_ffff,
+    input.ticksPerFrame ?? 0xffff_ffff,
+  ].join(",")}]`;
 }
 
 export function nextReplayBatchFrameCount(
@@ -882,6 +911,9 @@ Options:
   --no-server        Use an already-running harness server
   --chrome PATH      Chrome/Chromium executable
   --screenshot PATH  PNG output (default: target/browser-test-artifacts/smoke.png)
+  --video PATH       Per-source-frame H.264 MP4 output; requires --replay
+  --chapters PATH    JSON chapter list for --video
+  --ffmpeg PATH      ffmpeg executable (default: /usr/bin/ffmpeg)
   --help             Show this help
 
 CRUST_GAME_FILES may supply additional paths separated by the platform path delimiter.
@@ -908,6 +940,9 @@ export function parseArguments(argv, environment = process.env) {
       repositoryRoot,
       "target/browser-test-artifacts/smoke.png",
     ),
+    video: undefined,
+    chapters: undefined,
+    ffmpeg: environment.CRUST_FFMPEG_BIN ?? "/usr/bin/ffmpeg",
     syntheticCookedIsoImport: false,
     auditRetailPbaks: false,
     auditIsolatedRetailPbakLid: undefined,
@@ -1022,6 +1057,21 @@ export function parseArguments(argv, environment = process.env) {
       case "--screenshot":
         options.screenshot = resolve(value());
         break;
+      case "--video":
+        if (options.video !== undefined) {
+          throw new Error("--video may be supplied only once");
+        }
+        options.video = resolve(value());
+        break;
+      case "--chapters":
+        if (options.chapters !== undefined) {
+          throw new Error("--chapters may be supplied only once");
+        }
+        options.chapters = resolve(value());
+        break;
+      case "--ffmpeg":
+        options.ffmpeg = resolve(value());
+        break;
       case "--help":
       case "-h":
         options.help = true;
@@ -1037,6 +1087,15 @@ export function parseArguments(argv, environment = process.env) {
     throw new Error(
       "--synthetic-cooked-iso-import cannot be combined with assets or launch/replay options",
     );
+  }
+  if (options.video !== undefined && options.replay === undefined) {
+    throw new Error("--video requires --replay");
+  }
+  if (options.chapters !== undefined && options.video === undefined) {
+    throw new Error("--chapters requires --video");
+  }
+  if (options.video !== undefined && options.chapters === undefined) {
+    throw new Error("--video requires --chapters");
   }
   if (options.auditRetailPbaks && options.replay !== undefined) {
     throw new Error("--audit-retail-pbaks cannot be combined with --replay");
@@ -1364,8 +1423,8 @@ export function normalizeReplay(raw, fallback = {}) {
       `replay.segments[${index}].inputKind`,
     );
     const heldMaximum =
-      inputKind === RECORDED_INPUT_KIND ? 0xffff_ffff : 0xffff;
-    normalized.segments.push({
+      inputKind === PHYSICAL_INPUT_KIND ? 0xffff : 0xffff_ffff;
+    const normalizedSegment = {
       frames,
       inputKind,
       held: parseWholeNumber(
@@ -1387,12 +1446,141 @@ export function normalizeReplay(raw, fallback = {}) {
         `replay.segments[${index}].settleHeld`,
         heldMaximum,
       ),
-    });
+    };
+    if (inputKind === SNAPSHOT_INPUT_KIND) {
+      if (frames !== 1) {
+        throw new Error(`replay.segments[${index}] snapshot input must have exactly one frame`);
+      }
+      if (settleFrames !== 0) {
+        throw new Error(`replay.segments[${index}] snapshot input cannot use settle frames`);
+      }
+      normalizedSegment.tapped = parseWholeNumber(
+        segment.tapped,
+        `replay.segments[${index}].tapped`,
+        0xffff_ffff,
+      );
+      normalizedSegment.heldPrevious = parseWholeNumber(
+        segment.heldPrevious,
+        `replay.segments[${index}].heldPrevious`,
+        0xffff_ffff,
+      );
+      normalizedSegment.tappedPrevious = parseWholeNumber(
+        segment.tappedPrevious,
+        `replay.segments[${index}].tappedPrevious`,
+        0xffff_ffff,
+      );
+      normalizedSegment.heldPrevious2 = parseWholeNumber(
+        segment.heldPrevious2,
+        `replay.segments[${index}].heldPrevious2`,
+        0xffff_ffff,
+      );
+      normalizedSegment.beforeHeld = parseWholeNumber(
+        segment.beforeHeld ?? normalizedSegment.held,
+        `replay.segments[${index}].beforeHeld`,
+        0xffff_ffff,
+      );
+      normalizedSegment.beforeTapped = parseWholeNumber(
+        segment.beforeTapped ?? normalizedSegment.tapped,
+        `replay.segments[${index}].beforeTapped`,
+        0xffff_ffff,
+      );
+      normalizedSegment.beforeHeldPrevious = parseWholeNumber(
+        segment.beforeHeldPrevious ?? normalizedSegment.heldPrevious,
+        `replay.segments[${index}].beforeHeldPrevious`,
+        0xffff_ffff,
+      );
+      normalizedSegment.beforeTappedPrevious = parseWholeNumber(
+        segment.beforeTappedPrevious ?? normalizedSegment.tappedPrevious,
+        `replay.segments[${index}].beforeTappedPrevious`,
+        0xffff_ffff,
+      );
+      normalizedSegment.beforeHeldPrevious2 = parseWholeNumber(
+        segment.beforeHeldPrevious2 ?? normalizedSegment.heldPrevious2,
+        `replay.segments[${index}].beforeHeldPrevious2`,
+        0xffff_ffff,
+      );
+      if (segment.frameStamp !== undefined) {
+        normalizedSegment.frameStamp = parseWholeNumber(
+          segment.frameStamp,
+          `replay.segments[${index}].frameStamp`,
+          0xffff_ffff,
+        );
+      }
+      if (
+        (segment.ticksCurrentFrame === undefined)
+        !== (segment.ticksPerFrame === undefined)
+      ) {
+        throw new Error(
+          `replay.segments[${index}] must provide both ticksCurrentFrame and ticksPerFrame`,
+        );
+      }
+      if (segment.ticksCurrentFrame !== undefined) {
+        normalizedSegment.ticksCurrentFrame = parseWholeNumber(
+          segment.ticksCurrentFrame,
+          `replay.segments[${index}].ticksCurrentFrame`,
+          0x7fff_ffff,
+        );
+        normalizedSegment.ticksPerFrame = parseWholeNumber(
+          segment.ticksPerFrame,
+          `replay.segments[${index}].ticksPerFrame`,
+          0x7fff_ffff,
+        );
+        if (normalizedSegment.ticksPerFrame === 0) {
+          throw new Error(`replay.segments[${index}].ticksPerFrame must be positive`);
+        }
+      }
+    }
+    normalized.segments.push(normalizedSegment);
   }
   normalized.totalFrames = normalized.segments.reduce(
     (sum, segment) => sum + segment.frames,
     0,
   );
+  if (replay.composition !== undefined) {
+    const composition = replay.composition;
+    if (!composition || typeof composition !== "object" || Array.isArray(composition)) {
+      throw new Error("replay.composition must be an object");
+    }
+    if (!Array.isArray(composition.phaseIds) || composition.phaseIds.length === 0) {
+      throw new Error("replay.composition.phaseIds must be a non-empty array");
+    }
+    if (!Array.isArray(composition.phases)) {
+      throw new Error("replay.composition.phases must be an array");
+    }
+    if (composition.phases.length !== composition.phaseIds.length) {
+      throw new Error("replay.composition phases and phaseIds must have equal lengths");
+    }
+    let previousLastSegment = 0;
+    const phases = composition.phases.map((phase, index) => {
+      const label = `replay.composition.phases[${index}]`;
+      if (!phase || typeof phase !== "object" || Array.isArray(phase)) {
+        throw new Error(`${label} must be an object`);
+      }
+      const id = phase.id;
+      if (typeof id !== "string" || id.length === 0 || id !== composition.phaseIds[index]) {
+        throw new Error(`${label}.id must match composition.phaseIds[${index}]`);
+      }
+      const firstSegment = parseWholeNumber(
+        phase.firstSegment,
+        `${label}.firstSegment`,
+        normalized.segments.length,
+      );
+      const lastSegment = parseWholeNumber(
+        phase.lastSegment,
+        `${label}.lastSegment`,
+        normalized.segments.length,
+      );
+      if (firstSegment !== previousLastSegment + 1 || lastSegment < firstSegment) {
+        throw new Error(`${label} must describe the next contiguous segment range`);
+      }
+      previousLastSegment = lastSegment;
+      return { id, firstSegment, lastSegment };
+    });
+    if (previousLastSegment !== normalized.segments.length) {
+      throw new Error("replay.composition.phases must cover every replay segment");
+    }
+    normalized.composition = { phaseIds: [...composition.phaseIds], phases };
+  }
   if (
     normalized.traceFromSegment !== undefined
     && normalized.traceFromSegment > normalized.segments.length
@@ -1934,13 +2122,19 @@ async function startHarnessServer(url) {
   throw new Error(`harness server did not become ready:\n${output.join("")}`);
 }
 
-async function launchChrome(executable) {
+async function launchChrome(executable, { headed = false } = {}) {
   const profile = await mkdtemp(resolve(tmpdir(), "crust-browser-smoke-"));
   const output = [];
   const child = spawn(
     executable,
     [
-      "--headless=new",
+      ...(headed
+        ? [
+            "--use-gl=angle",
+            "--use-angle=swiftshader",
+            "--enable-unsafe-swiftshader",
+          ]
+        : ["--headless=new"]),
       "--remote-debugging-port=0",
       `--user-data-dir=${profile}`,
       "--no-first-run",
@@ -1972,21 +2166,305 @@ async function launchChrome(executable) {
   const deadline = Date.now() + 15_000;
   while (!webSocketUrl && Date.now() < deadline) {
     if (spawnError) {
-      await rm(profile, { recursive: true, force: true });
+      await removeTemporaryTree(profile);
       throw new Error(`could not launch Chrome: ${spawnError.message}`);
     }
     if (child.exitCode !== null) {
-      await rm(profile, { recursive: true, force: true });
+      await removeTemporaryTree(profile);
       throw new Error(`Chrome exited before DevTools was ready:\n${output.join("")}`);
     }
     await delay(25);
   }
   if (!webSocketUrl) {
     await terminate(child);
-    await rm(profile, { recursive: true, force: true });
+    await removeTemporaryTree(profile);
     throw new Error(`Chrome did not publish a DevTools endpoint:\n${output.join("")}`);
   }
   return { child, profile, webSocketUrl };
+}
+
+async function removeTemporaryTree(path) {
+  await rm(path, {
+    recursive: true,
+    force: true,
+    maxRetries: 8,
+    retryDelay: 50,
+  });
+}
+
+async function sha256File(path) {
+  const hash = createHash("sha256");
+  const stream = createReadStream(path);
+  stream.on("data", (chunk) => hash.update(chunk));
+  await once(stream, "end");
+  return hash.digest("hex");
+}
+
+function waitForChild(child, label, output) {
+  return new Promise((resolveExit, rejectExit) => {
+    child.once("error", (error) => {
+      rejectExit(new Error(`${label} could not start: ${error.message}`));
+    });
+    child.once("close", (code, signal) => {
+      if (code === 0) {
+        resolveExit();
+      } else {
+        rejectExit(
+          new Error(
+            `${label} exited with ${signal ?? code}:\n${output.join("")}`,
+          ),
+        );
+      }
+    });
+  });
+}
+
+class SourceFrameVideoRecorder {
+  static async create(options, cdp, sessionId) {
+    for (const [path, label] of [
+      [options.video, "video"],
+      [options.chapters, "chapter list"],
+    ]) {
+      await access(path).then(
+        () => {
+          throw new Error(`${label} output already exists: ${path}`);
+        },
+        (error) => {
+          if (error?.code !== "ENOENT") throw error;
+        },
+      );
+      await mkdir(dirname(path), { recursive: true });
+    }
+    await access(options.ffmpeg).catch((error) => {
+      throw new Error(`cannot execute ffmpeg at ${options.ffmpeg}: ${error.message}`);
+    });
+    const presentation = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+        const canvas = document.querySelector("#canvas");
+        const rect = canvas?.getBoundingClientRect();
+        return {
+          smoothMotion: document.querySelector("#smoothMotion")?.checked,
+          extendedWorld: document.querySelector("#extendedWorld")?.checked,
+          cameraZoom: document.querySelector("#cameraZoom")?.value,
+          outputAspect: document.querySelector("#outputAspect")?.value,
+          renderResolution: document.querySelector("#renderResolution")?.value,
+          devicePixelRatio,
+          canvasWidth: canvas?.width,
+          canvasHeight: canvas?.height,
+          rect: rect && {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height
+          }
+        };
+      })()`,
+    );
+    const presentationProblems = [];
+    for (const [name, expected] of [
+      ["smoothMotion", false],
+      ["extendedWorld", false],
+      ["cameraZoom", "100"],
+      ["outputAspect", "4:3"],
+      ["renderResolution", "native"],
+    ]) {
+      if (presentation?.[name] !== expected) {
+        presentationProblems.push(
+          `${name}: expected ${JSON.stringify(expected)}, received ${JSON.stringify(presentation?.[name])}`,
+        );
+      }
+    }
+    const rect = presentation?.rect;
+    if (
+      !rect
+      || ![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)
+      || rect.width < 2
+      || rect.height < 2
+      || Math.abs(rect.width / rect.height - 4 / 3) > 0.01
+      || ![presentation?.canvasWidth, presentation?.canvasHeight].every(Number.isSafeInteger)
+      || presentation.canvasWidth < 2
+      || presentation.canvasHeight < 2
+      || Math.abs(presentation.canvasWidth / presentation.canvasHeight - 4 / 3) > 0.01
+    ) {
+      presentationProblems.push(
+        `canvas is not a usable 4:3 capture surface: ${JSON.stringify({
+          rect,
+          width: presentation?.canvasWidth,
+          height: presentation?.canvasHeight,
+        })}`,
+      );
+    }
+    if (presentationProblems.length > 0) {
+      throw new Error(
+        `video capture requires the default retail presentation:\n${presentationProblems.join("\n")}`,
+      );
+    }
+    const clip = {
+      x: 0,
+      y: 0,
+      width: presentation.canvasWidth,
+      height: presentation.canvasHeight,
+      scale: 1,
+    };
+    const partialPath = `${options.video}.partial-${process.pid}.mp4`;
+    await rm(partialPath, { force: true });
+    const ffmpegOutput = [];
+    const ffmpeg = spawn(
+      options.ffmpeg,
+      [
+        "-hide_banner",
+        "-loglevel", "warning",
+        "-f", "image2pipe",
+        "-framerate", String(VIDEO_FRAME_RATE),
+        "-vcodec", "mjpeg",
+        "-i", "pipe:0",
+        "-an",
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "24",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        partialPath,
+      ],
+      { stdio: ["pipe", "ignore", "pipe"] },
+    );
+    ffmpeg.stderr.setEncoding("utf8");
+    ffmpeg.stderr.on("data", (chunk) => ffmpegOutput.push(chunk));
+    const exit = waitForChild(ffmpeg, "ffmpeg video encoder", ffmpegOutput);
+    return new SourceFrameVideoRecorder({
+      cdp,
+      sessionId,
+      videoPath: options.video,
+      chaptersPath: options.chapters,
+      partialPath,
+      clip,
+      presentation,
+      ffmpeg,
+      ffmpegExit: exit,
+    });
+  }
+
+  constructor(values) {
+    Object.assign(this, values);
+    this.frames = 0;
+    this.chapters = [];
+    this.currentChapter = undefined;
+    this.finished = false;
+    this.aborted = false;
+  }
+
+  startChapter(id, segment) {
+    if (this.currentChapter) {
+      this.currentChapter.endFrame = this.frames;
+    }
+    this.currentChapter = {
+      id,
+      segment,
+      startFrame: this.frames,
+      endFrame: null,
+    };
+    this.chapters.push(this.currentChapter);
+  }
+
+  async capture(sourceFrameJpeg) {
+    if (this.finished || this.aborted) {
+      throw new Error("video recorder is not accepting source frames");
+    }
+    if (this.frames % VIDEO_DISK_CHECK_INTERVAL === 0) {
+      const filesystem = await statfs(dirname(this.videoPath));
+      const freeBytes = filesystem.bavail * filesystem.bsize;
+      if (freeBytes < VIDEO_MINIMUM_FREE_BYTES) {
+        throw new Error(
+          `video capture aborted with ${freeBytes} free bytes; the 3 GiB safety floor was crossed`,
+        );
+      }
+    }
+    const prefix = "data:image/jpeg;base64,";
+    if (typeof sourceFrameJpeg !== "string" || !sourceFrameJpeg.startsWith(prefix)) {
+      throw new Error("browser did not return a JPEG canvas readback");
+    }
+    const bytes = Buffer.from(sourceFrameJpeg.slice(prefix.length), "base64");
+    if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+      throw new Error("Chrome did not return a JPEG source frame");
+    }
+    if (!this.ffmpeg.stdin.write(bytes)) {
+      await once(this.ffmpeg.stdin, "drain");
+    }
+    this.frames += 1;
+    if (this.frames % 3_000 === 0) {
+      process.stderr.write(
+        `captured ${this.frames} source frames (${(this.frames / VIDEO_FRAME_RATE).toFixed(1)} video seconds)\n`,
+      );
+    }
+  }
+
+  async finish() {
+    if (this.finished) throw new Error("video recorder was already finalized");
+    if (this.aborted) throw new Error("video recorder was aborted");
+    if (this.currentChapter) this.currentChapter.endFrame = this.frames;
+    this.ffmpeg.stdin.end();
+    await this.ffmpegExit;
+    await rename(this.partialPath, this.videoPath);
+    this.finished = true;
+    const metadata = await stat(this.videoPath);
+    const chapters = this.chapters.map((chapter) => ({
+      ...chapter,
+      startSeconds: chapter.startFrame / VIDEO_FRAME_RATE,
+      endSeconds: chapter.endFrame / VIDEO_FRAME_RATE,
+      timestamp: new Date(chapter.startFrame * 1000 / VIDEO_FRAME_RATE)
+        .toISOString()
+        .slice(11, 23),
+    }));
+    const chapterDocument = {
+      schema: 1,
+      frameRate: VIDEO_FRAME_RATE,
+      frameCount: this.frames,
+      durationSeconds: this.frames / VIDEO_FRAME_RATE,
+      audio: false,
+      presentation: {
+        aspect: this.presentation.outputAspect,
+        resolution: this.presentation.renderResolution,
+        cameraZoom: this.presentation.cameraZoom,
+        smoothMotion: this.presentation.smoothMotion,
+        extendedWorld: this.presentation.extendedWorld,
+        canvasWidth: this.presentation.canvasWidth,
+        canvasHeight: this.presentation.canvasHeight,
+        captureWidth: this.clip.width,
+        captureHeight: this.clip.height,
+      },
+      chapters,
+    };
+    await writeFile(
+      this.chaptersPath,
+      `${JSON.stringify(chapterDocument, null, 2)}\n`,
+      { flag: "wx" },
+    );
+    return {
+      path: this.videoPath,
+      sha256: await sha256File(this.videoPath),
+      bytes: metadata.size,
+      frameRate: VIDEO_FRAME_RATE,
+      frameCount: this.frames,
+      durationSeconds: this.frames / VIDEO_FRAME_RATE,
+      width: this.clip.width - (this.clip.width % 2),
+      height: this.clip.height - (this.clip.height % 2),
+      audio: false,
+      chapters: this.chaptersPath,
+      phaseCount: chapters.length,
+    };
+  }
+
+  async abort() {
+    if (this.finished || this.aborted) return;
+    this.aborted = true;
+    this.ffmpeg.stdin.destroy();
+    await terminate(this.ffmpeg);
+    await this.ffmpegExit.catch(() => {});
+    await rm(this.partialPath, { force: true });
+  }
 }
 
 async function evaluate(cdp, sessionId, expression) {
@@ -2100,6 +2578,13 @@ const snapshotExpression = `(() => {
   const livePlayer = Array.isArray(browserTestObjects)
     ? browserTestObjects.find((object) => object?.player === true)
     : null;
+  const liveCollider = livePlayer?.collider && Array.isArray(browserTestObjects)
+    ? browserTestObjects.find((object) =>
+        object?.handle?.arenaSlot === livePlayer.collider.arenaSlot
+        && object?.handle?.arenaGeneration === livePlayer.collider.arenaGeneration
+        && object?.handle?.vm === livePlayer.collider.vm
+      )
+    : null;
   const pick = (source, names) => Object.fromEntries(
     names.map((name) => [name, source[name] ?? null])
   );
@@ -2123,7 +2608,9 @@ const snapshotExpression = `(() => {
     ]),
     debug: {
       ...pick(debug, [
-        "frame", "currentLid", "titleState", "pairs", "mountedLid",
+        "frame", "currentLid", "titleState", "retailTitleScreen",
+        "retailTitleNextScreen", "retailTitlePhase", "retailTitleFadeCounter",
+        "pairs", "mountedLid",
         "mountedPages", "mountedEntries", "glError", "paused", "retailFrame",
         "retailDrawCount", "retailProcessDrawCount", "retailRandomSeed",
         "retailRandomSeedB", "retailPathProgress", "retailCameraZone",
@@ -2135,9 +2622,30 @@ const snapshotExpression = `(() => {
         "retailFaultedObjects", "retailExecutions", "retailExecutionErrors",
         "retailZoneEventFailures", "retailRuntimeError", "retailRuntimeWarning",
         "audioContextState", "audioCallbacks", "audioPeak",
-        "retailAudioCallbacks", "retailAudioActiveVoices", "retailMusicState"
+        "retailAudioCallbacks", "retailAudioActiveVoices", "retailMusicState",
+        "retailPadHeld", "retailPadTapped", "retailPadHeldPrevious",
+        "retailPadTappedPrevious", "retailPadHeldPrevious2",
+        "retailMainHaltReason"
       ]),
-      retailMain: debug.retailMain ? { ...debug.retailMain } : null,
+      retailMain: debug.retailMain
+        ? {
+            ...debug.retailMain,
+            floorY: livePlayer?.floorY ?? null,
+            objectStatus: livePlayer?.status ?? null,
+            solidWallSteps: livePlayer?.solidWallSteps ?? [],
+            collider: liveCollider
+              ? {
+                  entityId: liveCollider.entityId ?? null,
+                  executable: liveCollider.executable ?? null,
+                  subtype: liveCollider.subtype ?? null,
+                  state: liveCollider.state ?? null,
+                  translation: liveCollider.translation ?? null,
+                  bound: liveCollider.bound ?? null,
+                  frameBound: liveCollider.frameBound ?? null
+                }
+              : null
+          }
+        : null,
       browserTestGlobals: debug.browserTestGlobals
         ? { ...debug.browserTestGlobals }
         : null,
@@ -2176,7 +2684,23 @@ async function waitFor(cdp, sessionId, description, predicate, failures, timeout
 function assertExpected(expectation, snapshot, label) {
   const failures = expectationFailures(expectation, snapshot);
   if (failures.length > 0) {
-    throw new Error(`${label} expectation failed:\n${failures.join("\n")}`);
+    const evidence = {
+      currentLid: snapshot.debug?.currentLid ?? null,
+      mountedLid: snapshot.debug?.mountedLid ?? null,
+      retailFrame: snapshot.debug?.retailFrame ?? null,
+      retailHardRestarts: snapshot.debug?.retailHardRestarts ?? null,
+      retailLoadStates: snapshot.debug?.retailLoadStates ?? null,
+      retailDeathCameraFrames: snapshot.debug?.retailDeathCameraFrames ?? null,
+      retailCurrentZone: snapshot.debug?.retailCurrentZone ?? null,
+      retailCameraZone: snapshot.debug?.retailCameraZone ?? null,
+      retailCameraPath: snapshot.debug?.retailCameraPath ?? null,
+      retailMainHaltReason: snapshot.debug?.retailMainHaltReason ?? null,
+      retailMain: snapshot.debug?.retailMain ?? null,
+    };
+    throw new Error(
+      `${label} expectation failed:\n${failures.join("\n")}\n`
+      + `evidence: ${JSON.stringify(evidence)}`,
+    );
   }
 }
 
@@ -2226,9 +2750,12 @@ async function reloadPage(cdp, sessionId) {
 }
 
 async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
-  const chrome = await launchChrome(chromeExecutable);
+  const chrome = await launchChrome(chromeExecutable, {
+    headed: options.video !== undefined,
+  });
   const expectedRetailPbakEids = retailPbakAuditExpectedEids(options);
   let cdp;
+  let videoRecorder;
   try {
     cdp = await ChromeCdp.connect(chrome.webSocketUrl);
     const sessionId = await attachPage(cdp);
@@ -2287,7 +2814,12 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
     await cdp.command(
       "Emulation.setDeviceMetricsOverride",
       {
-        width: 1440,
+        // The desktop shell's decorative monitor aperture is intentionally
+        // wider than the selected game output.  Video evidence uses the
+        // shell's responsive layout, where the viewport itself is the exact
+        // selected 4:3 retail surface, instead of recording that stretched
+        // decorative aperture.
+        width: options.video === undefined ? 1440 : 332,
         height: 1100,
         deviceScaleFactor: 1,
         mobile: false,
@@ -2494,6 +3026,18 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
       failures,
       120_000,
     );
+    if (options.video !== undefined) {
+      if (!replay.composition?.phases) {
+        throw new Error(
+          "video capture requires composed replay phase metadata for its chapter list",
+        );
+      }
+      videoRecorder = await SourceFrameVideoRecorder.create(
+        options,
+        cdp,
+        sessionId,
+      );
+    }
     if (options.auditIsolatedRetailPbakLid !== undefined) {
       const queueResult = await evaluate(
         cdp,
@@ -2526,9 +3070,10 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
     let observedRetailExecution = retailExecutionObserved(false, finalSnapshot);
     let replayCurrentLid = finalSnapshot.debug?.currentLid;
     let replayMountedLid = finalSnapshot.debug?.mountedLid;
-    const stepReplayBatch = async (inputKind, held, frameCount, label) => {
+    const stepReplayBatch = async (inputKind, input, frameCount, label) => {
       const batchStart = stepped + 1;
       const stepMethod = replayStepMethod(inputKind);
+      const stepArguments = replayStepArguments(inputKind, input);
       let callbackSteps = [];
       let result;
       let mountedDestination = false;
@@ -2547,7 +3092,7 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
             `(async () => {
               const harness = window.__crustTest;
               const beforeStepCount = harness.stepCount;
-              harness.${stepMethod}(${held});
+              harness.${stepMethod}(${stepArguments});
               const simulationStepped = harness.lastSimulationStepped;
               const stepDelta = harness.stepCount - beforeStepCount;
               if (
@@ -2561,7 +3106,10 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
               await new Promise((resolve) => setTimeout(resolve, 0));
               return {
                 simulationStepped,
-                snapshot: ${snapshotExpression}
+                snapshot: ${snapshotExpression},
+                sourceFrameJpeg: simulationStepped && ${videoRecorder !== undefined}
+                  ? document.querySelector("#canvas").toDataURL("image/jpeg", 0.82)
+                  : null
               };
             })()`,
           );
@@ -2589,7 +3137,7 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
             while (executed < ${frameCount}) {
               const harness = window.__crustTest;
               const beforeStepCount = harness.stepCount;
-              harness.${stepMethod}(${held});
+              harness.${stepMethod}(${stepArguments});
               const simulationStepped = harness.lastSimulationStepped;
               const stepDelta = harness.stepCount - beforeStepCount;
               if (
@@ -2619,7 +3167,10 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
             }
             return {
               callbackSteps,
-              snapshot: ${snapshotExpression}
+              snapshot: ${snapshotExpression},
+              sourceFrameJpeg: executed > 0 && ${videoRecorder !== undefined}
+                ? document.querySelector("#canvas").toDataURL("image/jpeg", 0.82)
+                : null
             };
           })()`,
         );
@@ -2700,6 +3251,14 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
         throw new Error(
           `${label} failed after frames ${batchStart}-${stepped}:\n${problems.join("\n")}`,
         );
+      }
+      if (videoRecorder && executed > 0) {
+        if (executed !== 1) {
+          throw new Error(
+            `${label} executed ${executed} frames while per-source-frame capture requires one`,
+          );
+        }
+        await videoRecorder.capture(result.sourceFrameJpeg);
       }
       if (finalSnapshot.harness.lastRequestedLid != null) {
         const requestedLid = Number(finalSnapshot.harness.lastRequestedLid);
@@ -3210,8 +3769,18 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
     let skippedReplayFrames = 0;
     const segmentTrace = [];
     let retailPbakAuditComplete = false;
+    const videoPhaseByFirstSegment = new Map(
+      (replay.composition?.phases ?? []).map((phase) => [
+        phase.firstSegment,
+        phase,
+      ]),
+    );
     replaySegments:
     for (const [segmentIndex, segment] of replay.segments.entries()) {
+      const videoPhase = videoPhaseByFirstSegment.get(segmentIndex + 1);
+      if (videoPhase) {
+        videoRecorder?.startChapter(videoPhase.id, segmentIndex + 1);
+      }
       let remainingFrames = segment.frames;
       while (remainingFrames > 0) {
         if (
@@ -3230,12 +3799,14 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
           remainingFrames = 0;
           break;
         }
-        const batchFrames = nextReplayBatchFrameCount(remainingFrames, {
-          isolateFirstFrame: !allLevelsLaunchChecked,
-        });
+        const batchFrames = videoRecorder
+          ? 1
+          : nextReplayBatchFrameCount(remainingFrames, {
+              isolateFirstFrame: !allLevelsLaunchChecked,
+            });
         const executed = await stepReplayBatch(
           segment.inputKind,
-          segment.held,
+          segment.inputKind === SNAPSHOT_INPUT_KIND ? segment : segment.held,
           batchFrames,
           "browser replay",
         );
@@ -3291,6 +3862,16 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
           held: segment.held,
           currentLid: finalSnapshot.debug?.currentLid,
           mountedLid: finalSnapshot.debug?.mountedLid,
+          titleState: finalSnapshot.debug?.titleState,
+          retailTitleScreen: finalSnapshot.debug?.retailTitleScreen,
+          retailTitleNextScreen: finalSnapshot.debug?.retailTitleNextScreen,
+          retailTitlePhase: finalSnapshot.debug?.retailTitlePhase,
+          retailTitleFadeCounter: finalSnapshot.debug?.retailTitleFadeCounter,
+          retailPadHeld: finalSnapshot.debug?.retailPadHeld,
+          retailPadTapped: finalSnapshot.debug?.retailPadTapped,
+          retailPadHeldPrevious: finalSnapshot.debug?.retailPadHeldPrevious,
+          retailPadTappedPrevious: finalSnapshot.debug?.retailPadTappedPrevious,
+          retailPadHeldPrevious2: finalSnapshot.debug?.retailPadHeldPrevious2,
           retailFrame: finalSnapshot.debug?.retailFrame,
           retailDrawCount: finalSnapshot.debug?.retailDrawCount,
           retailProcessDrawCount: finalSnapshot.debug?.retailProcessDrawCount,
@@ -3306,8 +3887,13 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
             finalSnapshot.debug?.retailDeathCameraFrames,
           paused: finalSnapshot.debug?.paused,
           retailCurrentZone: finalSnapshot.debug?.retailCurrentZone,
+          retailMainHaltReason: finalSnapshot.debug?.retailMainHaltReason,
           retailMain: finalSnapshot.debug?.retailMain
             ? { ...finalSnapshot.debug.retailMain }
+            : null,
+          retailTitleObjects: finalSnapshot.debug?.currentLid === DEFAULT_BOOT_LID
+            && Array.isArray(finalSnapshot.debug?.browserTestObjects)
+            ? finalSnapshot.debug.browserTestObjects.map((object) => ({ ...object }))
             : null,
         });
       }
@@ -3454,6 +4040,7 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
         ].join("\n"),
       );
     }
+    const video = videoRecorder ? await videoRecorder.finish() : null;
     return {
       assets: options.assets.length,
       pairs: imported.pairCount,
@@ -3472,6 +4059,7 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
       runtimeStatus: finalSnapshot.runtimeStatus,
       currentLid: finalSnapshot.debug.currentLid,
       mountedLid: finalSnapshot.debug.mountedLid,
+      titleState: finalSnapshot.debug.titleState,
       mountedPages: finalSnapshot.debug.mountedPages,
       mountedEntries: finalSnapshot.debug.mountedEntries,
       browserEventFailures: failures.length,
@@ -3541,11 +4129,13 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
       screenshotSha256: createHash("sha256")
         .update(screenshotBytes)
         .digest("hex"),
+      video,
     };
   } finally {
+    await videoRecorder?.abort();
     await cdp?.close().catch(() => {});
     await terminate(chrome.child);
-    await rm(chrome.profile, { recursive: true, force: true });
+    await removeTemporaryTree(chrome.profile);
   }
 }
 

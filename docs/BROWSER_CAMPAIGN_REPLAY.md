@@ -176,9 +176,11 @@ continuity checks.
 
 Settlement is a bounded number of ordinary cooperative destination frames, not wall-clock waiting
 and not an engine timing correction. It is therefore allowed to advance the newly mounted stream.
-For example, the publisher-first Jungle Rollers completion reaches its exact level-end request on
-route frame 3,387, then needs 119 zero-input Level Complete frames before the stable destination
-checkpoint. Those 119 frames belong to the harness settlement budget. A following phase's
+For example, at the earlier captured-browser checkpoint, the publisher-first Jungle Rollers
+completion reached its exact level-end request on route frame 3,387, then needed 119 zero-input
+Level Complete frames before the stable destination checkpoint. Those 119 frames belonged to that
+harness settlement budget; the current native controller reaches its level-end request on frame
+3,384. A following phase's
 `while` guard prevents stale source-phase input from leaking after an already-advanced destination
 transitions. The runner reports per-trace `settleFramesUsed`, total `segmentSettleFramesUsed`, and
 `skippedReplayFrames`, so an overlapped local fragment is visible and can be regenerated or
@@ -253,23 +255,26 @@ post-mount pad history exactly. It never fills a missing edge or generates an in
 cover unordered input, hybrid PBAK/physical fragments, ambiguous graphs, disconnected captures,
 and one-word checkpoint and pad-history mismatches.
 
-The completed legally-local browser campaign proof starts with the real publisher/title sequence
-and follows the complete ordinary main-map route through every gameplay, boss, bonus, completion,
-and map phase, Dr. Neo Cortex, Ending, and the authored return to Title. The browser executed the
-89-phase, 141,776-frame replay discovered from 92 captures plus 96 bounded settle frames, for
-141,872 harness frames total. It consumed all 14,429 captured input runs, inserted no synthetic
-handoff, and skipped zero replay frames. Three diagnostic alternatives remain outside the canonical
-connected path.
+The current completed legally local browser campaign proof starts with the real publisher/title
+sequence and follows the complete ordinary main-map route through every gameplay, boss,
+completion, and map phase, including its Great Gate/Bonus 2 round trip, Dr. Neo Cortex, Ending,
+and the authored return to Title. Its 89 fresh
+exporter fragments form one unique exact strict-discovery path with no disconnected capture,
+ambiguous branch, or synthetic handoff. The composed route contains 19,961 input segments and
+146,501 replay frames; Chrome executes two additional declared transition-settle frames and skips
+zero replay frames.
 
-The terminal snapshot is current/mounted Title LID `0x19`, draw/process count 130,740, and RNG-A
-`0x3b704e12`. The harness reported three source hard-restart calls and two LoadState effects: one
-same-level load/restart from Jungle Rollers' authored terminal fall, then the different-stream
-load/restart and protected parent restart from The Great Gate's Tawna-bonus return. It recorded
-zero death-camera frames and no checkpoint,
-runtime/GOOL/zone/spawn, console, network, or WebGL failure. A separate nine-phase, 9,477-frame
-exact branch still proves The Great Gate's physical Tawna path, Bonus 2, its `-2` save-state return,
-and the remounted Great Gate checkpoint. The completed browser campaign is authoritative for the
-ordinary route. A separate direct-boot replay completes Stormy Ascent's 9,334 captured frames and
+The current terminal snapshot is current/mounted Title LID `0x19`, draw/process count 134,970,
+RNG-A `0xec6e8edc`, and RNG-B `0x369bbacd`. The harness reports three source hard-restart calls and
+two LoadState effects: one same-level load/restart from Jungle Rollers' authored terminal fall,
+then the different-stream load/restart and protected parent restart from The Great Gate's Tawna-
+bonus return. It records zero death-camera frames and no checkpoint, runtime/GOOL/zone/spawn,
+console, network, or WebGL failure. A per-source-frame, silent 30 fps H.264 recording and 89-entry
+chapter list preserve this exact run under ignored artifacts. The earlier 141,776-frame/96-settle
+campaign remains historical comparison evidence for its captured ordinary route. A separate
+nine-phase, 9,477-frame exact branch still proves The Great Gate's physical Tawna path, Bonus 2,
+its `-2` save-state return, and the remounted Great Gate checkpoint. A separate direct-boot replay
+completes Stormy Ascent's 9,334 captured frames and
 mounts Level Complete at exact draw/RNG state with no recovery or skipped frame. The natural
 Sunset/Whole Hog and Jaws/Fumbling key branches each pass independently from fresh browser storage;
 joining both in the same empty-card campaign, alternate completion, and other explicitly documented

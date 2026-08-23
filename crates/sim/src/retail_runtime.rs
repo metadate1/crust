@@ -17,6 +17,8 @@ use crust_formats::{
     },
 };
 
+#[cfg(any(test, feature = "browser-test-harness"))]
+use crate::retail_solid_motion::SolidWallStepDebug;
 use crate::{
     camera::{GOOL_FLAG_SPIN_ACCEL, RetailCameraLocation},
     card::{CardOperation, CardOutcome, CardPublishedState, SaveData, VirtualCard},
@@ -508,12 +510,22 @@ pub struct BrowserTestLiveObject {
     pub rotation_yxz: [i32; 3],
     /// Live `misc_a` velocity vector consumed by retail physics.
     pub velocity: [i32; 3],
+    /// Live static/object-floor plane consumed by retail physics.
+    pub floor_y: i32,
+    pub hotspot_size: i32,
+    pub solid_wall_steps: Vec<SolidWallStepDebug>,
     /// Latest world-space collider AABB registered for this frame.
     pub frame_bound: Option<Bounds3>,
     pub status_a: u32,
     pub status_b: u32,
     pub status_c: u32,
     pub state_flags: u32,
+    pub state_stamp: u32,
+    pub animation_stamp: u32,
+    pub animation_sequence: u32,
+    pub animation_frame: u32,
+    pub misc_value: u32,
+    pub transition_pointer: u32,
     /// Raw GOOL register 65. `WillC` owns the authoritative 24.8 life stock here
     /// between stable publications to global 24.
     pub register_65: u32,
@@ -3694,6 +3706,28 @@ impl RetailRuntime {
         Ok(action)
     }
 
+    /// Continues the same native `TitleUpdate` after synchronous
+    /// `TitleLoadState` host work.
+    ///
+    /// The destination's blank phase is not a later rendered frame: retail
+    /// immediately enables object animation and starts its fade-in before the
+    /// final authored-state comparison in this same call.
+    pub fn continue_retail_title_update_after_load(&mut self) -> Result<(), RetailTitleError> {
+        let mut title = self.title.ok_or(RetailTitleError::NotConfigured)?;
+        if title.phase == TitlePhase::Blank {
+            let display = self.machine.global_word(NEXT_DISPLAY_GLOBAL)?;
+            self.machine.set_global_word(
+                NEXT_DISPLAY_GLOBAL,
+                display | DISPLAY_OBJECTS | ANIMATE_OBJECTS,
+            )?;
+            self.machine
+                .set_global_word(FADE_COUNTER_GLOBAL, TITLE_FADE_START as u32)?;
+            title.phase = TitlePhase::FadingIn;
+            self.title = Some(title);
+        }
+        Ok(())
+    }
+
     /// Completes native `TitleUpdate` after any synchronous screen load.
     ///
     /// This final comparison is intentionally separate: an authored object
@@ -4335,6 +4369,15 @@ impl RetailRuntime {
     /// host-side increment cannot substitute for this division.
     pub fn publish_retail_demo_draw_stamp(&mut self, draw_stamp: u32) {
         self.frame_index = u64::from(draw_stamp / 34);
+    }
+
+    /// Publishes the native GOOL frame stamp for an emulator-trace replay.
+    ///
+    /// Retail derives this value from its hardware tick quotient rather than
+    /// from the number of rendered 30 Hz frames. This diagnostic override is
+    /// applied immediately before the corresponding imported GOOL traversal.
+    pub fn publish_retail_emulator_frame_stamp(&mut self, frame_stamp: u32) {
+        self.frame_index = u64::from(frame_stamp);
     }
 
     /// Completes native `PadUpdatePbak` after the final recorded word or a
@@ -5712,6 +5755,15 @@ impl RetailRuntime {
                 translation: transform.translation,
                 rotation_yxz: transform.rotation_yxz,
                 velocity,
+                floor_y: process
+                    .register(process_register::FLOOR_Y)
+                    .map_err(BrowserTestLiveObjectError::Vm)?
+                    .cast_signed(),
+                hotspot_size: process
+                    .register(process_register::HOTSPOT_SIZE)
+                    .map_err(BrowserTestLiveObjectError::Vm)?
+                    .cast_signed(),
+                solid_wall_steps: self.machine.browser_test_solid_wall_steps(vm).to_vec(),
                 frame_bound,
                 status_a: process
                     .register(process_register::STATUS_A)
@@ -5724,6 +5776,24 @@ impl RetailRuntime {
                     .map_err(BrowserTestLiveObjectError::Vm)?,
                 state_flags: process
                     .register(process_register::STATE_FLAGS)
+                    .map_err(BrowserTestLiveObjectError::Vm)?,
+                state_stamp: process
+                    .register(process_register::STATE_STAMP)
+                    .map_err(BrowserTestLiveObjectError::Vm)?,
+                animation_stamp: process
+                    .register(process_register::ANIMATION_STAMP)
+                    .map_err(BrowserTestLiveObjectError::Vm)?,
+                animation_sequence: process
+                    .register(process_register::ANIMATION_SEQUENCE)
+                    .map_err(BrowserTestLiveObjectError::Vm)?,
+                animation_frame: process
+                    .register(process_register::ANIMATION_FRAME)
+                    .map_err(BrowserTestLiveObjectError::Vm)?,
+                misc_value: process
+                    .register(process_register::MISC_VALUE)
+                    .map_err(BrowserTestLiveObjectError::Vm)?,
+                transition_pointer: process
+                    .register(process_register::TRANSITION_POINTER)
                     .map_err(BrowserTestLiveObjectError::Vm)?,
                 register_65: process
                     .register(65)
@@ -6655,7 +6725,7 @@ impl RetailRuntime {
                     if let Some(execution) = stalled {
                         Ok(execution)
                     } else {
-                        let pre_bound = self.animation_stamp_matches_main(object)?;
+                        let pre_bound = self.main_animation_stamp_matches_frame()?;
                         if pre_bound {
                             self.register_animation_bound(object, host)?;
                         }
@@ -6668,7 +6738,11 @@ impl RetailRuntime {
                             )?;
                             if !self.machine.level_restart_requested()
                                 && self.handles.is_live_pair(object)
-                                && execution.reason != HaltReason::InvalidInitialReturn
+                                && !matches!(
+                                    execution.reason,
+                                    HaltReason::InvalidInitialReturn
+                                        | HaltReason::NativeStall { .. }
+                                )
                             {
                                 self.finish_native_object_update(
                                     object,
@@ -7544,26 +7618,17 @@ impl RetailRuntime {
         Ok(Some(object))
     }
 
-    fn animation_stamp_matches_main<E>(
-        &self,
-        object: RuntimeObjectHandle,
-    ) -> Result<bool, RuntimeError<E>> {
+    fn main_animation_stamp_matches_frame<E>(&self) -> Result<bool, RuntimeError<E>> {
         let Some(main) = self.live_main_object()? else {
             return Ok(false);
         };
-        let object_stamp = self
-            .machine
-            .object(object.vm)
-            .map_err(RuntimeError::Vm)?
-            .register(process_register::ANIMATION_STAMP)
-            .map_err(RuntimeError::Vm)?;
         let main_stamp = self
             .machine
             .object(main.vm)
             .map_err(RuntimeError::Vm)?
             .register(process_register::ANIMATION_STAMP)
             .map_err(RuntimeError::Vm)?;
-        Ok(object_stamp == main_stamp)
+        Ok(main_stamp == self.machine.frames_elapsed())
     }
 
     fn register_late_animation_bound<H: ProgramHost>(
@@ -12844,6 +12909,11 @@ mod tests {
                 previous: TitleScreen::PublisherFirst,
                 screen: TitleScreen::PublisherSecond,
             }))
+        );
+        runtime.continue_retail_title_update_after_load().unwrap();
+        assert_eq!(
+            runtime.retail_title_presentation().unwrap().unwrap().phase,
+            TitlePhase::FadingIn
         );
         runtime
             .set_global_word(TITLE_STATE_GLOBAL, TitleScreen::NaughtyDog.raw())

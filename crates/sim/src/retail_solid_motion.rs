@@ -508,6 +508,35 @@ pub struct SolidMotionOutcome {
     pub effects: Vec<SolidEffect>,
     pub movement_iterations: usize,
     pub stopped_by_wall: bool,
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    pub wall_steps: Vec<SolidWallStepDebug>,
+}
+
+/// One exact wall-grid decision retained for owned-data parity diagnostics.
+#[cfg(any(test, feature = "browser-test-harness"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SolidWallStepDebug {
+    pub translation: Vec3,
+    pub displacement: Vec3,
+    pub floor_adjusted: Vec3,
+    pub desired_x: i32,
+    pub desired_z: i32,
+    pub adjusted_x: i32,
+    pub adjusted_z: i32,
+    pub found_open: bool,
+    pub collider_id: Option<u32>,
+    pub collider_type: Option<u32>,
+    pub initial_adjusted_x: i32,
+    pub initial_adjusted_z: i32,
+    pub initial_found_open: bool,
+    pub retried: bool,
+    pub primary_replot_count: usize,
+    pub secondary_replot_count: usize,
+    pub candidate_count: usize,
+    pub candidate_ids: [u32; 16],
+    pub static_bitmap: [u32; 32],
+    pub initial_bitmap: [u32; 32],
+    pub bitmap: [u32; 32],
 }
 
 /// Bounds/offset validation failures from a solid query.
@@ -885,6 +914,8 @@ pub fn solve_retail_solid_motion_with_event_handler(
     let mut iterations = 0_usize;
     let mut stopped_by_wall = false;
     let mut interrupted = false;
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    let mut wall_steps = Vec::new();
 
     while remaining != Vec3::ZERO {
         if iterations == MAX_PULL_STEPS {
@@ -914,6 +945,8 @@ pub fn solve_retail_solid_motion_with_event_handler(
         summary = step_outcome.summary;
         floor = step_outcome.floor;
         stopped_by_wall |= step_outcome.stopped_by_wall;
+        #[cfg(any(test, feature = "browser-test-harness"))]
+        wall_steps.push(step_outcome.wall_step);
         remaining = checked_vec_sub(remaining, step)?;
         iterations += 1;
         if step_outcome.interrupted {
@@ -961,6 +994,8 @@ pub fn solve_retail_solid_motion_with_event_handler(
         effects,
         movement_iterations: iterations,
         stopped_by_wall,
+        #[cfg(any(test, feature = "browser-test-harness"))]
+        wall_steps,
     })
 }
 
@@ -971,6 +1006,8 @@ struct StepOutcome {
     floor: Option<i32>,
     stopped_by_wall: bool,
     interrupted: bool,
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    wall_step: SolidWallStepDebug,
 }
 
 type SolidEventHandler<'a> = dyn FnMut(
@@ -1006,11 +1043,23 @@ fn stop_at_solid(
         context,
         effects,
     )?;
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    let floor_adjusted = adjusted;
 
     let query = query_cache
         .as_ref()
         .ok_or(SolidMotionError::MalformedOctreeOffset { offset: 0 })?;
     let mut bitmap = WallScratch::default();
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    let candidate_count = candidates.len();
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    let mut candidate_ids = [u32::MAX; 16];
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    for (target, candidate) in candidate_ids.iter_mut().zip(candidates.iter()) {
+        *target = candidate.id;
+    }
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    let mut static_bitmap = [0_u32; 32];
     plot_walls(
         query,
         candidates,
@@ -1020,6 +1069,8 @@ fn stop_at_solid(
         &mut bitmap,
         effects,
         true,
+        #[cfg(any(test, feature = "browser-test-harness"))]
+        &mut static_bitmap,
     )?;
     let desired_x = checked_mul_div(checked_sub(adjusted.x, translation.x)?, 4, 8192)?
         .checked_add(16)
@@ -1029,10 +1080,35 @@ fn stop_at_solid(
         .ok_or(SolidMotionError::ArithmeticOverflow)?;
     let collider_id = state.collider.map(|collider| collider.id);
     let collider_type = state.collider.map(|collider| collider.object_type);
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    let initial_bitmap = bitmap.bitmap;
     let mut nearest = find_nearest_open(&bitmap, desired_x, desired_z, collider_id, collider_type);
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    let initial_nearest = nearest;
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    let mut retried = false;
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    let mut primary_replot_count = 0;
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    let mut secondary_replot_count = 0;
     if nearest.is_none() && collider_type != Some(0x22) {
-        if solid_replot_walls(query, translation, 0, false, &mut bitmap)? != 0 {
-            solid_replot_walls(query, translation, 1, true, &mut bitmap)?;
+        #[cfg(any(test, feature = "browser-test-harness"))]
+        {
+            retried = true;
+        }
+        let replot_count = solid_replot_walls(query, translation, 0, false, &mut bitmap)?;
+        #[cfg(any(test, feature = "browser-test-harness"))]
+        {
+            primary_replot_count = replot_count;
+        }
+        if replot_count != 0 {
+            let replot_count = solid_replot_walls(query, translation, 1, true, &mut bitmap)?;
+            #[cfg(any(test, feature = "browser-test-harness"))]
+            {
+                secondary_replot_count = replot_count;
+            }
+            #[cfg(not(any(test, feature = "browser-test-harness")))]
+            let _ = replot_count;
             plot_object_walls(
                 candidates,
                 state,
@@ -1046,6 +1122,33 @@ fn stop_at_solid(
         nearest = find_nearest_open(&bitmap, desired_x, desired_z, collider_id, collider_type);
     }
     let (adjusted_x, adjusted_z, found_open) = nearest.unwrap_or((16, 16, false));
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    let (initial_adjusted_x, initial_adjusted_z, initial_found_open) =
+        initial_nearest.unwrap_or((16, 16, false));
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    let wall_step = SolidWallStepDebug {
+        translation,
+        displacement,
+        floor_adjusted,
+        desired_x,
+        desired_z,
+        adjusted_x,
+        adjusted_z,
+        found_open,
+        collider_id,
+        collider_type,
+        initial_adjusted_x,
+        initial_adjusted_z,
+        initial_found_open,
+        retried,
+        primary_replot_count,
+        secondary_replot_count,
+        candidate_count,
+        candidate_ids,
+        static_bitmap,
+        initial_bitmap,
+        bitmap: bitmap.bitmap,
+    };
     if found_open {
         adjusted.x = translation
             .x
@@ -1084,6 +1187,8 @@ fn stop_at_solid(
             floor: floor_result.floor,
             stopped_by_wall,
             interrupted: true,
+            #[cfg(any(test, feature = "browser-test-harness"))]
+            wall_step,
         });
     }
     if let Some(ceiling) = ceiling {
@@ -1120,6 +1225,8 @@ fn stop_at_solid(
         floor: floor_result.floor,
         stopped_by_wall,
         interrupted,
+        #[cfg(any(test, feature = "browser-test-harness"))]
+        wall_step,
     })
 }
 
@@ -1904,30 +2011,6 @@ fn average_height(sum: i64, count: u32) -> Result<Option<i32>, SolidMotionError>
         .map_err(|_| SolidMotionError::ArithmeticOverflow)
 }
 
-fn maximum_step(displacement: Vec3) -> Vec3 {
-    let magnitude = displacement.x.unsigned_abs() / MAX_HORIZONTAL_DISPLACEMENT as u32;
-    let magnitude = magnitude.max(displacement.y.unsigned_abs() / MAX_VERTICAL_DISPLACEMENT as u32);
-    let magnitude =
-        magnitude.max(displacement.z.unsigned_abs() / MAX_HORIZONTAL_DISPLACEMENT as u32);
-    let divisor = i32::try_from(magnitude.saturating_add(1)).unwrap_or(i32::MAX);
-    Vec3 {
-        x: displacement.x / divisor,
-        y: displacement.y / divisor,
-        z: displacement.z / divisor,
-    }
-}
-
-const fn clamp_remaining_step(remaining: i32, maximum: i32) -> i32 {
-    if maximum == 0 {
-        return remaining;
-    }
-    if remaining.unsigned_abs() >= maximum.unsigned_abs() {
-        maximum
-    } else {
-        remaining
-    }
-}
-
 fn checked_mul_div(value: i32, multiplier: i32, divisor: i32) -> Result<i32, SolidMotionError> {
     let product = i64::from(value)
         .checked_mul(i64::from(multiplier))
@@ -2094,6 +2177,7 @@ fn plot_walls(
     scratch: &mut WallScratch,
     effects: &mut Vec<SolidEffect>,
     include_collisions: bool,
+    #[cfg(any(test, feature = "browser-test-harness"))] static_bitmap: &mut [u32; 32],
 ) -> Result<(), SolidMotionError> {
     if context.current_world_graphics_flags & 0x0010_0000 == 0 {
         let flags = if state.status_c & 2 != 0 || (2..=4).contains(&state.invincibility_state) {
@@ -2122,6 +2206,10 @@ fn plot_walls(
             translation.z,
             scratch,
         )?;
+    }
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    {
+        *static_bitmap = scratch.bitmap;
     }
     plot_object_walls(
         candidates,
@@ -2435,6 +2523,30 @@ fn integer_sqrt(value: u64) -> i32 {
         bit >>= 2;
     }
     i32::try_from(result).unwrap_or(i32::MAX)
+}
+
+fn maximum_step(displacement: Vec3) -> Vec3 {
+    let magnitude = displacement.x.unsigned_abs() / MAX_HORIZONTAL_DISPLACEMENT as u32;
+    let magnitude = magnitude.max(displacement.y.unsigned_abs() / MAX_VERTICAL_DISPLACEMENT as u32);
+    let magnitude =
+        magnitude.max(displacement.z.unsigned_abs() / MAX_HORIZONTAL_DISPLACEMENT as u32);
+    let divisor = i32::try_from(magnitude.saturating_add(1)).unwrap_or(i32::MAX);
+    Vec3 {
+        x: displacement.x / divisor,
+        y: displacement.y / divisor,
+        z: displacement.z / divisor,
+    }
+}
+
+const fn clamp_remaining_step(remaining: i32, maximum: i32) -> i32 {
+    if maximum == 0 {
+        return remaining;
+    }
+    if remaining.unsigned_abs() >= maximum.unsigned_abs() {
+        maximum
+    } else {
+        remaining
+    }
 }
 
 #[cfg(test)]

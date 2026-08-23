@@ -30,6 +30,8 @@ use crate::retail_physics::{
     RetailTranslationMode, apply_free_movement, apply_path_orientation, begin_retail_physics,
     finalize_retail_physics, path_orientation_requested, rotate_toward,
 };
+#[cfg(any(test, feature = "browser-test-harness"))]
+use crate::retail_solid_motion::SolidWallStepDebug;
 use crate::retail_solid_motion::{
     ObjectCollisionLinks, ObjectCollisionState, STATUS_HOTSPOT_COLLISION, SmoothStopMemory,
     SolidColliderState, SolidEffect, SolidLevelQuirks, SolidMotionContext, SolidMotionError,
@@ -326,6 +328,15 @@ const INITIAL_SCALE: i32 = 0x1000;
 const INITIAL_STATUS_A: u32 = 0x0002_0020;
 const INITIAL_NODE: u32 = 0xffff;
 const INITIAL_VOICE_ID: i32 = -2;
+
+fn animation_scale_x(scale_x: i32, flip: u32) -> i32 {
+    match flip {
+        0 => scale_x.wrapping_abs(),
+        1 => scale_x.wrapping_abs().wrapping_neg(),
+        2 => scale_x.wrapping_neg(),
+        _ => scale_x,
+    }
+}
 
 /// A checked GOOL instruction-space selector. Retail executable code lives in
 /// the external entry while opcode `0x86` calls absolute offsets in the
@@ -4843,6 +4854,8 @@ pub struct Machine {
     /// objects, frames, and current-zone replacement until `LevelInitMisc`
     /// explicitly invalidates it or a strict event-bound escape rebuilds it.
     solid_query_cache: Option<SolidQuery>,
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    browser_test_solid_wall_steps: BTreeMap<ObjectHandle, Vec<SolidWallStepDebug>>,
     /// Octree neighborhood owned by native global `cur_zone`. Per-object
     /// solid environments remain separate because their headers supply
     /// object-zone colors and boundary/water behavior.
@@ -4917,6 +4930,8 @@ impl Machine {
             solid_trans4: [0; 3],
             solid_smooth_stop: SmoothStopMemory::default(),
             solid_query_cache: None,
+            #[cfg(any(test, feature = "browser-test-harness"))]
+            browser_test_solid_wall_steps: BTreeMap::new(),
             current_solid_environment: None,
             solid_frame_bounds: FrameBounds::new(),
             solid_frame_bound_incarnations: Vec::new(),
@@ -6192,6 +6207,9 @@ impl Machine {
         );
         self.solid_query_cache = query_cache;
         let outcome = outcome.map_err(VmError::RetailSolidMotion)?;
+        #[cfg(any(test, feature = "browser-test-harness"))]
+        self.browser_test_solid_wall_steps
+            .insert(handle, outcome.wall_steps.clone());
         if let Some(error) = hook_error {
             return Err(error);
         }
@@ -6247,6 +6265,14 @@ impl Machine {
         self.solid_smooth_stop = outcome.smooth_stop;
         self.apply_retail_solid_effects(handle, &outcome.effects[applied_effects..])?;
         Ok(false)
+    }
+
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    #[must_use]
+    pub fn browser_test_solid_wall_steps(&self, handle: ObjectHandle) -> &[SolidWallStepDebug] {
+        self.browser_test_solid_wall_steps
+            .get(&handle)
+            .map_or(&[], Vec::as_slice)
     }
 
     fn commit_live_solid_motion_state(
@@ -10126,12 +10152,7 @@ impl Machine {
                 });
 
                 let scale_x = self.object(handle)?.register(SCALE_X_REGISTER)? as i32;
-                let scale_x = match flip {
-                    0 => scale_x.wrapping_abs().wrapping_neg(),
-                    1 => scale_x.wrapping_abs(),
-                    2 => scale_x.wrapping_neg(),
-                    _ => scale_x,
-                };
+                let scale_x = animation_scale_x(scale_x, flip);
                 self.object_mut(handle)?
                     .set_register(SCALE_X_REGISTER, scale_x as u32)?;
                 self.emit(VmEffect::AnimationSelected {
@@ -10163,12 +10184,7 @@ impl Machine {
                 });
 
                 let scale_x = self.object(handle)?.register(SCALE_X_REGISTER)? as i32;
-                let scale_x = match flip {
-                    0 => scale_x.wrapping_abs().wrapping_neg(),
-                    1 => scale_x.wrapping_abs(),
-                    2 => scale_x.wrapping_neg(),
-                    _ => scale_x,
-                };
+                let scale_x = animation_scale_x(scale_x, flip);
                 self.object_mut(handle)?
                     .set_register(SCALE_X_REGISTER, scale_x as u32)?;
                 self.emit(VmEffect::AnimationFrameChanged {
@@ -14388,7 +14404,7 @@ mod tests {
         assert_eq!(machine.object(h).unwrap().animation_frame(), 0x200);
         assert_eq!(
             machine.object(h).unwrap().register(SCALE_X_REGISTER),
-            Ok(0x1000)
+            Ok((-0x1000_i32) as u32)
         );
         assert_eq!(
             machine.object(h).unwrap().stack(),
@@ -14435,7 +14451,7 @@ mod tests {
                 .contains(&VmEffect::AnimationFrameChanged {
                     object: h,
                     frame: 0x200,
-                    scale_x: 0x1000,
+                    scale_x: -0x1000,
                     local_bound_refresh: AnimationLocalBoundRefresh::Unconditional,
                 })
         );
@@ -14894,6 +14910,15 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn animation_orientation_selectors_match_native_scale_signs() {
+        let initial = -0x1000_i32;
+        assert_eq!(animation_scale_x(initial, 0), 0x1000);
+        assert_eq!(animation_scale_x(initial, 1), -0x1000);
+        assert_eq!(animation_scale_x(initial, 2), 0x1000);
+        assert_eq!(animation_scale_x(initial, 3), -0x1000);
     }
 
     #[test]

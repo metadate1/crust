@@ -361,7 +361,23 @@ impl BrowserTestClock {
 pub(crate) enum BrowserTestPadInput {
     Physical(u16),
     Recorded(u32),
+    Snapshot {
+        before: crust_platform::input::PadSnapshot,
+        after: crust_platform::input::PadSnapshot,
+        frame_stamp: Option<u32>,
+        frame_timing: Option<(i32, i32)>,
+    },
 }
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser-test-harness")))]
+type BrowserTestFrameInput = (
+    u16,
+    Option<u32>,
+    Option<crust_platform::input::PadSnapshot>,
+    Option<crust_platform::input::PadSnapshot>,
+    Option<u32>,
+    Option<(i32, i32)>,
+);
 
 #[cfg(any(test, all(target_arch = "wasm32", feature = "browser-test-harness")))]
 impl Default for BrowserTestPadInput {
@@ -384,10 +400,38 @@ impl BrowserTestPadInput {
     }
 
     #[must_use]
-    pub(crate) const fn frame_input(self) -> (u16, Option<u32>) {
+    pub(crate) const fn snapshot_boundary(
+        before: crust_platform::input::PadSnapshot,
+        after: crust_platform::input::PadSnapshot,
+        frame_stamp: Option<u32>,
+        frame_timing: Option<(i32, i32)>,
+    ) -> Self {
+        Self::Snapshot {
+            before,
+            after,
+            frame_stamp,
+            frame_timing,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn frame_input(self) -> BrowserTestFrameInput {
         match self {
-            Self::Physical(held) => (held, None),
-            Self::Recorded(held) => (0, Some(held)),
+            Self::Physical(held) => (held, None, None, None, None, None),
+            Self::Recorded(held) => (0, Some(held), None, None, None, None),
+            Self::Snapshot {
+                before,
+                after,
+                frame_stamp,
+                frame_timing,
+            } => (
+                0,
+                None,
+                Some(before),
+                Some(after),
+                frame_stamp,
+                frame_timing,
+            ),
         }
     }
 
@@ -396,6 +440,7 @@ impl BrowserTestPadInput {
         match self {
             Self::Physical(held) => held as u32,
             Self::Recorded(held) => held,
+            Self::Snapshot { after, .. } => after.held,
         }
     }
 
@@ -404,6 +449,7 @@ impl BrowserTestPadInput {
         match self {
             Self::Physical(_) => "physical",
             Self::Recorded(_) => "recorded",
+            Self::Snapshot { .. } => "snapshot",
         }
     }
 }
@@ -997,18 +1043,29 @@ mod tests {
         );
 
         let recorded = BrowserTestPadInput::recorded(u32::MAX);
-        assert_eq!(recorded.frame_input(), (0, Some(u32::MAX)));
+        assert_eq!(
+            recorded.frame_input(),
+            (0, Some(u32::MAX), None, None, None, None)
+        );
         assert_eq!(recorded.held_word(), u32::MAX);
         assert_eq!(recorded.input_kind(), "recorded");
 
         let mut pad = PadState::default();
-        let (physical, demo_override) = recorded.frame_input();
+        let (physical, demo_override, _, snapshot_override, frame_stamp, frame_timing) =
+            recorded.frame_input();
+        assert_eq!(snapshot_override, None);
+        assert_eq!(frame_stamp, None);
+        assert_eq!(frame_timing, None);
         pad.update(physical, 0, demo_override);
         assert_eq!(pad.snapshot().held, u32::MAX);
         assert_eq!(pad.snapshot().tapped, u32::from(TAP_MASK));
 
         let released = BrowserTestPadInput::physical(0).unwrap();
-        let (physical, demo_override) = released.frame_input();
+        let (physical, demo_override, _, snapshot_override, frame_stamp, frame_timing) =
+            released.frame_input();
+        assert_eq!(snapshot_override, None);
+        assert_eq!(frame_stamp, None);
+        assert_eq!(frame_timing, None);
         pad.update(physical, 0, demo_override);
         assert_eq!(pad.snapshot().held, 0);
         assert_eq!(
@@ -1016,6 +1073,31 @@ mod tests {
             u32::MAX,
             "switching back to ordinary physical input must retain pad history"
         );
+
+        let captured = crust_platform::input::PadSnapshot {
+            held: 0x40,
+            tapped: 0,
+            held_previous: 0x840,
+            held_previous_2: 0x800,
+            tapped_previous: 0x40,
+        };
+        let snapshot =
+            BrowserTestPadInput::snapshot_boundary(captured, captured, Some(77), Some((29, 51)));
+        assert_eq!(
+            snapshot.frame_input(),
+            (
+                0,
+                None,
+                Some(captured),
+                Some(captured),
+                Some(77),
+                Some((29, 51))
+            )
+        );
+        assert_eq!(snapshot.held_word(), 0x40);
+        assert_eq!(snapshot.input_kind(), "snapshot");
+        pad.replace_snapshot(captured);
+        assert_eq!(pad.snapshot(), captured);
     }
 
     #[test]

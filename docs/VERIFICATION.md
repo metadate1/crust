@@ -1374,18 +1374,33 @@ is 1,322,866 bytes with SHA-256
   every remaining launcher and flame cycle, climbs `e7_qZ`'s five alternating stationary ledges
   and rotating logs, and brakes through the `e9`/`f0` three-arrow chain into `f1_qZ`'s normal
   WarpC. WarpC requests Level Complete `0x2d` on frame 6,165. The complete run records 317
-  successful spawns from 84,438 attempts/84,121 source-expected rejections, 153,291 executions,
-  64 lifecycle/zone transitions, 684 solid effects, 60 camera ranges, and 75 path changes. The
+  successful spawns from 84,441 attempts/84,124 source-expected rejections, 153,251 executions,
+  64 lifecycle/zone transitions, 680 solid effects, 60 camera ranges, and 75 path changes. The
   final camera is `f1_qZ:0@17919`; Crash remains live in state 32 at
   `[1579260, 6596940, 167936]`, and RNG is `0x48320b2c`. It has no restart, death camera, terminal
   fall, LoadState, VM fault, faulted object, execution error, or checked issue. A browser-driven
   completion remains unproved.
+- A separate current-tree, owned-BIN-derived carried-phase regression starts Native Fortress at
+  draw 22,829 with RNG-A/B `0xb7ab3d78`/`0x33881199`. Native requests Level Complete on frame 6,737
+  after 323 successful spawns, 166,471 executions, 66 zone transitions, and three SaveState
+  effects. Its current native completion graph requests Title on frame 432 at draw 29,997; a
+  253-frame Map handoff mounts Up the Creek at draw 30,250. Up completes on frame 4,318, its
+  completion graph takes 176 frames, Ripper Roo completes on frame 2,064, and the next 253-frame
+  Map mounts The Lost City at draw 37,314. Lost City then requests Level Complete on frame 6,912
+  after 192 successful spawns, 177,333 executions, 53 zone transitions, and three SaveState
+  effects, with zero restart, LoadState, death-camera frame, terminal fall, faulted object,
+  execution error, checked issue, non-ordinary pad bit, or opposing-direction sample. Its
+  288-frame completion reaches Title at draw 44,514; the next 253-frame Map requests Temple Ruins,
+  whose exact clean frame-one mount is draw 44,768, RNG-A/B `0xaf5b5043`/`0x79b7f0de`, and 18
+  executions. This focused current native result is distinct from the canonical campaign's
+  frame-6,643 Lost City leg and the dated owned-BIN browser/native checkpoint whose Native
+  completion graph took 384 frames. It proves the Temple mount, not Temple completion.
 - A card-backed Great Gate (`0x12`) Yellow Gem regression restores the exact 128-byte save payload,
   asserts item-pool bit 29 and gem count one through the carried Title-map session, crosses the
   phase-sensitive `c4`/`c5` logs, activates both subtype-five `GemsC` platforms, and activates and
   boards both `c8_iZ` wall logs before traversing `c9_iZ`. The authored WarpC requests Level
   Complete `0x2d` on frame 3,209; WarpC reaches state one and Crash reaches state 32 at
-  `[3501824, -4780684, 132864]`. The raw-BIN route records one authored transition and no death,
+  `[3483392, -4780690, 132864]`. The raw-BIN route records one authored transition and no death,
   restart, terminal fall, VM fault, faulted object, execution error, or checked issue.
 - Temple Ruins (`0x1c`) has complete fresh and uninterrupted carried ordinary-pad routes. The fresh
   route requests Level Complete `0x2d` on frame 4,473 after 150,694 executions. The carried route
@@ -1459,14 +1474,21 @@ is 1,322,866 bytes with SHA-256
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- The locked all-target workspace currently enumerates 1,300 Rust tests: 1,069 default-active and
-  231 ignored-by-default legally-local tests. The complete default gate and focused owned-data
-  sweeps pass with zero failures, including the complete Native Fortress and Up
-  the Creek route goldens; the added N. Sanity completion, owned-disc caption-return, and complete
-  `pb0cB` scene goldens pass independently. Rustfmt,
-  warnings-denied native all-target Clippy, warnings-denied Wasm Clippy, optimized native/Wasm
-  release builds, all 52 Node tests, `npm run build`, and the distribution verifier
-  pass on the delivery tree.
+- At that checkpoint, the locked all-target workspace enumerated 1,300 Rust tests: 1,069
+  default-active and 231 ignored-by-default legally-local tests. The current tree enumerates 1,359:
+  1,099 default-active and 260 ignored-by-default legally-local tests. On 2026-08-13 the durable,
+  serial current-fixture sweep selected and passed all 250 main entries with zero failures and
+  authoritative exit status zero. It ran for 57m09.63s, peaked at 1,297,668 KiB RSS, and used no
+  swap; the ignored log SHA-256 is
+  `7062fa2dfaa7a5fa2d24548869ad116996ed7124b2b74974e19bb276afbe4f6f`. The isolated
+  replay exporter then passed 1/1 under Node 22.16.0 with exit status zero. Nine explicitly
+  historical fixtures remain separate opt-in diagnostics, so this is a complete current-fixture
+  result, not a claim that every legacy phase passes when all historical flags are enabled. The
+  final frozen-tree Rust gates then passed formatting, warnings-denied workspace/all-target Clippy,
+  and all 1,099 default-active tests with zero failures while retaining the 260 legally-local tests
+  as ignored. The before/after source fingerprints were identical. Node's 71 tests, both Wasm
+  warnings-denied Clippy configurations, optimized native/Wasm builds, production and browser-
+  harness builds, and both distribution verifiers also passed on the current source snapshot.
 - The `5ef328e` Chrome-compatible in-app browser build
   `5ef328ef9bcb-1a72bf618243-87f5283f6472-clean` selected the user's legally local
   632,083,536-byte raw BIN through the real file input without a helper or copied asset. The app
@@ -1586,16 +1608,10 @@ is 1,322,866 bytes with SHA-256
   not overwrite a replacement's checked bound with invented data. The dedicated player's extra
   0x100-byte allocation tail remains separately open.
 
-### Current campaign frontier (2026-08-01)
+### Campaign frontier recorded on 2026-08-01
 
-- The legally local native
-  `authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry` regression does
-  **not** currently pass. The exact carried phase reaches Sunset Vista with no reset, crosses the
-  earlier projectile seam, then a late-c3 rotating-wall interaction displaces Crash from the
-  roughly 233k depth lane to roughly 486k as c4 begins; Crash misses the authored support and the
-  level restarts. The focused controller is being synchronized against the live collision bound.
-  Until this regression passes repeatedly and the complete chain is rerun, the earlier
-  publisher-to-Title capture is historical evidence rather than current completion proof.
+- At this checkpoint, the legally local canonical campaign did not pass: Sunset Vista's late-c3/c4
+  handoff restarted. This observation was superseded by the reconciled 2026-08-13 run recorded below.
 - The canonical Ending boundary requests Title on frame 3,396. `GAME_STATE` is `0x600` both before
   Ending's checked `LEVEL_END` and in the freshly mounted frame-zero Title carry; the first authored
   Title tick then clears it to zero. This exact handshake is distinct from the earlier bounded
@@ -1639,12 +1655,9 @@ is 1,322,866 bytes with SHA-256
 - Castle Machinery's current exact carried golden passes at 6,071 frames. Its controller no longer
   relies on an impossible opposing-direction fallback, so that characterization is not a remaining
   campaign blocker.
-- The earlier owned-BIN browser campaign executed a canonical 89-phase, 141,776-frame
-  Title-to-Title replay from 92 captures plus 96 bounded settle frames. It consumes all 14,429 input
-  runs, excludes three diagnostic alternatives, inserts no synthetic handoff, and skips zero replay
-  frames. The route starts at the real publisher/title sequence, crosses every ordinary campaign
-  gameplay, boss, bonus, completion and map phase, defeats Cortex, executes Ending, and remounts
-  Title. It must be repeated on the final tree and is not currently sufficient to claim completion.
+- The earlier owned-BIN browser campaign executed a canonical 89-phase, 141,776-frame Title-to-Title
+  replay. It remains historical comparison evidence; the 2026-08-23 current-tree proof below
+  supersedes its browser-repetition gate.
 - Its terminal checkpoint is `currentLid == mountedLid == 0x19`, draw/process count 130,740, and
   RNG-A `0x3b704e12`. The 141,872 executed harness frames report three source hard-restart calls
   and two LoadState effects: one same-level pair from Jungle Rollers' authored terminal fall, then
@@ -1656,13 +1669,82 @@ is 1,322,866 bytes with SHA-256
   the Brio bonus and returns cleanly. The owned raw-BIN extraction regression also matches all 44
   local stream pairs and their bootable graph.
 
+### Current Title-to-Title browser campaign and video proof (2026-08-23)
+
+- The current native campaign exporter produced 89 legally local fragments under one fresh ignored
+  directory. Strict discovery found one unique exact ordered path containing every fragment, with
+  no disconnected capture, ambiguous branch, or hand-authored handoff. The manifest SHA-256 is
+  `f83bc7fe6372be42a5c82e281e9136cb91718507ad290447e4c2ad9142c36476`; the composed replay
+  SHA-256 is `bff898d6705d9aa2d287ac3adc41fd6483b8f8c47690b10271d016edb8e35ab5`.
+  Composition reports 89 phases, 19,961 input segments, 146,501 replay frames, boot LID `0x19`,
+  final LID `0x19`, and zero handoffs. `C1_CHAIN_REBASE=1` made stale observation assertions
+  diagnostic during export; it did not generate input, force a transition, mutate GOOL state, or
+  alter the route controller.
+- Pinned Node 22.16.0 built the feature-gated harness from source SHA-256
+  `7deeef3d111937a094ad6ff126a1d3537bf055e3b913a43929e030916f107146`. The harness build ID is
+  `b3d3eddf135e-7deeef3d1119-d28dc0c911b1-dirty`; its 1,569,293-byte Wasm SHA-256 is
+  `14b4f70ecc509de2e82b1e554aa926fbb813f795abd85123553ec98677f685bb`. The separately rebuilt
+  production distribution verifies as `b3d3eddf135e-7deeef3d1119-d99837b4d7c6-dirty`; its
+  1,536,949-byte Wasm SHA-256 is
+  `591b769ce53d19e1215ae52de61550390c97f796a6e7f8ac0edc1c26b44fd3da`.
+- Chrome 151.0.7922.137 under Xvfb mounted the owned 632,083,536-byte raw BIN, recognized all 88
+  streams and 44 pairs, and consumed all 146,501 replay frames plus two declared segment-settle
+  frames. It skipped zero replay frames and inserted no synthetic handoff. The terminal snapshot is
+  `currentLid == mountedLid == 0x19`, Title state 5, draw/process count 134,970, RNG-A
+  `0xec6e8edc`, and RNG-B `0x369bbacd`. The three hard restarts and two LoadState effects are the
+  source-authored Jungle Rollers and Great Gate/Bonus 2 events; death-camera frames are zero.
+  Browser-event, console, WebGL, runtime, execution, faulted-object, zone-event, failed-spawn, and
+  post-selection-network failure counts are all zero.
+- The proof recorded one JPEG for every completed source frame directly into ffmpeg; no individual
+  source frames were written to disk. The silent H.264 output is 30 fps, 146,503 frames,
+  81:23.433 long, and 254,971,796 bytes. It stores 308x230 coded pixels with sample aspect ratio
+  230:231, which displays as exact 4:3; the captured native canvas was 308x231. The browser settings
+  were 4:3, native resolution, 100% zoom, smooth motion off, and extended world off. The video
+  SHA-256 is `287e737f8ffebd1ed63a42425e83810f3e10b084b69a63b4039514c13b6b129f`.
+- The ignored 89-entry chapter list SHA-256 is
+  `6749dc838f457d57f1bde1c882827fefab0368760da0cb6e192ae96f92cec0f2`. Seven visually checked
+  silent 4:3/30 fps clips were cut from that same video: Papu Papu (27.067s,
+  `43f77a89a1789e6d5bbf91868b6909fe4e78e72d89319e1c6b2c10f6748287fb`) and 45-second Ripper Roo,
+  Koala Kong, Pinstripe, N. Brio, Cortex, and Ending highlights with SHA-256 values
+  `d62ef18584f8bd5facecb0ef79ea93b8de4ac73f0354d61404ff4c77134b261f`,
+  `cf2ca599101a8b0046ef7710119a5aadf7ffc98307491884b1d3a61d15579484`,
+  `afa223f2857f13e885fb74a4d9cf2beeb9be9ed6af2372e9dab1a99f2d572681`,
+  `bb5c8bfdafeda6e600d4383c53d7248bdb8cdcb268fe6b88bc2a894454fe56fd`,
+  `dce993c8a1cca8636303f36eecbcd46d6ada96c40056f5f98d70f237f219a8f3`, and
+  `5ec17b1a6c6299fb559c434652eb71626f6fffc465f25c1d9e333876283d32bc`, respectively. The ignored
+  clip index records their exact source-frame ranges and has SHA-256
+  `585646cd030d88dd39148ff0134ae6c02aa5b22d78f954ba332175ca5b64c55e`.
+- The final page screenshot is 263,922 bytes with SHA-256
+  `f17979c7e29d8dcce1d45586dea570eb2cf51632c511918102af227866de7d3c`. The complete ignored proof
+  log SHA-256 is `cc084773ce1a11df3a7dab85ad7c7c56e93a891106d4b6258fbab0cb610315c6`.
+  The run exited zero after 4:35:50 wall time, peaked at 478,956 KiB RSS, used no swap, and never
+  crossed the 3 GiB free-space abort threshold. Audio was intentionally not captured on this VPS.
+  The video, chapter list, screenshot, proof log, and clips are under the ignored
+  `target/browser-test-artifacts/current-title-to-title-20260823-run8/` directory; the composed
+  replay and its 89 source fragments remain under the ignored
+  `target/local-campaign/current-title-to-title.VZWFlW/` directory.
+
+The proof command was:
+
+```bash
+xvfb-run -a -s "-screen 0 1440x1100x24" \
+  npm run verify:browser-harness:smoke -- \
+  --asset /path/to/owned-disc.bin \
+  --replay target/local-campaign/current-title-to-title/campaign.replay.json \
+  --chrome /usr/bin/google-chrome \
+  --screenshot target/browser-test-artifacts/current-title-to-title/final.png \
+  --video target/browser-test-artifacts/current-title-to-title/full-campaign.mp4 \
+  --chapters target/browser-test-artifacts/current-title-to-title/chapters.json \
+  --ffmpeg /usr/bin/ffmpeg
+```
+
 ### Current browser-harness spot checks (2026-08-01)
 
 The feature-gated harness build
 `79a1b818c979-b6486bda0801-300db162149e-dirty` was generated from the active worktree and served
 only on loopback. These checks use the user's legally local NTSC-U data and do not copy it into the
-repository. They are current subsystem evidence, not a substitute for repeating the complete
-campaign after the Sunset Vista route is fixed.
+repository. They remain bounded browser subsystem evidence alongside the later complete current-
+tree browser campaign; they are not a reference-console comparison.
 
 - Raw-BIN discovery found all 44 pairs. Extracted `s0000009.nsd`/`.nsf` selection separately
   mounted N. Sanity Beach and ran 180 frames with one live player and no browser, WebGL, runtime,
@@ -1684,7 +1766,129 @@ campaign after the Sunset Vista route is fixed.
   mount audits. All nine runs ended with zero execution, faulted-object, zone, console, network, or
   WebGL error.
 
+### Current native campaign reconciliation (2026-08-13)
+
+- `authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry` passed in the
+  shared continuation worktree: one passed, zero failed, in 373.50 seconds. It starts at
+  publisher/title, preserves process and physical-pad state, crosses Sunset Vista, every later
+  main-map mount, Cortex, Ending, and remounts Title.
+- Sunset imports canonical RNG-A `0x659ffca0`, draw 48,128, and RNG-B `0x6106e876`, then completes
+  without a restart, death-camera frame, terminal fall, VM fault, or checked issue. No Sunset
+  controller change was required.
+- Heavy Machinery's authored shaft cap is observed on frame 1,599, not the stale frame 2,849. Its
+  exact g2 state, position and velocity are unchanged, and it lands two cooperative ticks later
+  before completing through `WarpC`.
+- The canonical Castle mount matches the already-defined current tuple
+  `0xabde40f7` / 105,145 / `0xaa808fd8`; the Lab mount matches
+  `0xf04da583` / 114,283 / `0xd799919f`. The former assertions referenced historical focused phases.
+- `corrected_publisher_great_gate_phase_completes_with_live_controller` passes cleanly, activates
+  checkpoint 76, and reaches Level Complete. The raw-BIN Yellow Gem route independently reaches
+  Level Complete on frame 3,209 at `[3483392, -4780690, 132864]`.
+- `generator_room_tawna_tokens_round_trip_the_exact_parent_snapshot_and_complete` passes, including
+  all three token handshakes, Bonus `0x24`, the exact saved parent, one authored `LoadState`, `-2`
+  resolution, protected parent remount, and normal completion. Direct and both post-Cortex siblings
+  pass as well.
+- `great_hall_all_gems_route_reaches_authored_epilogue_and_title` passes in 18.63 seconds. It restores
+  exactly 26 gems/two keys, executes `WinGC`, and requests Title on frame 6,950 with Crash in state 33
+  at `[8280332, 1031159, 24864256]`.
+- Castle's live d4 pipe jump, c9 centering/run-up, and a7 rod-release changes carry the separate
+  post-Lights fixture through a clean Castle completion on frame 6,208 and clean Brio completion on
+  frame 2,025. Lab's live assistant retreat and c4 grounded-jump gates then carry that distinct
+  inherited phase through Lab, Great Hall, Cortex, Ending, and Title with no recovery or checked
+  runtime failure.
+
+### Local native-emulator campaign oracles (2026-08-13)
+
+- Official Mednafen 1.32.1 was built PSX-only under ignored local storage at
+  `local-data/tools/prefix/mednafen-1.32.1/bin/mednafen`. The official source tarball SHA-256 is
+  `de7eb94ab66212ae7758376524368a8ab208234b33796625ca630547dbc83832`.
+- The ignored `local-data/c1-ntsc-u.cue` describes the owned raw image. An Xvfb/software-framebuffer,
+  dummy-audio launch parsed MODE2/2352 CD-XA, one DATA track, leadout 268743, and SCEA North America.
+  Mednafen used compatible PSX firmware supplied locally outside the repository; neither the
+  firmware nor its fingerprint is published.
+- Mednafen booted the owned disc with that locally supplied firmware under Xvfb. A reproducible
+  local input movie
+  reaches N. Sanity, and native checkpoints cover its loading card, prone beach wake-up, camera
+  rise, and standing scene. These agree structurally with bounded direct Crust frames while retaining
+  expected PS1 dithering, affine/low-resolution texture, pixel-aspect, and CD-loading differences.
+- PCSX-RR v0.1.2+ under 32-bit Wine/Xvfb replayed the published 163,770-frame any% PXM, SHA-256
+  `0d68f4d5e91b9ff9fddca7614003e7c47a6e805613a1d107350cf42afbba210f`, against the same owned disc
+  and firmware. It stayed synchronized through all recorded frames, reached Cortex, continued
+  through Ending, and returned to Title. The continuous ignored desktop capture is 812.5 seconds;
+  the emulator was terminated deliberately after the post-ending screenshot.
+- PSXjin 2.0.2 under the same Wine/Xvfb environment replayed the published 264,988-frame 100% PJM,
+  SHA-256 `dbf8fed5024ca73982fd9666aac25bb2b68bc7b246eb7bae2415a17f962a8f83`. It reached Whole Hog,
+  Fumbling in the Dark, `100% COMPLETE` with 32/32 level credits, 2/2 keys, and 26/26 gems, then
+  Great Hall and the alternate ending. Together the PCSX-RR and PSXjin runs cover all 33 normally
+  accessible U.S. retail level/boss nodes. They do not cover removed-from-progression Stormy Ascent
+  or every bonus/death/alternate-input variant.
+- `npm run import:psx-movie-replay` parses version-two PXM/PJM standard-pad streams, rejects
+  player-two and emulator-control events, samples the 60 Hz input at an explicit 2:1 phase, and
+  writes only ignored/local browser replay JSON. The two legally local files parse as 163,770 native
+  PXM frames / 81,846 default retail samples / 5,476 RLE segments and 264,988 native PJM frames /
+  132,494 retail samples / 18,239 segments. A direct N. Sanity window reproduces the movie's pad
+  cadence but not its inherited power-on/title/RNG/process/card state.
+- A stronger ignored N. Sanity replay splices PXM gameplay frame 1,738 after the exact exported
+  Crust Title-to-N. Sanity boundary: LID `0x09`, draw/process draw 668, RNG-A `0xd3de_0ffe`, RNG-B
+  zero, title state 15, and zero restart/LoadState/death-camera counters. That boundary passes. Both
+  fixed 2:1 sample phases fail later; the fail-fast phase-one run remains clean through Crust level
+  tick 302 and first records a hard restart plus LoadState on tick 303, sourced from native movie
+  frame 2,340, while the synchronized PCSX-RR capture continues through the same section. The
+  one-tick clean checks, replay JSON, log, and screenshots remain ignored under
+  `target/local-native-movie/`.
+- This is a localized differential, not yet a retail-engine verdict. The exported prefix proves
+  Crust's carried state but not equality with every hidden PS1 process value, while fixed 2:1 input
+  sampling cannot substitute for PCSX-RR's real lag/input-poll map. PCSX-RR exposes Lua
+  `framecount`, `lagged`, `lagcount`, and memory APIs, but its old Windows build either stalls on
+  command-line Lua frame advance or faults when a returned script leaves a callback installed under
+  Wine; no trustworthy native lag map or RAM boundary was claimed.
+- No BIOS, disc data, input movie, capture, emulator build, or generated replay is tracked.
+
+### Bounded VPS browser smoke (2026-08-13)
+
+- The pinned Node 22.16.0 production and browser-harness builds verify as
+  `b3d3eddf135e-925cf4d63f99-278571a99ae5-dirty` and
+  `b3d3eddf135e-925cf4d63f99-5535a365db4a-dirty`. Both manifests pin source SHA-256
+  `925cf4d63f990ba3f7390300f3f4cb9fefd5d545ef5b34879157af61bf29679d`. The production Wasm is
+  1,534,751 bytes with SHA-256 `ad8adf18c6ad6e7a61ebf4b861fd8286fdd40d14ed155c5da5111858acb93211`;
+  the harness Wasm is 1,552,082 bytes with SHA-256
+  `f3fcbe33c98abfb5a97daa4c760a00bc96eb1732cab78d521aad1fbaff4b65bf`.
+- Chrome 151.0.7922.137 mounted the owned 632,083,536-byte raw BIN, recognized 44 pairs, directly
+  mounted N. Sanity Beach, and completed 360/360 requested cooperative frames and host callbacks
+  with no zero-step callback, skipped frame, or transition-settle frame.
+- The final snapshot reports current/mounted LID `0x09`, zone `e0_9Z`, 80 pages, 231 entries, 20
+  live objects, 7,454 retail executions, and retail frame/draw/process-draw counts all equal to 360.
+  Browser-event, console, WebGL, runtime, execution, faulted-object, zone-event, restart, LoadState,
+  death-camera, failed-spawn, and post-selection-network failure counts are all zero.
+- The ignored screenshot `target/browser-test-artifacts/n-sanity-vps-final-360.png` is 2,127,205 bytes with
+  SHA-256 `a94bd2d202929cbb5d3427df96e5509c67d8bccfeaf5bb32d2a194b2c1f98774` and shows the live
+  N. Sanity scene with `RUNNING` status. The command exited zero in 22.25 seconds with 246,768 KiB
+  maximum RSS; its ignored log SHA-256 is
+  `b07b12b22707f5bbdc5f34d99add28afb927537adaa633ced6556bd51776c426`. This is bounded current-source
+  browser evidence, not a full campaign replay, physical-input proof, or reference-console
+  comparison.
+
 ## Reproducible commands
+
+The current inventory has 260 ignored tests. The main command explicitly excludes the replay
+exporter and nine opt-in historical fixtures, so it executes 250 current-fixture entries. One of
+those entries validates its current Up-the-Creek/Ripper/Map prefix and deliberately stops before a
+separately opt-in legacy Lost City tail. The exporter fixture runs separately because ordinary
+surveys reject global export mode and it requires a fresh ignored output directory. The historical
+fixtures remain available through their named variables, but are not current parity frontiers.
+Run the main command from a shell with no other behavior-changing `C1_*` variables set; it then
+supplies only the disc, stream, and stack inputs and explicitly clears the known opt-ins. This is
+the reproducible complete current-fixture diagnostic sweep. The canonical campaign command below
+is independently known to pass.
+
+For first extraction, `/path/to/streams` must not exist. On later runs, reuse it and skip the
+extractor command. Do not consume a newly claimed output until the extractor exits successfully.
+On publication failure or interruption, inspect and manually remove that exact output before a
+retry; it is deliberately preserved so rollback cannot delete a same-user replacement. Ordinary
+failures clean the hidden sibling staging path or report the cleanup failure. Any termination that
+bypasses Rust cleanup—including `SIGKILL`—or a power loss can leave
+`.streams.crust-extract-PID-N`; after confirming that PID is no longer running and inspecting the
+path, remove that stale staging directory manually.
 
 ```bash
 cargo fmt --all -- --check
@@ -1693,13 +1897,29 @@ cargo clippy -p crust-web --target wasm32-unknown-unknown --locked -- -D warning
 cargo clippy -p crust-web --features browser-test-harness \
   --target wasm32-unknown-unknown --locked -- -D warnings
 npm test
+cargo run --locked -p crust-formats --bin extract-streams -- \
+  /path/to/disc.bin /path/to/streams
 C1_DISC_IMAGE=/path/to/disc.bin C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-formats --test local_disc --locked -- --ignored --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-renderer --test local_loading_images --locked -- --ignored --nocapture
-C1_DISC_IMAGE=/path/to/disc.bin C1_STREAM_DIR=/path/to/streams \
+env -u C1_BROWSER_REPLAY_EXPORT \
+  -u C1_LEGACY_SLIPPERY_CARRY -u C1_LEGACY_SUNSET_CARRY \
+  -u C1_LEGACY_LOST_RESTART_ROUTE -u C1_LEGACY_SYNTHETIC_CAMPAIGN \
+  C1_DISC_IMAGE=/path/to/disc.bin C1_STREAM_DIR=/path/to/streams \
   RUST_MIN_STACK=67108864 \
-  cargo test --workspace --all-targets --locked -- --ignored --nocapture
+  cargo test --workspace --all-targets --locked --no-fail-fast -- \
+  --ignored --test-threads=1 \
+  --skip legacy_ \
+  --skip lost_city_completion_route_reaches_title_after_checkpoint_recovery \
+  --skip exported_publisher_opening_composes_through_jungle_mount
+mkdir -p "$(pwd)/target/local-campaign"
+C1_STREAM_DIR=/path/to/streams \
+  C1_BROWSER_REPLAY_EXPORT="$(mktemp -d "$(pwd)/target/local-campaign/publisher-opening.XXXXXX")" \
+  RUST_MIN_STACK=67108864 \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  exported_publisher_opening_composes_through_jungle_mount -- \
+  --ignored --exact --test-threads=1
 C1_DISC_IMAGE=/path/to/disc.bin \
   cargo test -p crust-formats --test local_pbak --locked -- --ignored --nocapture
 C1_STREAM_DIR=/path/to/streams \
@@ -1729,6 +1949,10 @@ RUST_MIN_STACK=67108864 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry \
   -- --ignored --exact --nocapture
+RUST_MIN_STACK=67108864 C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  exact_post_hog_campaign_completes_lost_city_and_mounts_temple_without_recovery \
+  -- --ignored --exact --nocapture --test-threads=1
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   exact_post_papu_rolling_stones_phase_completes_with_live_controller \
@@ -1785,7 +2009,7 @@ C1_STREAM_DIR=/path/to/streams \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
-  jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot \
+  jungle_rollers_tawna_tokens_round_trip_the_exact_parent_snapshot \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
@@ -1872,7 +2096,10 @@ npm run build
 npm run verify:dist
 npm run build:browser-harness
 npm run verify:browser-harness
-node scripts/browser-harness-smoke.mjs --synthetic-cooked-iso-import
+node scripts/browser-harness-smoke.mjs \
+  --asset /path/to/disc.bin --chrome /usr/bin/google-chrome \
+  --lid 0x09 --frames 360 \
+  --screenshot target/browser-test-artifacts/n-sanity-vps-final-360.png
 ```
 
 After every final gate passes, the delivery summary must identify the exact commit pushed to the

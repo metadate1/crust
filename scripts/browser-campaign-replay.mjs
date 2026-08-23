@@ -1007,6 +1007,7 @@ export async function composeCampaignReplay(rawManifest, loadFragment) {
   }
   const manifest = normalizeCampaignManifest(rawManifest);
   const outputSegments = [];
+  const compositionPhases = [];
   let traceFromSegment;
   let previousCaptureMetadata;
   let previousPhase;
@@ -1094,14 +1095,27 @@ export async function composeCampaignReplay(rawManifest, loadFragment) {
         );
       }
     }
-    outputSegments.push(
-      ...guardedPhaseSegments(
-        fragment,
-        normalizedReplay,
-        phase,
-        captureMetadata,
-      ),
+    const phaseSegments = guardedPhaseSegments(
+      fragment,
+      normalizedReplay,
+      phase,
+      captureMetadata,
     );
+    const firstSegment = outputSegments.length + 1;
+    outputSegments.push(...phaseSegments);
+    compositionPhases.push({
+      id: phase.id,
+      firstSegment,
+      lastSegment: outputSegments.length,
+      replayFrames: phaseSegments.reduce(
+        (sum, segment) => sum + segment.frames,
+        0,
+      ),
+      maximumFrames: phaseSegments.reduce(
+        (sum, segment) => sum + segment.frames + segment.settleFrames,
+        0,
+      ),
+    });
     previousCaptureMetadata = captureMetadata;
     previousPhase = phase;
   }
@@ -1144,6 +1158,7 @@ export async function composeCampaignReplay(rawManifest, loadFragment) {
         ...BROWSER_OBSERVED_ONLY_CHECKPOINT_FIELDS,
       ],
       phaseIds: manifest.phases.map(({ id }) => id),
+      phases: compositionPhases,
       insertedHandoffs: manifest.insertedHandoffs,
     },
   };

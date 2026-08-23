@@ -219,7 +219,7 @@ const ACCELERATION_STATES: [RetailAccelerationState; 7] = [
         acceleration: 0x0019_0000,
         maximum_speed: 0xaae60,
         unknown: 0x0f,
-        deceleration: 0x0019_0000,
+        deceleration: 0x0001_9000,
     },
     RetailAccelerationState {
         acceleration: 0x0027_1000,
@@ -704,6 +704,7 @@ mod tests {
             ),
             ACCELERATION_STATES[3]
         );
+        assert_eq!(ACCELERATION_STATES[3].deceleration, 0x0001_9000);
     }
 
     #[test]

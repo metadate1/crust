@@ -46,21 +46,34 @@ publishes its next state before `LevelUpdate`, while mode eight publishes after 
 Menu → Map → N. Sanity Cross route emits and mounts retail level `0x09` rather than stopping at a
 host boundary.
 
-The strongest completed campaign proof is legally local and runs in a real Chrome-compatible
-browser. It starts at the retail publisher/title opening, preserves process state and physical pad
-history across authored mounts, follows the main-map campaign through every gameplay, boss, bonus,
-Level Complete and island-map phase, defeats Dr. Neo Cortex, executes Ending, and returns to Title.
-The owned-raw-BIN run recognized all 88 streams and 44/44 pairs, executed 141,776 captured replay
-frames plus 96 bounded transition-settle frames, and finished at Title with draw/process count
-130,740 and RNG-A `0x3b704e12`. It skipped no replay frame and reported no checkpoint, runtime,
-GOOL, zone, spawn, console, network, or WebGL failure. Its three hard-restart calls and two
-LoadState effects are all source-authored: one Jungle Rollers terminal fall contributes a
-same-level load/restart, while The Great Gate's Tawna-bonus return contributes the different-stream
-load/restart and protected parent restart. Stormy Ascent separately completes from direct boot in
-Chrome: all 9,334 captured frames match through its Level Complete mount with no recovery or failed
-checkpoint. Retail's natural key routes unlock Whole Hog and Fumbling in the Dark, not Stormy.
-Each key and its authored map branch now passes independently from fresh browser storage; joining
-both branches into one uninterrupted empty-card campaign remains an explicit parity gate.
+The strongest current legally local native campaign proof is
+`authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry`. It starts at the
+retail publisher/title opening, preserves process state and physical pad history across authored
+mounts, follows the ordinary main-map campaign through every gameplay, boss, Level Complete and
+island-map phase, including its Great Gate/Bonus 2 round trip, defeats Dr. Neo Cortex, executes
+Ending, and remounts Title without a process reset. The reconciled exact run passes through the
+formerly phase-sensitive Sunset Vista, Castle Machinery, The Lab and
+Great Hall mounts. Its exact carried Lost City leg reaches the authored exit on frame 6,643 with
+zero restarts, LoadState effects, death-camera frames, terminal falls, VM faults, or checked runtime
+issues. This is the native integration proof over user-supplied streams; the independent current
+browser proof is recorded immediately below.
+
+The strongest completed Chrome-compatible browser campaign now runs against the current tree and
+owned raw BIN. It recognized all 88 streams and 44/44 pairs, consumed the unique exact 89-phase
+Title-to-Title route's 146,501 replay frames plus two declared transition-settle frames, and
+finished with current/mounted Title LID `0x19`, draw/process count 134,970, and RNG-A
+`0xec6e8edc`. It skipped no replay frame and reported no checkpoint, runtime, GOOL, zone, spawn,
+console, network, or WebGL failure. Its three hard-restart calls and two LoadState effects are all
+source-authored: one Jungle Rollers terminal fall contributes a same-level load/restart, while The
+Great Gate's Tawna-bonus return contributes the different-stream load/restart and protected parent
+restart. The same proof produced a per-source-frame, silent 30 fps H.264 recording at the default
+4:3/native/100% presentation, an 89-entry chapter list, and short clips for every boss and Ending;
+all generated media remains ignored. The earlier 141,776-frame campaign remains historical
+comparison evidence. Stormy Ascent separately completes from direct boot in Chrome: all 9,334
+captured frames match through its Level Complete mount with no recovery or failed checkpoint.
+Retail's natural key routes unlock Whole Hog and Fumbling in the Dark, not Stormy. Each key and its
+authored map branch has an earlier documented fresh-storage browser proof; joining both branches
+into one uninterrupted empty-card campaign remains an explicit parity gate.
 
 The browser now owns a checked retail object runtime for title, gameplay, bonus, boss, level-
 complete, intro and ending states.
@@ -212,31 +225,27 @@ faulted object, death restart, below-zero position, or terminal fall. The curren
 fresh-boot completion golden also reaches the normal authored end: a legally local 2,100-frame
 invocation follows
 `b5_9Z:p4 → b5_9Z:p1 → b6_9Z:p0`, reaches `b7_9Z`'s `WarpC`, and emits
-`Transition(0x2d)` at frame 1,900. Checkpoint 19 saves at frame 861, the counted-box total reaches
+`Transition(0x2d)` at frame 1,996. Checkpoint 19 saves at frame 860, the counted-box total reaches
 `0xa00`, and `WarpC` executes states zero through four before the checked `LEVEL_END` resolves the
-Level Complete stream. It records 18 zone transitions with zero restarts, falls, VM errors or
-faulted objects. The
-former b5/b6 stop came from missing route actions in the test controller at authored static cells;
+Level Complete stream. It records 22 zone transitions with zero restarts, falls, VM errors or
+faulted objects. The former b5/b6 stop came from missing route actions in the test controller at
+authored static cells;
 the later b7 stop came from steering `LEFT` around the live portal lane. Correcting those route
-actions required no camera or collision runtime change. The current six-frame change instead comes
-from restoring `PlotObjWalls(flag=1)`'s ordered `GoolCollide` calls for overlapping frame bounds.
+actions required no camera or collision runtime change. The current interaction order includes
+`PlotObjWalls(flag=1)`'s restored ordered `GoolCollide` calls for overlapping frame bounds.
 `docs/VERIFICATION.md` records the exact invocation and boundaries.
 An opt-in legally local vertical-flow test now keeps the native process session intact across five
-normal-level completions and the next Map choice into Papu Papu. A fresh authored Map initialized
-through the card-payload restore path emits N. Sanity Beach `0x09` on frame 11. N. Sanity emits Level Complete
-`0x2d` at frame 1,900, its checked `LEVEL_END` phase exports `RetailSessionCarry`; Level Complete
-imports that carry and emits Title `0x19` at
-frame 513, and Title imports the second carry into its parsed graph, ZDAT entities, lifecycle, and
-map camera schedule. The post-completion Map unlocks level two; after the authored Up/Cross route
-it reaches `1b_pZ` path zero at progress `0x0b00` and emits Jungle Rollers `0x0c` on frame 253. The
-same uninterrupted test imports that carry into Jungle Rollers, flings both early PlanC hazards,
-breaks four counted boxes, and reaches checkpoint entity 46 at frame 1,117 with the exact saved
-checkpoint translation/count. It then continues through the remaining main-path route and enters
-the end `WarpC`. The warp emits
-`Transition(0x2d)` at frame 2,546 with a live counted box total of `0x1000` and no restart, death
-camera, below-zero or terminal fall, VM error, faulted object, or checked issue. Jungle raises the
-unlocked count to three before its checked `LEVEL_END`; its Level Complete screen emits Title on
-frame 306, and the remounted Map takes Up/Cross to select The Great Gate `0x12` on frame 253 at
+normal-level completions and the next Map choice into Papu Papu. It starts from the ordinary
+publisher/title opening, selects N. Sanity Beach `0x09` on title frame 668, and preserves physical
+pad history at every mount. N. Sanity emits Level Complete `0x2d` on frame 1,996; its 601-frame
+completion and the following 254-frame Title/Map handoff mount Jungle Rollers at draw 3,519. Jungle
+performs its authored terminal fall and exact `LoadState` restart on frame 199, then reaches
+checkpoint entity 46 on frame 1,902 with saved pre-increment box count `0x400` and live count
+`0x500`. It continues through the remaining main-path route and emits `Transition(0x2d)` on frame
+3,384 with live count `0xd00` across 31 zone transitions. That asserted recovery has no death-camera
+frame, VM error, faulted object, or checked issue. Jungle raises the unlocked count to three before
+its checked `LEVEL_END`; its Level Complete screen emits Title on frame 345, and the remounted Map
+takes Up/Cross to select The Great Gate `0x12` on frame 253 at
 `1c_pZ` path zero
 and progress `0x0200`. Current map level three, level count one, three unlocked levels, RNG and draw
 state survive the final checked Map handoff. All seven outgoing `LEVEL_END` broadcasts in this chain
@@ -249,8 +258,9 @@ through `b3_iZ`-`c7_iZ`, clears the snake and later hazards, enters the normal e
 `Transition(0x2d)` at frame 2,471 with 14 counted boxes (`0xe00`). The terminal boundary retains RNG
 `0x6a219f2c` and draw count 8,396 after 111 successful spawns, 47,371 clean executions, and 38
 lifecycle zone transitions, with no restart, death camera, terminal fall, VM error, faulted object,
-or checked issue. The yellow-gem alternate branch, box-complete gem evaluation, and browser
-playthrough remain outside this native integration claim. The ordinary completion carry continues
+or checked issue. The card-backed Yellow Gem alternate branch passes independently as described
+below; physical box-complete gem evaluation and a browser playthrough remain outside this native
+integration claim. The ordinary completion carry continues
 through Level Complete to Title at frame 225 (RNG `0x2875d290`, draw 8,621), then takes the same Map
 Up/Cross schedule to Boulders `0x0e` at frame 253 on `1c_pZ` path zero/progress `0x0f00` (RNG
 `0x419695fd`, draw 8,874).
@@ -382,7 +392,7 @@ the second moving wall, and reaches `e0_qZ` on frame 4,620. It then crosses ever
 launcher and flame cycle, climbs `e7_qZ`'s five alternating stationary ledges and rotating logs,
 and brakes through the `e9`/`f0` three-arrow chain into `f1_qZ`'s normal WarpC. WarpC requests
 Level Complete `0x2d` on frame 6,165. The complete route performs 317 successful spawns, 64
-lifecycle/zone transitions, 153,291 executions, and 684 solid effects across 60 camera ranges and
+lifecycle/zone transitions, 153,251 executions, and 680 solid effects across 60 camera ranges and
 75 path changes. Crash finishes live in state 32 at `[1579260, 6596940, 167936]`, with final
 camera `f1_qZ:0@17919` and RNG `0x48320b2c`. It has no restart, death camera, terminal fall,
 LoadState, VM fault, faulted object, execution error, or checked issue. A browser-driven completion
@@ -392,13 +402,18 @@ The Great Gate also has a complete card-backed Yellow Gem route from the owned r
 the exact retail payload and entitlement bit, crosses the phase-sensitive `c4`/`c5` logs, rides
 both `GemsC` platforms, activates and boards both `c8_iZ` wall logs, and traverses `c9_iZ`. The
 authored WarpC requests Level Complete `0x2d` on frame 3,209 with Crash in state 32 at
-`[3501824, -4780684, 132864]`. The route has no death, restart, terminal fall, VM fault, faulted
+`[3483392, -4780690, 132864]`. The route has no death, restart, terminal fall, VM fault, faulted
 object, execution error, or checked issue.
 
+The exact publisher-derived normal-route phase also passes. Its first frame is pinned at draw 6,693,
+RNG-A `0x39d97bb8`, RNG-B `0x9010ea53`, and 30 executions. The route activates checkpoint 76 and
+reaches Level Complete without a restart, death-camera frame, terminal fall, or checked runtime issue.
+
 Temple Ruins now has complete fresh and uninterrupted carried ordinary-pad routes. The fresh route
-requests Level Complete `0x2d` on frame 4,473. The carried route reaches the same authored handoff
-on frame 5,041 after 190 successful spawns, 168,087 executions, 33 lifecycle transitions, 60 camera
-ranges, and 59 path changes. Neither route records a death, restart, terminal fall, VM fault,
+requests Level Complete `0x2d` on frame 4,473 after 150,683 executions. The current carried route
+reaches the same authored handoff on frame 4,531 after 190 successful spawns, 156,484 executions,
+33 lifecycle transitions, 60 camera ranges, and 59 path changes. Neither route records a death,
+restart, terminal fall, VM fault,
 faulted object, execution error, or checked runtime issue. Road to Nowhere has matching fresh and
 uninterrupted carried no-death routes: both follow the authored outside rope lanes across every
 collapsing span and request Level Complete `0x2d` from WarpC on frame 2,449 without a restart or
@@ -411,6 +426,11 @@ transitions, emits one authored save-state, drives WarpC through states zero to 
 Level Complete `0x2d` on frame 2,199. The route has no death, restart, terminal fall, VM-faulted
 object, unexpected spawn error, execution error, or checked issue. Bonus-path coverage and a
 browser-driven completion remain unproved.
+
+Generator Room's direct, exact post-Cortex, and actual post-Cortex completion routes pass. Its
+three-Tawna-token route also traverses Bonus `0x24`, preserves the exact parent snapshot through the
+authored `LoadState`/`-2` return, performs the protected frame-zero parent restart, and then reaches
+the normal Level Complete warp without a death-camera frame or terminal fall.
 
 Up the Creek now has a complete normal-route direct-boot ordinary-pad golden. It activates
 checkpoint entity 76 on frame 1,245, preserving saved box count `0x400` before the live count
@@ -426,7 +446,20 @@ completes it on gameplay frame 4,319, crosses the 185-frame Level Complete graph
 Up/Cross input to select and complete Ripper Roo (`0x17`) before selecting The Lost City (`0x20`).
 The exact primary/secondary RNG state, draw count, 128-byte card data, and tracked map globals remain
 preserved across every `LEVEL_END` handoff.
-The longer uninterrupted campaign-carry regression is a third, distinct fixture. Papu Papu returns
+
+A distinct current-tree, owned-BIN-derived native carry starts Native Fortress at draw 22,829 and
+reaches its authored Level Complete request on frame 6,737 after 323 spawns, 166,471 executions,
+66 zone transitions, and no recovery. The current native Level Complete graph takes 432 frames;
+the following Map, Up the Creek, its completion graph, Ripper Roo, and another Map handoff mount
+The Lost City at draw 37,314. That exact inherited route reaches Level Complete on frame 6,912
+after 192 spawns, 177,333 executions, and 53 zone transitions, with no restart, LoadState, death
+camera, terminal fall, fault, or impossible pad sample. Its 288-frame completion and 253-frame Map
+handoff then mount Temple Ruins cleanly at draw 44,768. This focused current native chain is
+separate from the canonical campaign's frame-6,643 Lost City leg and the dated browser checkpoint
+whose Native completion graph took 384 frames; it proves the Temple mount, not Temple completion.
+
+At an earlier historical checkpoint, a longer uninterrupted campaign-carry regression was a third,
+distinct fixture. Papu Papu returns
 to Title on frame 812 (draw 4,332); Map selects Rolling Stones on frame 66 (draw 4,398); Rolling
 Stones reaches Level Complete on frame 2,465 (draw 6,863); and its 425-frame completion plus
 253-frame Map handoffs lead to Hog Wild. Hog Wild reaches Level Complete on frame 1,949 (draw
@@ -459,16 +492,18 @@ restarts, load-state effects, faults, or checked issues. Terminal globals are
 `[0x500,15,15,14,1,15,0]`, RNG is `0xa2cc489a`/`0x654cb6a6`, and draw is 10,239. This is
 deterministic native-engine characterization, not a browser playthrough.
 
-The canonical fixture starts at the publisher/title opening and continues without a process reset
-through the main-map campaign. From Road to Nowhere it crosses Boulder Dash and every remaining
-authored main-map level and boss, retains the characterized carried machinery and hazard phases for
-Jaws of Darkness, Castle Machinery, and The Lab, crosses Great Hall, defeats Cortex, executes the
-complete Ending stream, and remounts Title with level 32 unlocked. This is a complete native
-main-map session-carry proof over user-supplied local streams. Its documented PBAK-assisted
-Boulders, Upstream, and Lost City sections and Lost City's six recovery restarts remain part of the
-fixture; a zero-recovery browser playthrough is still a separate parity gate.
-Several GOOL host
-operations, pixel-level rendering edge cases, later same-level restart cases, and uncharacterized
+The canonical fixture now passes from the publisher/title opening through every main-map level and
+boss, Great Hall, Cortex, Ending, and the final Title remount. The verified run crosses the former
+Sunset Vista late-c3/c4 failure, retains the actual current Castle Machinery and Lab phases, and
+observes Heavy Machinery's mandatory shaft speed cap on frame 1,599 followed by its grounded landing
+two cooperative ticks later. The historical PBAK-assisted Boulders chain, including its Upstream
+and Lost City sections, and Lost City's six-restart route remain characterization rather than the
+current canonical leg.
+The current canonical Lost City controller reaches its authored exit on frame 6,643 with zero
+restarts; a zero-recovery browser playthrough remains a separate parity gate.
+
+Several GOOL host operations, pixel-level rendering edge cases, later same-level restart cases,
+and uncharacterized
 mechanical-CD seek, error and retry edges remain incomplete. Stream-backed paging now validates each
 page's one-to-thirty-two-sector NSD span, reserves a source-contiguous physical run transactionally,
 shares the characterized ten-frame setup, advances five sectors per 30 Hz frame, and publishes or
@@ -587,29 +622,62 @@ complete authored barrage, reflects all five damaging cores on frames 266, 618, 
 3,378, receives the victory event on frame 3,567, and requests Ending on frame 3,612. Ending then
 requests Title on frame 3,396. The regression pins the card payload at load, selected globals and
 restart snapshots around the Title/Cortex boundary, and the Ending-to-Title draw phase.
+
+A distinct all-gems Great Hall regression restores exactly 26 gems and two keys, selects Great Hall
+from Title on frame 131, executes the authored `WinGC` epilogue and dynamic text, and requests Title
+on frame 6,950. Crash remains live in state 33 at `[8280332, 1031159, 24864256]`; the route has no
+restart, LoadState, death camera, terminal fall, fault, or execution error.
+
 The current strict direction/button survey runs all 43 bootable pairs for 5,400
 browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
-The `crust-sim` library enumerates 645 tests; the locked all-target workspace inventory has 1,069
-default-active tests plus 231 ignored-by-default legally local tests. Native
-warnings-denied Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm
-build gates pass.
-A final Chrome-compatible browser pass mounted the user's legally local 632 MB raw BIN through a
-loopback-only test bridge, recognized all 88 streams and 44/44 pairs (219 MiB retained in the tab),
-and directly booted N. Sanity Beach. The level rendered with zero WebGL errors at the reported
+The `crust-sim` library enumerates 662 tests; the locked all-target workspace inventory has 1,099
+default-active tests plus 260 ignored-by-default legally local tests (1,359 total).
+The current-fixture split sweep passes all 250 selected legally-local entries serially, and its
+isolated replay exporter passes separately. Nine explicitly historical fixtures remain opt-in and
+are not part of that green result, so this is not a claim that every one of the 260 ignored entries
+passes when all legacy flags are enabled. Native warnings-denied Clippy, optimized native release,
+warnings-denied Wasm Clippy, and optimized Wasm build gates pass.
+
+A 2026-08-13 VPS browser-harness smoke mounted the owned 632 MB raw BIN in Chrome 151, recognized
+all 44 pairs, and executed 360/360 cooperative N. Sanity frames. It mounted 80 pages/231 entries,
+recorded 7,454 retail executions, and reported zero skipped callbacks, console, WebGL, runtime,
+execution, object, zone, network, restart, LoadState, or death-camera failures. The current-source
+production and browser-harness manifests both verify against source fingerprint `925cf4d63f99...`.
+This is a bounded browser-artifact smoke, not a full campaign replay, physical-input certification,
+or reference-console comparison.
+
+Separate legally local native-emulator oracles now cover the complete normally accessible U.S.
+retail campaign. PCSX-RR replayed a published 163,770-frame any% PXM through all 31 ordinary/boss
+nodes, Cortex, the authored ending, and the return to Title. PSXjin 2.0.2 replayed a published
+264,988-frame 100% PJM through Whole Hog, Fumbling in the Dark, all 26 gems/two keys, The Great Hall,
+and the alternate ending. Both used the owned U.S. disc and the user-supplied SCPH-5501 firmware on
+this VPS; captures, movies, firmware, and hashes remain ignored. This covers all 33 normally
+accessible retail level/boss nodes, but not removed-from-progression Stormy Ascent or every possible
+bonus/death/alternate-input variant. A local importer validates PXM/PJM pad streams and can splice
+an aligned movie window after a verified Crust replay prefix. The current N. Sanity comparison
+proves the Crust Title-to-level checkpoint before accepting movie input, stays clean for 302 level
+ticks, then records its first restart/LoadState on tick 303 while the native movie continues. This
+is a localized differential, not yet a retail-engine verdict: the prefix proves Crust's carried
+state, not that every hidden PS1 process value matches, and PCSX-RR's lag/input-poll map has not yet
+been exported successfully under Wine.
+
+An earlier bounded Chrome-compatible browser pass mounted the user's legally local 632 MB raw BIN
+through a loopback-only test bridge, recognized all 88 streams and 44/44 pairs (219 MiB retained
+in the tab), and directly booted N. Sanity Beach. The level rendered with zero WebGL errors at the
 30.00 Hz and produced nonzero synthesized-audio output. Keyboard-code, touch-pointer, and standard
 Gamepad API input reached the live retail pad; pause/resume, mute/unmute, and fullscreen were also
 exercised. At 390x844 the touch surface was visible with no horizontal overflow. A page-hide/reload
 cycle persisted and reopened the version-one 15-slot virtual-card envelope. Earlier foreground
 coverage exercised the publisher screen, main menu, island map, and direct level boot. These remain
 bounded checks, not a full playthrough, physical-controller certification, or retail-parity claim.
-The completed owned-raw-BIN Chromium campaign joined the real publisher/title sequence, every
-main-map campaign phase, Dr. Neo Cortex, Ending, and the authored return to Title in one Wasm
-session. The harness executed 141,872 frames in total: 141,776 recorded route frames and 96 bounded
-settle frames, with zero skipped replay frames and zero death-camera frames. The final current and
-mounted LID are both Title `0x19`; every exact draw/RNG/transition checkpoint passed. This proves
-the ordinary NTSC-U campaign path in the browser, but it does not by itself certify every secret,
-alternate-completion, damaged-save, demo, hardware-input, or low-level SPU/CD edge case.
+The current completed owned-raw-BIN Chrome campaign joins the real publisher/title sequence, every
+ordinary main-map campaign phase, Dr. Neo Cortex, Ending, and the authored return to Title in one
+Wasm session. It consumes 146,501 replay frames without a skip or synthetic handoff and finishes at
+current/mounted Title LID `0x19`; the older 141,776-frame Chromium result remains historical
+comparison evidence. Neither the current browser campaign nor the native/emulator results certify
+every secret, alternate completion, damaged save, demo, hardware input, SPU, or mechanical-CD edge
+case.
 See [compatibility](docs/COMPATIBILITY.md) for the exact gaps and
 [verification](docs/VERIFICATION.md) for checks actually performed.
 
@@ -623,6 +691,23 @@ rustup toolchain install 1.97.0 --profile minimal --component clippy,rustfmt \
   --target wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.126 --locked
 npm run dev
+```
+
+Native tests using `C1_STREAM_DIR` require extracted streams. The extractor validates and stages all
+88 known streams before atomically claiming a new output directory. It never replaces an existing
+output path and publishes every canonical lowercase file with create-new semantics. The claimed
+directory can be visible while publication finishes, so consume it only after the command succeeds.
+If publication fails or the process is interrupted, the extractor deliberately preserves the exact
+claimed output path rather than risk deleting a path another process replaced; inspect it and remove
+it manually before retrying. Ordinary failures remove the private sibling staging directory or
+report that cleanup failure. Any termination that bypasses Rust cleanup—including `SIGKILL`—or a
+power loss can instead leave a sibling named
+`.OUTPUT-NAME.crust-extract-PID-N`; after confirming that PID is no longer running and inspecting
+the path, remove that stale staging directory manually:
+
+```bash
+cargo run --locked -p crust-formats --bin extract-streams -- \
+  /path/to/disc.bin "$(pwd)/local-data/streams"
 ```
 
 Open <http://127.0.0.1:4174>. Choose either the raw `.bin`/`.iso`, or the `.NSD` and `.NSF`

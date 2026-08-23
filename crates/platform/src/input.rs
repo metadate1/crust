@@ -39,6 +39,16 @@ impl PadState {
         self.snapshot
     }
 
+    /// Replaces the complete native pad history at an externally observed
+    /// `PadUpdate` boundary.
+    ///
+    /// This is used by deterministic replay tooling that has already captured
+    /// native's shifted pad words. Ordinary callers should use [`Self::update`]
+    /// so taps and history are derived from physical input.
+    pub fn replace_snapshot(&mut self, snapshot: PadSnapshot) {
+        self.snapshot = snapshot;
+    }
+
     pub fn update(&mut self, physical: u16, touch: u16, demo_override: Option<u32>) {
         let held = demo_override.unwrap_or_else(|| {
             let mut held = u32::from(physical | touch);

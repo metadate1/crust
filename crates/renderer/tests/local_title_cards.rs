@@ -13,8 +13,8 @@ fn decodes_every_retail_title_state_without_copying_assets() {
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name a local extracted stream directory"),
     );
-    let nsd_path = root.join("S0000019.NSD");
-    let nsf_path = root.join("S0000019.NSF");
+    let nsd_path = root.join(StreamName::new(LevelId::TITLE, StreamKind::Nsd).filename());
+    let nsf_path = root.join(StreamName::new(LevelId::TITLE, StreamKind::Nsf).filename());
     let nsd_bytes = std::fs::read(&nsd_path)
         .unwrap_or_else(|error| panic!("could not read {}: {error}", nsd_path.display()));
     let nsf_bytes = std::fs::read(&nsf_path)

@@ -286,13 +286,28 @@ impl App {
         #[cfg(not(feature = "browser-test-harness"))]
         let held = self.keyboard_bits | self.mouse_bits() | self.touch_bits() | poll_gamepad()?;
         #[cfg(feature = "browser-test-harness")]
-        let (held, recorded_override) = self.browser_test_input.frame_input();
+        let (
+            held,
+            recorded_override,
+            snapshot_before,
+            snapshot_after,
+            frame_stamp_override,
+            frame_timing_override,
+        ) = self.browser_test_input.frame_input();
         if let Some(runtime) = &mut self.runtime {
             #[cfg(not(feature = "browser-test-harness"))]
             let simulation_stepped = runtime.frame(timestamp_ms, held, &self.dom)?;
             #[cfg(feature = "browser-test-harness")]
-            let simulation_stepped =
-                runtime.frame(timestamp_ms, held, recorded_override, &self.dom)?;
+            let simulation_stepped = runtime.frame(
+                timestamp_ms,
+                held,
+                recorded_override,
+                snapshot_before,
+                snapshot_after,
+                frame_stamp_override,
+                frame_timing_override,
+                &self.dom,
+            )?;
             update_debug(&self.debug, runtime, &self.assets)?;
             return Ok(AppFrameOutcome {
                 requested_level: runtime.take_asset_request(),
@@ -1013,6 +1028,10 @@ struct Runtime {
     browser_test_direct_bonus_queued_state: Option<u16>,
     #[cfg(feature = "browser-test-harness")]
     browser_test_direct_bonus_state_boundary: Option<u16>,
+    /// Halt boundary reached by the main object in the most recent source
+    /// frame. This is diagnostic-only evidence for native replay comparison.
+    #[cfg(feature = "browser-test-harness")]
+    browser_test_last_main_halt_reason: Option<String>,
     title_seen: bool,
     asset_load_error: Option<String>,
     muted: bool,
@@ -1331,6 +1350,8 @@ impl Runtime {
             browser_test_direct_bonus_queued_state: None,
             #[cfg(feature = "browser-test-harness")]
             browser_test_direct_bonus_state_boundary: None,
+            #[cfg(feature = "browser-test-harness")]
+            browser_test_last_main_halt_reason: None,
             title_seen,
             asset_load_error: None,
             muted: false,
@@ -2295,19 +2316,37 @@ impl Runtime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn frame(
         &mut self,
         timestamp_ms: f64,
         held: u16,
         #[cfg(feature = "browser-test-harness")] recorded_override: Option<u32>,
+        #[cfg(feature = "browser-test-harness")] snapshot_before: Option<PlatformPadSnapshot>,
+        #[cfg(feature = "browser-test-harness")] snapshot_after: Option<PlatformPadSnapshot>,
+        #[cfg(feature = "browser-test-harness")] frame_stamp_override: Option<u32>,
+        #[cfg(feature = "browser-test-harness")] frame_timing_override: Option<(i32, i32)>,
         dom: &Dom,
     ) -> Result<bool, JsValue> {
         #[cfg(not(feature = "browser-test-harness"))]
         let recorded_override = None;
+        #[cfg(not(feature = "browser-test-harness"))]
+        let snapshot_before = None;
+        #[cfg(not(feature = "browser-test-harness"))]
+        let snapshot_after = None;
+        #[cfg(not(feature = "browser-test-harness"))]
+        let frame_stamp_override = None;
+        #[cfg(not(feature = "browser-test-harness"))]
+        let frame_timing_override = None;
         debug_assert!(
-            recorded_override.is_none() || held == 0,
-            "recorded browser-test input must not be mixed with physical input"
+            (recorded_override.is_none() && snapshot_after.is_none()) || held == 0,
+            "browser-test input overrides must not be mixed with physical input"
         );
+        debug_assert!(
+            recorded_override.is_none() || snapshot_after.is_none(),
+            "recorded and snapshot browser-test inputs are mutually exclusive"
+        );
+        debug_assert_eq!(snapshot_before.is_some(), snapshot_after.is_some());
         // Pair validation is asynchronous, but browser input is not. Retain
         // each RAF sample so the destination CoreObjectsCreate PadUpdate uses
         // the current physical state instead of the source level's last tick.
@@ -2373,7 +2412,7 @@ impl Runtime {
             let (wall_ticks_current_frame, wall_ticks_per_frame, physical_held, snapshot) =
                 if let Some(wait) = resumed_pbak_pager_wait {
                     let newly_pending_buttons = std::mem::take(&mut self.pending_buttons);
-                    let physical_held = if recorded_override.is_some() {
+                    let physical_held = if recorded_override.is_some() || snapshot_after.is_some() {
                         0
                     } else {
                         self.latest_physical_held | wait.pending_buttons | newly_pending_buttons
@@ -2396,7 +2435,7 @@ impl Runtime {
                     self.retail_objects
                         .set_frame_timing(wall_ticks_current_frame, wall_ticks_per_frame);
                     let pending_buttons = std::mem::take(&mut self.pending_buttons);
-                    let physical_held = if recorded_override.is_some() {
+                    let physical_held = if recorded_override.is_some() || snapshot_after.is_some() {
                         0
                     } else {
                         held | pending_buttons
@@ -2730,8 +2769,16 @@ impl Runtime {
                 if self.retail_runtime_error.is_none()
                     && self.retail_tick_state == RetailTickState::Running
                 {
-                    retail_pad_boundary_completed =
-                        self.tick_retail_runtime(dom, pbak_boundary, physical_held, demo_override);
+                    retail_pad_boundary_completed = self.tick_retail_runtime(
+                        dom,
+                        pbak_boundary,
+                        physical_held,
+                        demo_override,
+                        snapshot_before,
+                        snapshot_after,
+                        frame_stamp_override,
+                        frame_timing_override,
+                    );
                     // GOOL audio commands run through the external browser
                     // host; reconcile their voice-allocation draws before
                     // any carry can be captured on the following frame.
@@ -2993,18 +3040,48 @@ impl Runtime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn tick_retail_runtime(
         &mut self,
         dom: &Dom,
         pbak_boundary: Option<RetailPbakPadBoundary>,
         physical_held: u16,
         demo_override: Option<u32>,
+        snapshot_before: Option<PlatformPadSnapshot>,
+        snapshot_after: Option<PlatformPadSnapshot>,
+        frame_stamp_override: Option<u32>,
+        frame_timing_override: Option<(i32, i32)>,
     ) -> bool {
+        if let Some(frame_stamp) = frame_stamp_override {
+            self.retail_objects
+                .publish_retail_emulator_frame_stamp(frame_stamp);
+        }
+        if let Some((ticks_current_frame, ticks_per_frame)) = frame_timing_override {
+            self.retail_objects
+                .set_frame_timing(ticks_current_frame, ticks_per_frame);
+        }
         let authored_title = self.authored_title_runtime_active();
         let title_mdat = self.live_title_mdat_eid();
         let mut pbak_finish = None;
         let mut pbak_finish_effects_applied = false;
         let mut pad_boundary_completed = false;
+        // Exact emulator traces retain both sides of native PadUpdate. Earlier
+        // preorder roots (including title controllers) consume `before`; the
+        // main object and later roots consume `after` once the typed boundary
+        // below is reached.
+        if let Some(snapshot) = snapshot_before {
+            self.pad.replace_snapshot(snapshot);
+            if let Err(error) = self
+                .retail_objects
+                .set_pad_snapshot(0, retail_pad_snapshot(snapshot))
+            {
+                let message = format!("retail pre-PadUpdate snapshot failed: {error:?}");
+                dom.log(&message, true);
+                self.retail_runtime_error = Some(message);
+                self.retail_tick_state = RetailTickState::Paused;
+                return false;
+            }
+        }
         let result = {
             let mut host = if let Some(mdat) = title_mdat {
                 BrowserProgramHost::for_title_mdat(
@@ -3105,7 +3182,13 @@ impl Runtime {
                             #[cfg(not(feature = "browser-test-harness"))]
                             let _ = (host, object);
                             pad_boundary_completed = true;
-                            pad.update(physical_held, 0, demo_override);
+                            if let Some(snapshot) = snapshot_after
+                                && !authored_title
+                            {
+                                pad.replace_snapshot(snapshot);
+                            } else if snapshot_after.is_none() {
+                                pad.update(physical_held, 0, demo_override);
+                            }
                             runtime
                                 .set_pad_snapshot(0, retail_pad_snapshot(pad.snapshot()))
                                 .map_err(RuntimeError::Vm)?;
@@ -3132,6 +3215,22 @@ impl Runtime {
                     )
             }
         };
+        if authored_title
+            && let Some(snapshot) = snapshot_after
+            && result.is_ok()
+        {
+            self.pad.replace_snapshot(snapshot);
+            if let Err(error) = self
+                .retail_objects
+                .set_pad_snapshot(0, retail_pad_snapshot(snapshot))
+            {
+                let message = format!("retail post-title PadUpdate snapshot failed: {error:?}");
+                dom.log(&message, true);
+                self.retail_runtime_error = Some(message);
+                self.retail_tick_state = RetailTickState::Paused;
+                return false;
+            }
+        }
         let restart_before_display = result.as_ref().is_ok_and(|frame| {
             frame
                 .effects
@@ -3150,6 +3249,25 @@ impl Runtime {
         self.drain_retail_reclaim_diagnostics(dom);
         match result {
             Ok(frame) => {
+                #[cfg(feature = "browser-test-harness")]
+                {
+                    let main = self
+                        .retail_objects
+                        .arena()
+                        .main_object()
+                        .and_then(|arena| self.retail_objects.object_for_arena(arena));
+                    self.browser_test_last_main_halt_reason = main.and_then(|main| {
+                        frame
+                            .executions
+                            .iter()
+                            .rev()
+                            .find(|execution| execution.object == main)
+                            .map(|execution| match &execution.result {
+                                Ok(execution) => format!("{:?}", execution.reason),
+                                Err(_) => "Error".to_owned(),
+                            })
+                    });
+                }
                 let frame_executions = frame.executions.len();
                 let frame_execution_errors = frame
                     .executions
@@ -3300,6 +3418,9 @@ impl Runtime {
                     .map_err(|error| format!("passive title mirror failed: {error:?}"))?;
                 self.sync_title_card(dom)
                     .map_err(|error| format!("TitleLoadState failed: {}", js_message(&error)))?;
+                self.retail_objects
+                    .continue_retail_title_update_after_load()
+                    .map_err(|error| format!("TitleUpdate load continuation failed: {error:?}"))?;
             }
             self.retail_objects
                 .finish_retail_title_update()
@@ -6679,6 +6800,52 @@ fn install_browser_test_harness(
             BrowserTestPadInput::recorded(held),
         );
     });
+    let app_for_snapshot_step = Rc::clone(app);
+    let harness_for_snapshot_step = harness.clone();
+    let step_state_for_snapshot_step = Rc::clone(&step_state);
+    let step_snapshot = Closure::<dyn FnMut(js_sys::Array)>::new(move |words: js_sys::Array| {
+        let word = |index| words.get(index).as_f64().unwrap_or_default() as u32;
+        let held = word(0);
+        let tapped = word(1);
+        let held_previous = word(2);
+        let tapped_previous = word(3);
+        let held_previous_2 = word(4);
+        let before_held = word(5);
+        let before_tapped = word(6);
+        let before_held_previous = word(7);
+        let before_tapped_previous = word(8);
+        let before_held_previous_2 = word(9);
+        let frame_stamp = (words.length() > 10)
+            .then(|| word(10))
+            .filter(|stamp| *stamp != u32::MAX);
+        let frame_timing = (words.length() > 12)
+            .then(|| (word(11), word(12)))
+            .filter(|(current, period)| *current != u32::MAX && *period != u32::MAX)
+            .map(|(current, period)| (current.cast_signed(), period.cast_signed()));
+        step_browser_test_frame(
+            &app_for_snapshot_step,
+            &harness_for_snapshot_step,
+            &step_state_for_snapshot_step,
+            BrowserTestPadInput::snapshot_boundary(
+                PlatformPadSnapshot {
+                    held: before_held,
+                    tapped: before_tapped,
+                    held_previous: before_held_previous,
+                    held_previous_2: before_held_previous_2,
+                    tapped_previous: before_tapped_previous,
+                },
+                PlatformPadSnapshot {
+                    held,
+                    tapped,
+                    held_previous,
+                    held_previous_2,
+                    tapped_previous,
+                },
+                frame_stamp,
+                frame_timing,
+            ),
+        );
+    });
     Reflect::set(
         harness.as_ref(),
         &JsValue::from_str("step"),
@@ -6690,12 +6857,18 @@ fn install_browser_test_harness(
         step_recorded.as_ref().unchecked_ref(),
     )?;
     Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("stepSnapshotBoundary"),
+        step_snapshot.as_ref().unchecked_ref(),
+    )?;
+    Reflect::set(
         browser_window.as_ref(),
         &JsValue::from_str("__crustTest"),
         harness.as_ref(),
     )?;
     step.forget();
     step_recorded.forget();
+    step_snapshot.forget();
     queue_card_save_screen.forget();
     queue_direct_bonus_state_boundary.forget();
     queue_title_attract_mount.forget();
@@ -6747,6 +6920,8 @@ fn browser_test_live_object_value(snapshot: &BrowserTestLiveObject) -> Result<Js
         ),
         ("zoneEid", snapshot.zone.raw()),
         ("register65", snapshot.register_65),
+        ("animationSequence", snapshot.animation_sequence),
+        ("animationFrame", snapshot.animation_frame),
     ] {
         Reflect::set(
             object.as_ref(),
@@ -6768,7 +6943,6 @@ fn browser_test_live_object_value(snapshot: &BrowserTestLiveObject) -> Result<Js
             "runtime"
         }),
     )?;
-
     Reflect::set(
         object.as_ref(),
         &JsValue::from_str("translation"),
@@ -6783,6 +6957,136 @@ fn browser_test_live_object_value(snapshot: &BrowserTestLiveObject) -> Result<Js
         object.as_ref(),
         &JsValue::from_str("velocity"),
         &browser_test_vector_value(snapshot.velocity, ["x", "y", "z"])?,
+    )?;
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("floorY"),
+        &JsValue::from_f64(f64::from(snapshot.floor_y)),
+    )?;
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("hotspotSize"),
+        &JsValue::from_f64(f64::from(snapshot.hotspot_size)),
+    )?;
+    let wall_steps = js_sys::Array::new();
+    for step in &snapshot.solid_wall_steps {
+        let value = Object::new();
+        Reflect::set(
+            value.as_ref(),
+            &JsValue::from_str("translation"),
+            &browser_test_vector_value(
+                [step.translation.x, step.translation.y, step.translation.z],
+                ["x", "y", "z"],
+            )?,
+        )?;
+        Reflect::set(
+            value.as_ref(),
+            &JsValue::from_str("displacement"),
+            &browser_test_vector_value(
+                [
+                    step.displacement.x,
+                    step.displacement.y,
+                    step.displacement.z,
+                ],
+                ["x", "y", "z"],
+            )?,
+        )?;
+        Reflect::set(
+            value.as_ref(),
+            &JsValue::from_str("floorAdjusted"),
+            &browser_test_vector_value(
+                [
+                    step.floor_adjusted.x,
+                    step.floor_adjusted.y,
+                    step.floor_adjusted.z,
+                ],
+                ["x", "y", "z"],
+            )?,
+        )?;
+        for (name, coordinate) in [
+            ("desiredX", step.desired_x),
+            ("desiredZ", step.desired_z),
+            ("adjustedX", step.adjusted_x),
+            ("adjustedZ", step.adjusted_z),
+        ] {
+            Reflect::set(
+                value.as_ref(),
+                &JsValue::from_str(name),
+                &JsValue::from_f64(f64::from(coordinate)),
+            )?;
+        }
+        Reflect::set(
+            value.as_ref(),
+            &JsValue::from_str("foundOpen"),
+            &JsValue::from_bool(step.found_open),
+        )?;
+        for (name, coordinate) in [
+            ("initialAdjustedX", step.initial_adjusted_x),
+            ("initialAdjustedZ", step.initial_adjusted_z),
+        ] {
+            Reflect::set(
+                value.as_ref(),
+                &JsValue::from_str(name),
+                &JsValue::from_f64(f64::from(coordinate)),
+            )?;
+        }
+        Reflect::set(
+            value.as_ref(),
+            &JsValue::from_str("initialFoundOpen"),
+            &JsValue::from_bool(step.initial_found_open),
+        )?;
+        Reflect::set(
+            value.as_ref(),
+            &JsValue::from_str("retried"),
+            &JsValue::from_bool(step.retried),
+        )?;
+        for (name, count) in [
+            ("primaryReplotCount", step.primary_replot_count),
+            ("secondaryReplotCount", step.secondary_replot_count),
+            ("candidateCount", step.candidate_count),
+        ] {
+            Reflect::set(
+                value.as_ref(),
+                &JsValue::from_str(name),
+                &JsValue::from_f64(count as f64),
+            )?;
+        }
+        let candidate_ids = js_sys::Array::new();
+        for id in step.candidate_ids.iter().take(step.candidate_count.min(16)) {
+            candidate_ids.push(&JsValue::from_f64(f64::from(*id)));
+        }
+        Reflect::set(
+            value.as_ref(),
+            &JsValue::from_str("candidateIds"),
+            candidate_ids.as_ref(),
+        )?;
+        for (name, word) in [
+            ("colliderId", step.collider_id),
+            ("colliderType", step.collider_type),
+        ] {
+            Reflect::set(
+                value.as_ref(),
+                &JsValue::from_str(name),
+                &word.map_or(JsValue::NULL, |word| JsValue::from_f64(f64::from(word))),
+            )?;
+        }
+        for (name, rows) in [
+            ("staticBitmap", step.static_bitmap),
+            ("initialBitmap", step.initial_bitmap),
+            ("bitmap", step.bitmap),
+        ] {
+            let bitmap = js_sys::Array::new();
+            for row in rows {
+                bitmap.push(&JsValue::from_f64(f64::from(row)));
+            }
+            Reflect::set(value.as_ref(), &JsValue::from_str(name), bitmap.as_ref())?;
+        }
+        wall_steps.push(value.as_ref());
+    }
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("solidWallSteps"),
+        wall_steps.as_ref(),
     )?;
     let frame_bound = if let Some(bound) = snapshot.frame_bound {
         let value = Object::new();
@@ -6812,6 +7116,10 @@ fn browser_test_live_object_value(snapshot: &BrowserTestLiveObject) -> Result<Js
         ("b", snapshot.status_b),
         ("c", snapshot.status_c),
         ("stateFlags", snapshot.state_flags),
+        ("stateStamp", snapshot.state_stamp),
+        ("animationStamp", snapshot.animation_stamp),
+        ("miscValue", snapshot.misc_value),
+        ("transitionPointer", snapshot.transition_pointer),
     ] {
         Reflect::set(
             status.as_ref(),
@@ -7020,6 +7328,35 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
         &JsValue::from_str("titleState"),
         &JsValue::from_f64(f64::from(title_state)),
     )?;
+    let title_presentation = runtime
+        .retail_objects
+        .retail_title_presentation()
+        .ok()
+        .flatten();
+    for (name, value) in [
+        (
+            "retailTitleScreen",
+            title_presentation.map(|presentation| f64::from(presentation.screen.raw())),
+        ),
+        (
+            "retailTitleNextScreen",
+            title_presentation.map(|presentation| f64::from(presentation.next_screen.raw())),
+        ),
+        (
+            "retailTitlePhase",
+            title_presentation.map(|presentation| f64::from(presentation.phase as u8)),
+        ),
+        (
+            "retailTitleFadeCounter",
+            title_presentation.map(|presentation| f64::from(presentation.fade_counter)),
+        ),
+    ] {
+        Reflect::set(
+            debug,
+            &JsValue::from_str(name),
+            &value.map_or(JsValue::NULL, JsValue::from_f64),
+        )?;
+    }
     Reflect::set(
         debug,
         &JsValue::from_str("pairs"),
@@ -7155,6 +7492,21 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
     )?;
     Reflect::set(
         debug,
+        &JsValue::from_str("retailPadHeldPrevious"),
+        &JsValue::from_f64(f64::from(pad.held_previous)),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailPadTappedPrevious"),
+        &JsValue::from_f64(f64::from(pad.tapped_previous)),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailPadHeldPrevious2"),
+        &JsValue::from_f64(f64::from(pad.held_previous_2)),
+    )?;
+    Reflect::set(
+        debug,
         &JsValue::from_str("retailNeighborZones"),
         &JsValue::from_f64(runtime.retail_zone_lifecycle.next_frame_spawn_scan().len() as f64),
     )?;
@@ -7238,6 +7590,15 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
         JsValue::NULL
     };
     Reflect::set(debug, &JsValue::from_str("retailMain"), &retail_main_debug)?;
+    #[cfg(feature = "browser-test-harness")]
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailMainHaltReason"),
+        &runtime
+            .browser_test_last_main_halt_reason
+            .as_deref()
+            .map_or(JsValue::NULL, JsValue::from_str),
+    )?;
     Reflect::set(
         debug,
         &JsValue::from_str("retailFaultedObjects"),

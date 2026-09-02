@@ -1,6 +1,4 @@
-use crust_audio::mixer::Mixer;
-#[cfg(not(feature = "browser-test-harness"))]
-use crust_audio::mixer::SAMPLE_RATE;
+use crust_audio::mixer::{Mixer, SAMPLE_RATE};
 use crust_audio::output::OutputOptions;
 use crust_audio::retail::RetailAudioEngine;
 use crust_audio::retail_music::RetailMusic;
@@ -11,9 +9,9 @@ use crust_formats::binary::Eid;
 use wasm_bindgen::JsValue;
 use web_sys::{AudioContext, AudioContextState, GainNode};
 
-#[cfg(feature = "browser-test-harness")]
-use crate::audio_output_metrics::FixedMillisecondSampleClock;
 use crate::audio_output_metrics::ScheduledAudioMetrics;
+#[cfg(feature = "browser-test-harness")]
+use crate::audio_output_metrics::{FixedMillisecondSampleClock, interleaved_pcm_s16le};
 
 #[cfg(not(feature = "browser-test-harness"))]
 const CHUNK_FRAMES: usize = 1024;
@@ -35,6 +33,10 @@ pub struct WebAudio {
     next_time: f64,
     #[cfg(feature = "browser-test-harness")]
     browser_test_sample_clock: FixedMillisecondSampleClock,
+    #[cfg(feature = "browser-test-harness")]
+    browser_test_audio_capture_enabled: bool,
+    #[cfg(feature = "browser-test-harness")]
+    browser_test_frame_pcm_s16le: Vec<u8>,
 }
 
 impl WebAudio {
@@ -56,6 +58,10 @@ impl WebAudio {
             next_time: 0.0,
             #[cfg(feature = "browser-test-harness")]
             browser_test_sample_clock: FixedMillisecondSampleClock::default(),
+            #[cfg(feature = "browser-test-harness")]
+            browser_test_audio_capture_enabled: false,
+            #[cfg(feature = "browser-test-harness")]
+            browser_test_frame_pcm_s16le: Vec::new(),
         })
     }
 
@@ -170,7 +176,36 @@ impl WebAudio {
     #[cfg(feature = "browser-test-harness")]
     pub fn schedule_browser_test_frame(&mut self, retail_audio: &mut RetailAudioEngine) {
         let frames = self.browser_test_sample_clock.next_frames(34);
-        let _ = self.render_chunk(retail_audio, frames);
+        let (left, right) = self.render_chunk(retail_audio, frames);
+        if self.browser_test_audio_capture_enabled {
+            self.browser_test_frame_pcm_s16le = interleaved_pcm_s16le(&left, &right);
+        } else {
+            self.browser_test_frame_pcm_s16le.clear();
+        }
+    }
+
+    /// Enables the opt-in deterministic PCM drain used by showcase capture.
+    /// The ordinary test harness still renders and discards the same chunks.
+    #[cfg(feature = "browser-test-harness")]
+    pub fn set_browser_test_audio_capture_enabled(&mut self, enabled: bool) {
+        self.browser_test_audio_capture_enabled = enabled;
+        self.browser_test_frame_pcm_s16le.clear();
+    }
+
+    /// Takes exactly the final software-mixed chunk produced by the most
+    /// recently completed source frame.
+    #[cfg(feature = "browser-test-harness")]
+    pub fn take_browser_test_audio_frame(&mut self) -> Option<Vec<u8>> {
+        if !self.browser_test_audio_capture_enabled || self.browser_test_frame_pcm_s16le.is_empty()
+        {
+            return None;
+        }
+        Some(std::mem::take(&mut self.browser_test_frame_pcm_s16le))
+    }
+
+    #[cfg(feature = "browser-test-harness")]
+    pub const fn browser_test_sample_rate() -> u32 {
+        SAMPLE_RATE
     }
 
     #[must_use]

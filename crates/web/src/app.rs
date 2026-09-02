@@ -6514,6 +6514,52 @@ fn install_browser_test_harness(
         &JsValue::from_str("lastError"),
         &JsValue::NULL,
     )?;
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("audioSampleRate"),
+        &JsValue::from_f64(f64::from(WebAudio::browser_test_sample_rate())),
+    )?;
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("audioChannels"),
+        &JsValue::from_f64(2.0),
+    )?;
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("audioFormat"),
+        &JsValue::from_str("s16le"),
+    )?;
+
+    let app_for_presentation = Rc::clone(app);
+    let harness_for_presentation = harness.clone();
+    let sync_presentation = Closure::<dyn FnMut()>::new(move || {
+        let result = app_for_presentation
+            .try_borrow_mut()
+            .map_err(|_| JsValue::from_str("runtime is busy while applying presentation settings"))
+            .and_then(|mut app| {
+                let settings = app.dom.display_settings();
+                app.display_settings = settings;
+                app.dom.apply_display_settings(settings)?;
+                app.dom.sync_canvas_resolution(settings);
+                if let Some(runtime) = &mut app.runtime {
+                    runtime.set_display_settings(settings);
+                }
+                Ok(())
+            });
+        let error = result.err().map_or(JsValue::NULL, |error| {
+            JsValue::from_str(&js_message(&error))
+        });
+        let _ = Reflect::set(
+            harness_for_presentation.as_ref(),
+            &JsValue::from_str("lastError"),
+            &error,
+        );
+    });
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("syncPresentationFromControls"),
+        sync_presentation.as_ref().unchecked_ref(),
+    )?;
 
     let debug = app.borrow().debug.clone();
     let app_for_live_objects = Rc::clone(app);
@@ -6861,6 +6907,75 @@ fn install_browser_test_harness(
         &JsValue::from_str("stepSnapshotBoundary"),
         step_snapshot.as_ref().unchecked_ref(),
     )?;
+
+    let app_for_audio_enable = Rc::clone(app);
+    let harness_for_audio_enable = harness.clone();
+    let set_audio_capture_enabled = Closure::<dyn FnMut(bool)>::new(move |enabled| {
+        let result =
+            app_for_audio_enable
+                .try_borrow_mut()
+                .map_err(|_| JsValue::from_str("runtime is busy while configuring audio capture"))
+                .and_then(|mut app| {
+                    let runtime = app.runtime.as_mut().ok_or_else(|| {
+                        JsValue::from_str("audio capture requires a running runtime")
+                    })?;
+                    let audio = runtime.audio.as_mut().ok_or_else(|| {
+                        JsValue::from_str("browser software audio is unavailable")
+                    })?;
+                    audio.set_browser_test_audio_capture_enabled(enabled);
+                    Ok(())
+                });
+        let error = result.err().map_or(JsValue::NULL, |error| {
+            JsValue::from_str(&js_message(&error))
+        });
+        let _ = Reflect::set(
+            harness_for_audio_enable.as_ref(),
+            &JsValue::from_str("lastError"),
+            &error,
+        );
+    });
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("setAudioCaptureEnabled"),
+        set_audio_capture_enabled.as_ref().unchecked_ref(),
+    )?;
+
+    let app_for_audio_take = Rc::clone(app);
+    let harness_for_audio_take = harness.clone();
+    let take_audio_frame = Closure::<dyn FnMut() -> JsValue>::new(move || {
+        let result =
+            app_for_audio_take
+                .try_borrow_mut()
+                .map_err(|_| JsValue::from_str("runtime is busy while draining audio capture"))
+                .and_then(|mut app| {
+                    let runtime = app.runtime.as_mut().ok_or_else(|| {
+                        JsValue::from_str("audio capture requires a running runtime")
+                    })?;
+                    let audio = runtime.audio.as_mut().ok_or_else(|| {
+                        JsValue::from_str("browser software audio is unavailable")
+                    })?;
+                    audio.take_browser_test_audio_frame().ok_or_else(|| {
+                        JsValue::from_str("no captured PCM is available for this source frame")
+                    })
+                });
+        match result {
+            Ok(bytes) => js_sys::Uint8Array::from(bytes.as_slice()).into(),
+            Err(error) => {
+                let message = js_message(&error);
+                let _ = Reflect::set(
+                    harness_for_audio_take.as_ref(),
+                    &JsValue::from_str("lastError"),
+                    &JsValue::from_str(&message),
+                );
+                JsValue::NULL
+            }
+        }
+    });
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("takeAudioFramePcm16"),
+        take_audio_frame.as_ref().unchecked_ref(),
+    )?;
     Reflect::set(
         browser_window.as_ref(),
         &JsValue::from_str("__crustTest"),
@@ -6869,6 +6984,9 @@ fn install_browser_test_harness(
     step.forget();
     step_recorded.forget();
     step_snapshot.forget();
+    sync_presentation.forget();
+    set_audio_capture_enabled.forget();
+    take_audio_frame.forget();
     queue_card_save_screen.forget();
     queue_direct_bonus_state_boundary.forget();
     queue_title_attract_mount.forget();

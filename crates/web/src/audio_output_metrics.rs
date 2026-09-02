@@ -27,6 +27,39 @@ impl FixedMillisecondSampleClock {
     }
 }
 
+/// Converts one final software-mixed planar stereo chunk to deterministic
+/// interleaved signed 16-bit little-endian PCM for the browser test harness.
+///
+/// This sits beside the fixed sample clock so native unit tests can pin the
+/// capture format without compiling the WebAudio-only module.
+#[cfg(any(test, feature = "browser-test-harness"))]
+pub(crate) fn interleaved_pcm_s16le(left: &[f32], right: &[f32]) -> Vec<u8> {
+    assert_eq!(left.len(), right.len(), "stereo capture planes must match");
+    let mut bytes = Vec::with_capacity(left.len().saturating_mul(4));
+    for (left, right) in left.iter().copied().zip(right.iter().copied()) {
+        bytes.extend_from_slice(&pcm_s16(left).to_le_bytes());
+        bytes.extend_from_slice(&pcm_s16(right).to_le_bytes());
+    }
+    bytes
+}
+
+#[cfg(any(test, feature = "browser-test-harness"))]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "finite samples are clamped to the signed 16-bit range before conversion"
+)]
+fn pcm_s16(sample: f32) -> i16 {
+    if sample.is_nan() {
+        return 0;
+    }
+    let scaled = if sample.is_sign_negative() {
+        sample.max(-1.0) * 32_768.0
+    } else {
+        sample.min(1.0) * 32_767.0
+    };
+    scaled.round() as i16
+}
+
 /// Metrics for the most recently scheduled final software-mixed stereo chunk.
 ///
 /// `peak` uses the signed 16-bit PCM full-scale convention already exposed by
@@ -80,6 +113,19 @@ mod tests {
         let mut clock = FixedMillisecondSampleClock::default();
         let frames = (0..500).map(|_| clock.next_frames(34)).sum::<usize>();
         assert_eq!(frames, 749_700);
+    }
+
+    #[test]
+    fn capture_pcm_is_interleaved_clamped_and_little_endian() {
+        assert_eq!(
+            interleaved_pcm_s16le(&[0.0, 1.0, -1.0, f32::NAN], &[0.5, -0.5, 2.0, -2.0],),
+            [
+                0x00, 0x00, 0x00, 0x40, // 0.0 L, +0.5 R
+                0xff, 0x7f, 0x00, 0xc0, // +1.0 L, -0.5 R
+                0x00, 0x80, 0xff, 0x7f, // -1.0 L, clamped +1.0 R
+                0x00, 0x00, 0x00, 0x80, // NaN L, clamped -1.0 R
+            ],
+        );
     }
 
     #[test]

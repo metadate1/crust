@@ -12,8 +12,11 @@ import {
   expectationFailures,
   liveObjectExpectationFailures,
   nextReplayBatchFrameCount,
+  showcaseWindowBatchFrameCount,
   normalizeReplay,
   parseArguments,
+  parseVideoWindow,
+  presentationFailures,
   parseRetailPbakEvidence,
   parseStorageSeedJson,
   resumeRoundTripStorageFailures,
@@ -495,6 +498,19 @@ test("replay batches cap constant-held runs and can isolate the launch frame", (
   );
 });
 
+test("showcase batches stay below the CDP timeout and land on window edges", () => {
+  assert.equal(showcaseWindowBatchFrameCount(0, 128, [100]), 32);
+  assert.equal(showcaseWindowBatchFrameCount(80, 128, [100]), 20);
+  assert.equal(showcaseWindowBatchFrameCount(100, 128, [100], {
+    needsCapture: true,
+  }), 1);
+  assert.equal(showcaseWindowBatchFrameCount(120, 17, [100]), 17);
+  assert.throws(
+    () => showcaseWindowBatchFrameCount(-1, 128, [100]),
+    /nonnegative safe integer/,
+  );
+});
+
 test("replay host callbacks consume only cooperative steps and bound pager waits", () => {
   assert.deepEqual(
     summarizeReplayHostCallbacks(
@@ -856,6 +872,135 @@ test("browser smoke arguments keep the harness local and assets explicit", () =>
   assert.throws(
     () => parseArguments(["--expect-final-item-pool-2", "0x100000000"], {}),
     /0 through 4294967295/,
+  );
+});
+
+test("showcase windows are repeatable, bounded, and retain retail defaults", () => {
+  const defaults = parseArguments(["--asset", "./disc.bin"], {});
+  assert.deepEqual(
+    {
+      outputAspect: defaults.outputAspect,
+      renderResolution: defaults.renderResolution,
+      cameraZoom: defaults.cameraZoom,
+      smoothMotion: defaults.smoothMotion,
+      extendedWorld: defaults.extendedWorld,
+      framesExplicit: defaults.framesExplicit,
+      videoWindows: defaults.videoWindows,
+    },
+    {
+      outputAspect: "4:3",
+      renderResolution: "native",
+      cameraZoom: "100",
+      smoothMotion: false,
+      extendedWorld: false,
+      framesExplicit: false,
+      videoWindows: [],
+    },
+  );
+
+  const showcase = parseArguments(
+    [
+      "--asset", "./disc.bin",
+      "--replay", "./campaign.json",
+      "--frames", "88700",
+      "--chapters", "./target/showcase/metadata.json",
+      "--output-aspect", "21:9",
+      "--render-resolution", "1080",
+      "--camera-zoom", "55",
+      "--smooth-motion",
+      "--extended-world",
+      "--video-window", "opening:730:2680:./target/showcase/opening.mp4",
+      "--video-window", "heavy:86500:88600:./target/showcase/heavy.mp4",
+    ],
+    {},
+  );
+  assert.equal(showcase.framesExplicit, true);
+  assert.equal(showcase.outputAspect, "21:9");
+  assert.equal(showcase.renderResolution, "1080");
+  assert.equal(showcase.cameraZoom, "55");
+  assert.equal(showcase.smoothMotion, true);
+  assert.equal(showcase.extendedWorld, true);
+  assert.deepEqual(
+    showcase.videoWindows.map(({ name, startFrame, endFrame }) => ({
+      name,
+      startFrame,
+      endFrame,
+    })),
+    [
+      { name: "opening", startFrame: 730, endFrame: 2680 },
+      { name: "heavy", startFrame: 86500, endFrame: 88600 },
+    ],
+  );
+  assert.throws(
+    () => parseArguments(
+      [
+        "--replay", "./campaign.json",
+        "--frames", "88599",
+        "--chapters", "./metadata.json",
+        "--video-window", "heavy:86500:88600:./heavy.mp4",
+      ],
+      {},
+    ),
+    /stops before the final video window closes/,
+  );
+  assert.throws(
+    () => parseVideoWindow("bad:12:12:clip.mp4"),
+    /must exceed STARTFRAME/,
+  );
+});
+
+test("presentation assertions enforce defaults and retarget explicit showcase values", () => {
+  const retail = {
+    smoothMotion: false,
+    extendedWorld: false,
+    cameraZoom: "100",
+    outputAspect: "4:3",
+    renderResolution: "native",
+    canvasWidth: 640,
+    canvasHeight: 480,
+    rect: { x: 0, y: 0, width: 640, height: 480 },
+  };
+  assert.deepEqual(
+    presentationFailures(retail, {
+      smoothMotion: false,
+      extendedWorld: false,
+      cameraZoom: "100",
+      outputAspect: "4:3",
+      renderResolution: "native",
+    }),
+    [],
+  );
+  assert.match(
+    presentationFailures(retail, {
+      smoothMotion: true,
+      extendedWorld: true,
+      cameraZoom: "55",
+      outputAspect: "21:9",
+      renderResolution: "1080",
+    }).join("\n"),
+    /smoothMotion.*canvas.*21:9.*canvasHeight/s,
+  );
+  assert.deepEqual(
+    presentationFailures(
+      {
+        smoothMotion: true,
+        extendedWorld: true,
+        cameraZoom: "55",
+        outputAspect: "21:9",
+        renderResolution: "1080",
+        canvasWidth: 2520,
+        canvasHeight: 1080,
+        rect: { x: 0, y: 0, width: 2520, height: 1080 },
+      },
+      {
+        smoothMotion: true,
+        extendedWorld: true,
+        cameraZoom: "55",
+        outputAspect: "21:9",
+        renderResolution: "1080",
+      },
+    ),
+    [],
   );
 });
 

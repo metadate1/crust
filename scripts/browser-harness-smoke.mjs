@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { createReadStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import {
   access,
   mkdir,
@@ -31,8 +31,17 @@ const DEFAULT_BOOT_LID = 0x19;
 const DIRECT_BONUS_AUDIT_LID = 0x24;
 const DEFAULT_FRAMES = 120;
 const REPLAY_BATCH_FRAME_LIMIT = 128;
+// A high-resolution showcase still renders every simulated source frame even
+// when that frame is outside a capture window.  Keep those uncaptured CDP
+// evaluations comfortably below Chrome's 20-second command timeout.
+const SHOWCASE_UNCAPTURED_BATCH_FRAME_LIMIT = 32;
 const REPLAY_ZERO_STEP_CALLBACK_LIMIT = 512;
 const VIDEO_FRAME_RATE = 30;
+const SOURCE_FRAME_DURATION_MS = 34;
+const SHOWCASE_VIDEO_FRAME_RATE = 1000 / SOURCE_FRAME_DURATION_MS;
+const SHOWCASE_VIDEO_FRAME_RATE_ARGUMENT = `1000/${SOURCE_FRAME_DURATION_MS}`;
+const CAPTURE_AUDIO_SAMPLE_RATE = 44_100;
+const CAPTURE_AUDIO_CHANNELS = 2;
 const VIDEO_MINIMUM_FREE_BYTES = 3 * 1024 * 1024 * 1024;
 const VIDEO_DISK_CHECK_INTERVAL = 300;
 const PHYSICAL_INPUT_KIND = "physical";
@@ -56,6 +65,11 @@ const STORAGE_RELOAD_SENTINEL = "crust.browser-harness.storage-initialized";
 const MAX_STORAGE_SEED_BYTES = 16 * 1024;
 const STORAGE_KEYS = [CARD_STORAGE_KEY, RESUME_STORAGE_KEY];
 const SUPPORTED_ASSET_EXTENSIONS = new Set([".bin", ".iso", ".nsd", ".nsf"]);
+const OUTPUT_ASPECT_VALUES = new Set(["4:3", "16:9", "21:9", "screen"]);
+const RENDER_RESOLUTION_VALUES = new Set([
+  "native", "720", "1080", "1440", "2160",
+]);
+const CAMERA_ZOOM_VALUES = new Set(["100", "85", "70", "55"]);
 const CHROME_CANDIDATES = [
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
@@ -90,6 +104,39 @@ function parseSignedWholeNumber(raw, name) {
     );
   }
   return value;
+}
+
+export function parseVideoWindow(raw) {
+  if (typeof raw !== "string") {
+    throw new Error("--video-window must be NAME:STARTFRAME:ENDFRAME:OUTPUTPATH");
+  }
+  const match = raw.match(/^([^:]+):([^:]+):([^:]+):(.+)$/);
+  if (!match) {
+    throw new Error("--video-window must be NAME:STARTFRAME:ENDFRAME:OUTPUTPATH");
+  }
+  const [, name, rawStartFrame, rawEndFrame, outputPath] = match;
+  if (!/^[a-z0-9][a-z0-9_-]*$/i.test(name)) {
+    throw new Error("--video-window NAME must use letters, digits, underscores, or hyphens");
+  }
+  const startFrame = parseWholeNumber(
+    rawStartFrame,
+    `--video-window ${name} STARTFRAME`,
+    1_000_000,
+  );
+  const endFrame = parseWholeNumber(
+    rawEndFrame,
+    `--video-window ${name} ENDFRAME`,
+    1_000_000,
+  );
+  if (endFrame <= startFrame) {
+    throw new Error(`--video-window ${name} ENDFRAME must exceed STARTFRAME`);
+  }
+  return {
+    name,
+    startFrame,
+    endFrame,
+    outputPath: resolve(outputPath),
+  };
 }
 
 function normalizeReplayInputKind(raw, label) {
@@ -143,6 +190,40 @@ export function nextReplayBatchFrameCount(
   return isolateFirstFrame
     ? 1
     : Math.min(remainingFrames, REPLAY_BATCH_FRAME_LIMIT);
+}
+
+export function showcaseWindowBatchFrameCount(
+  sourceFrame,
+  maximumFrames,
+  windowStarts,
+  { needsCapture = false } = {},
+) {
+  if (!Number.isSafeInteger(sourceFrame) || sourceFrame < 0) {
+    throw new Error("showcase source frame must be a nonnegative safe integer");
+  }
+  if (!Number.isSafeInteger(maximumFrames) || maximumFrames < 1) {
+    throw new Error("showcase maximum batch must be a positive safe integer");
+  }
+  if (
+    !Array.isArray(windowStarts)
+    || windowStarts.some(
+      (startFrame) => !Number.isSafeInteger(startFrame) || startFrame < 0,
+    )
+  ) {
+    throw new Error("showcase window starts must be nonnegative safe integers");
+  }
+  if (typeof needsCapture !== "boolean") {
+    throw new Error("showcase capture state must be a boolean");
+  }
+  if (needsCapture) return 1;
+  const nextStart = windowStarts
+    .filter((startFrame) => startFrame > sourceFrame)
+    .sort((left, right) => left - right)[0];
+  return Math.min(
+    maximumFrames,
+    SHOWCASE_UNCAPTURED_BATCH_FRAME_LIMIT,
+    nextStart === undefined ? maximumFrames : nextStart - sourceFrame,
+  );
 }
 
 export function summarizeReplayHostCallbacks(
@@ -912,7 +993,18 @@ Options:
   --chrome PATH      Chrome/Chromium executable
   --screenshot PATH  PNG output (default: target/browser-test-artifacts/smoke.png)
   --video PATH       Per-source-frame H.264 MP4 output; requires --replay
-  --chapters PATH    JSON chapter list for --video
+  --video-window NAME:STARTFRAME:ENDFRAME:OUTPUTPATH
+                     Repeatable one-pass source-frame H.264/AAC clip window;
+                     requires --replay and --chapters
+  --chapters PATH    JSON chapter/metadata list for --video or --video-window
+  --output-aspect VALUE
+                     4:3, 16:9, 21:9, or screen (default: 4:3)
+  --render-resolution VALUE
+                     native, 720, 1080, 1440, or 2160 (default: native)
+  --camera-zoom VALUE
+                     100, 85, 70, or 55 (default: 100)
+  --smooth-motion    Enable smooth presentation; window capture uses 1000/34 fps
+  --extended-world   Render geometry outside the retail camera frustum
   --ffmpeg PATH      ffmpeg executable (default: /usr/bin/ffmpeg)
   --help             Show this help
 
@@ -927,6 +1019,7 @@ export function parseArguments(argv, environment = process.env) {
       .filter(Boolean),
     bootLid: DEFAULT_BOOT_LID,
     frames: DEFAULT_FRAMES,
+    framesExplicit: false,
     unlockAll: false,
     url: environment.CRUST_BROWSER_HARNESS_URL ?? DEFAULT_URL,
     startServer: true,
@@ -941,7 +1034,13 @@ export function parseArguments(argv, environment = process.env) {
       "target/browser-test-artifacts/smoke.png",
     ),
     video: undefined,
+    videoWindows: [],
     chapters: undefined,
+    outputAspect: "4:3",
+    renderResolution: "native",
+    cameraZoom: "100",
+    smoothMotion: false,
+    extendedWorld: false,
     ffmpeg: environment.CRUST_FFMPEG_BIN ?? "/usr/bin/ffmpeg",
     syntheticCookedIsoImport: false,
     auditRetailPbaks: false,
@@ -952,6 +1051,7 @@ export function parseArguments(argv, environment = process.env) {
   };
   let launchArgumentUsed = false;
   let bootLidArgumentUsed = false;
+  const presentationArguments = new Set();
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     const value = () => {
@@ -980,6 +1080,7 @@ export function parseArguments(argv, environment = process.env) {
       case "--frames":
         options.frames = parseWholeNumber(value(), "--frames", 1_000_000);
         if (options.frames === 0) throw new Error("--frames must be at least 1");
+        options.framesExplicit = true;
         launchArgumentUsed = true;
         break;
       case "--expect-final-key-count":
@@ -1063,11 +1164,58 @@ export function parseArguments(argv, environment = process.env) {
         }
         options.video = resolve(value());
         break;
+      case "--video-window":
+        options.videoWindows.push(parseVideoWindow(value()));
+        break;
       case "--chapters":
         if (options.chapters !== undefined) {
           throw new Error("--chapters may be supplied only once");
         }
         options.chapters = resolve(value());
+        break;
+      case "--output-aspect": {
+        if (presentationArguments.has(argument)) {
+          throw new Error(`${argument} may be supplied only once`);
+        }
+        const aspect = value();
+        if (!OUTPUT_ASPECT_VALUES.has(aspect)) {
+          throw new Error("--output-aspect must be 4:3, 16:9, 21:9, or screen");
+        }
+        presentationArguments.add(argument);
+        options.outputAspect = aspect;
+        break;
+      }
+      case "--render-resolution": {
+        if (presentationArguments.has(argument)) {
+          throw new Error(`${argument} may be supplied only once`);
+        }
+        const resolution = value();
+        if (!RENDER_RESOLUTION_VALUES.has(resolution)) {
+          throw new Error(
+            "--render-resolution must be native, 720, 1080, 1440, or 2160",
+          );
+        }
+        presentationArguments.add(argument);
+        options.renderResolution = resolution;
+        break;
+      }
+      case "--camera-zoom": {
+        if (presentationArguments.has(argument)) {
+          throw new Error(`${argument} may be supplied only once`);
+        }
+        const zoom = value();
+        if (!CAMERA_ZOOM_VALUES.has(zoom)) {
+          throw new Error("--camera-zoom must be 100, 85, 70, or 55");
+        }
+        presentationArguments.add(argument);
+        options.cameraZoom = zoom;
+        break;
+      }
+      case "--smooth-motion":
+        options.smoothMotion = true;
+        break;
+      case "--extended-world":
+        options.extendedWorld = true;
         break;
       case "--ffmpeg":
         options.ffmpeg = resolve(value());
@@ -1088,14 +1236,41 @@ export function parseArguments(argv, environment = process.env) {
       "--synthetic-cooked-iso-import cannot be combined with assets or launch/replay options",
     );
   }
-  if (options.video !== undefined && options.replay === undefined) {
-    throw new Error("--video requires --replay");
+  if (options.video !== undefined && options.videoWindows.length > 0) {
+    throw new Error("--video and --video-window cannot be combined");
   }
-  if (options.chapters !== undefined && options.video === undefined) {
-    throw new Error("--chapters requires --video");
+  const captureRequested =
+    options.video !== undefined || options.videoWindows.length > 0;
+  if (captureRequested && options.replay === undefined) {
+    throw new Error("video capture requires --replay");
   }
-  if (options.video !== undefined && options.chapters === undefined) {
-    throw new Error("--video requires --chapters");
+  if (options.chapters !== undefined && !captureRequested) {
+    throw new Error("--chapters requires --video or --video-window");
+  }
+  if (captureRequested && options.chapters === undefined) {
+    throw new Error("video capture requires --chapters");
+  }
+  const windowNames = new Set();
+  const windowPaths = new Set();
+  for (const window of options.videoWindows) {
+    if (windowNames.has(window.name)) {
+      throw new Error(`duplicate --video-window name: ${window.name}`);
+    }
+    if (windowPaths.has(window.outputPath)) {
+      throw new Error(`duplicate --video-window output path: ${window.outputPath}`);
+    }
+    windowNames.add(window.name);
+    windowPaths.add(window.outputPath);
+  }
+  if (options.videoWindows.length > 0 && options.framesExplicit) {
+    const lastWindowEnd = Math.max(
+      ...options.videoWindows.map((window) => window.endFrame),
+    );
+    if (options.frames < lastWindowEnd) {
+      throw new Error(
+        `--frames ${options.frames} stops before the final video window closes at ${lastWindowEnd}`,
+      );
+    }
   }
   if (options.auditRetailPbaks && options.replay !== undefined) {
     throw new Error("--audit-retail-pbaks cannot be combined with --replay");
@@ -2122,7 +2297,10 @@ async function startHarnessServer(url) {
   throw new Error(`harness server did not become ready:\n${output.join("")}`);
 }
 
-async function launchChrome(executable, { headed = false } = {}) {
+async function launchChrome(
+  executable,
+  { headed = false, windowWidth = 1440, windowHeight = 1100 } = {},
+) {
   const profile = await mkdtemp(resolve(tmpdir(), "crust-browser-smoke-"));
   const output = [];
   const child = spawn(
@@ -2144,7 +2322,7 @@ async function launchChrome(executable, { headed = false } = {}) {
       "--disable-sync",
       "--metrics-recording-only",
       "--autoplay-policy=no-user-gesture-required",
-      "--window-size=1440,1100",
+      `--window-size=${windowWidth},${windowHeight}`,
       "about:blank",
     ],
     { stdio: ["ignore", "pipe", "pipe"] },
@@ -2219,6 +2397,111 @@ function waitForChild(child, label, output) {
   });
 }
 
+function requestedPresentation(options) {
+  return {
+    smoothMotion: options.smoothMotion,
+    extendedWorld: options.extendedWorld,
+    cameraZoom: options.cameraZoom,
+    outputAspect: options.outputAspect,
+    renderResolution: options.renderResolution,
+  };
+}
+
+async function readPresentation(cdp, sessionId) {
+  return evaluate(
+    cdp,
+    sessionId,
+    `(() => {
+      const canvas = document.querySelector("#canvas");
+      const rect = canvas?.getBoundingClientRect();
+      return {
+        smoothMotion: document.querySelector("#smoothMotion")?.checked,
+        extendedWorld: document.querySelector("#extendedWorld")?.checked,
+        cameraZoom: document.querySelector("#cameraZoom")?.value,
+        outputAspect: document.querySelector("#outputAspect")?.value,
+        renderResolution: document.querySelector("#renderResolution")?.value,
+        devicePixelRatio,
+        canvasWidth: canvas?.width,
+        canvasHeight: canvas?.height,
+        rect: rect && {
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height
+        }
+      };
+    })()`,
+  );
+}
+
+export function presentationFailures(presentation, expected) {
+  const problems = [];
+  for (const [name, value] of Object.entries(expected)) {
+    if (presentation?.[name] !== value) {
+      problems.push(
+        `${name}: expected ${JSON.stringify(value)}, received ${JSON.stringify(presentation?.[name])}`,
+      );
+    }
+  }
+  const rect = presentation?.rect;
+  const usable =
+    rect
+    && [rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)
+    && rect.width >= 2
+    && rect.height >= 2
+    && [presentation?.canvasWidth, presentation?.canvasHeight].every(Number.isSafeInteger)
+    && presentation.canvasWidth >= 2
+    && presentation.canvasHeight >= 2;
+  let expectedRatio;
+  if (expected.outputAspect === "4:3") expectedRatio = 4 / 3;
+  if (expected.outputAspect === "16:9") expectedRatio = 16 / 9;
+  if (expected.outputAspect === "21:9") expectedRatio = 21 / 9;
+  const rectRatio = usable ? rect.width / rect.height : Number.NaN;
+  const canvasRatio = usable
+    ? presentation.canvasWidth / presentation.canvasHeight
+    : Number.NaN;
+  const ratioMatches = expectedRatio === undefined
+    ? usable && Math.abs(rectRatio - canvasRatio) <= 0.01
+    : usable
+      && Math.abs(rectRatio - expectedRatio) <= 0.01
+      && Math.abs(canvasRatio - expectedRatio) <= 0.01;
+  if (!usable || !ratioMatches) {
+    problems.push(
+      `canvas is not a usable ${expected.outputAspect} capture surface: ${JSON.stringify({
+        rect,
+        width: presentation?.canvasWidth,
+        height: presentation?.canvasHeight,
+      })}`,
+    );
+  }
+  const fixedHeight = {
+    "720": 720,
+    "1080": 1080,
+    "1440": 1440,
+    "2160": 2160,
+  }[expected.renderResolution];
+  if (fixedHeight !== undefined && presentation?.canvasHeight !== fixedHeight) {
+    problems.push(
+      `canvasHeight: expected fixed ${fixedHeight}, received ${JSON.stringify(presentation?.canvasHeight)}`,
+    );
+  }
+  return problems;
+}
+
+async function assertRequestedPresentation(options, cdp, sessionId) {
+  const presentation = await readPresentation(cdp, sessionId);
+  const problems = presentationFailures(
+    presentation,
+    requestedPresentation(options),
+  );
+  if (problems.length > 0) {
+    throw new Error(
+      `video capture presentation does not match the requested settings:\n${problems.join("\n")}`,
+    );
+  }
+  return presentation;
+}
+
 class SourceFrameVideoRecorder {
   static async create(options, cdp, sessionId) {
     for (const [path, label] of [
@@ -2238,69 +2521,11 @@ class SourceFrameVideoRecorder {
     await access(options.ffmpeg).catch((error) => {
       throw new Error(`cannot execute ffmpeg at ${options.ffmpeg}: ${error.message}`);
     });
-    const presentation = await evaluate(
+    const presentation = await assertRequestedPresentation(
+      options,
       cdp,
       sessionId,
-      `(() => {
-        const canvas = document.querySelector("#canvas");
-        const rect = canvas?.getBoundingClientRect();
-        return {
-          smoothMotion: document.querySelector("#smoothMotion")?.checked,
-          extendedWorld: document.querySelector("#extendedWorld")?.checked,
-          cameraZoom: document.querySelector("#cameraZoom")?.value,
-          outputAspect: document.querySelector("#outputAspect")?.value,
-          renderResolution: document.querySelector("#renderResolution")?.value,
-          devicePixelRatio,
-          canvasWidth: canvas?.width,
-          canvasHeight: canvas?.height,
-          rect: rect && {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height
-          }
-        };
-      })()`,
     );
-    const presentationProblems = [];
-    for (const [name, expected] of [
-      ["smoothMotion", false],
-      ["extendedWorld", false],
-      ["cameraZoom", "100"],
-      ["outputAspect", "4:3"],
-      ["renderResolution", "native"],
-    ]) {
-      if (presentation?.[name] !== expected) {
-        presentationProblems.push(
-          `${name}: expected ${JSON.stringify(expected)}, received ${JSON.stringify(presentation?.[name])}`,
-        );
-      }
-    }
-    const rect = presentation?.rect;
-    if (
-      !rect
-      || ![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)
-      || rect.width < 2
-      || rect.height < 2
-      || Math.abs(rect.width / rect.height - 4 / 3) > 0.01
-      || ![presentation?.canvasWidth, presentation?.canvasHeight].every(Number.isSafeInteger)
-      || presentation.canvasWidth < 2
-      || presentation.canvasHeight < 2
-      || Math.abs(presentation.canvasWidth / presentation.canvasHeight - 4 / 3) > 0.01
-    ) {
-      presentationProblems.push(
-        `canvas is not a usable 4:3 capture surface: ${JSON.stringify({
-          rect,
-          width: presentation?.canvasWidth,
-          height: presentation?.canvasHeight,
-        })}`,
-      );
-    }
-    if (presentationProblems.length > 0) {
-      throw new Error(
-        `video capture requires the default retail presentation:\n${presentationProblems.join("\n")}`,
-      );
-    }
     const clip = {
       x: 0,
       y: 0,
@@ -2308,6 +2533,12 @@ class SourceFrameVideoRecorder {
       height: presentation.canvasHeight,
       scale: 1,
     };
+    const frameRate = options.smoothMotion
+      ? SHOWCASE_VIDEO_FRAME_RATE
+      : VIDEO_FRAME_RATE;
+    const frameRateArgument = options.smoothMotion
+      ? SHOWCASE_VIDEO_FRAME_RATE_ARGUMENT
+      : String(VIDEO_FRAME_RATE);
     const partialPath = `${options.video}.partial-${process.pid}.mp4`;
     await rm(partialPath, { force: true });
     const ffmpegOutput = [];
@@ -2317,7 +2548,7 @@ class SourceFrameVideoRecorder {
         "-hide_banner",
         "-loglevel", "warning",
         "-f", "image2pipe",
-        "-framerate", String(VIDEO_FRAME_RATE),
+        "-framerate", frameRateArgument,
         "-vcodec", "mjpeg",
         "-i", "pipe:0",
         "-an",
@@ -2342,6 +2573,7 @@ class SourceFrameVideoRecorder {
       partialPath,
       clip,
       presentation,
+      frameRate,
       ffmpeg,
       ffmpegExit: exit,
     });
@@ -2396,7 +2628,7 @@ class SourceFrameVideoRecorder {
     this.frames += 1;
     if (this.frames % 3_000 === 0) {
       process.stderr.write(
-        `captured ${this.frames} source frames (${(this.frames / VIDEO_FRAME_RATE).toFixed(1)} video seconds)\n`,
+        `captured ${this.frames} source frames (${(this.frames / this.frameRate).toFixed(1)} video seconds)\n`,
       );
     }
   }
@@ -2412,17 +2644,17 @@ class SourceFrameVideoRecorder {
     const metadata = await stat(this.videoPath);
     const chapters = this.chapters.map((chapter) => ({
       ...chapter,
-      startSeconds: chapter.startFrame / VIDEO_FRAME_RATE,
-      endSeconds: chapter.endFrame / VIDEO_FRAME_RATE,
-      timestamp: new Date(chapter.startFrame * 1000 / VIDEO_FRAME_RATE)
+      startSeconds: chapter.startFrame / this.frameRate,
+      endSeconds: chapter.endFrame / this.frameRate,
+      timestamp: new Date(chapter.startFrame * 1000 / this.frameRate)
         .toISOString()
         .slice(11, 23),
     }));
     const chapterDocument = {
       schema: 1,
-      frameRate: VIDEO_FRAME_RATE,
+      frameRate: this.frameRate,
       frameCount: this.frames,
-      durationSeconds: this.frames / VIDEO_FRAME_RATE,
+      durationSeconds: this.frames / this.frameRate,
       audio: false,
       presentation: {
         aspect: this.presentation.outputAspect,
@@ -2446,9 +2678,9 @@ class SourceFrameVideoRecorder {
       path: this.videoPath,
       sha256: await sha256File(this.videoPath),
       bytes: metadata.size,
-      frameRate: VIDEO_FRAME_RATE,
+      frameRate: this.frameRate,
       frameCount: this.frames,
-      durationSeconds: this.frames / VIDEO_FRAME_RATE,
+      durationSeconds: this.frames / this.frameRate,
       width: this.clip.width - (this.clip.width % 2),
       height: this.clip.height - (this.clip.height % 2),
       audio: false,
@@ -2464,6 +2696,410 @@ class SourceFrameVideoRecorder {
     await terminate(this.ffmpeg);
     await this.ffmpegExit.catch(() => {});
     await rm(this.partialPath, { force: true });
+  }
+}
+
+function pcmS16lePeak(bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length % 4 !== 0) {
+    throw new Error("captured PCM must contain interleaved stereo s16le frames");
+  }
+  let peak = 0;
+  for (let offset = 0; offset < bytes.length; offset += 2) {
+    peak = Math.max(peak, Math.abs(bytes.readInt16LE(offset)));
+  }
+  return peak;
+}
+
+async function writeEncoderPipe(stream, bytes, label) {
+  if (stream.destroyed || !stream.writable) {
+    throw new Error(`${label} closed before the capture window finished`);
+  }
+  if (!stream.write(bytes)) await once(stream, "drain");
+}
+
+class SourceFrameWindowRecorder {
+  static async create(options, cdp, sessionId) {
+    const outputs = [
+      [options.chapters, "chapter metadata"],
+      ...options.videoWindows.map((window) => [
+        window.outputPath,
+        `video window ${window.name}`,
+      ]),
+    ];
+    for (const [path, label] of outputs) {
+      await access(path).then(
+        () => {
+          throw new Error(`${label} output already exists: ${path}`);
+        },
+        (error) => {
+          if (error?.code !== "ENOENT") throw error;
+        },
+      );
+      await mkdir(dirname(path), { recursive: true });
+    }
+    await access(options.ffmpeg).catch((error) => {
+      throw new Error(`cannot execute ffmpeg at ${options.ffmpeg}: ${error.message}`);
+    });
+    for (const window of options.videoWindows) {
+      for (const path of [
+        `${window.outputPath}.partial-${process.pid}.mp4`,
+        `${window.outputPath}.video-${process.pid}.mp4`,
+        `${window.outputPath}.audio-${process.pid}.s16le`,
+      ]) {
+        await rm(path, { force: true });
+      }
+    }
+    const presentation = await assertRequestedPresentation(
+      options,
+      cdp,
+      sessionId,
+    );
+    const audio = await evaluate(
+      cdp,
+      sessionId,
+      `(() => {
+        const harness = window.__crustTest;
+        if (typeof harness?.setAudioCaptureEnabled !== "function"
+            || typeof harness?.takeAudioFramePcm16 !== "function") {
+          return { error: "deterministic browser-test audio capture is unavailable" };
+        }
+        harness.setAudioCaptureEnabled(true);
+        return {
+          error: harness.lastError ?? null,
+          sampleRate: harness.audioSampleRate ?? null,
+          channels: harness.audioChannels ?? null,
+          format: harness.audioFormat ?? null
+        };
+      })()`,
+    );
+    if (audio?.error != null) {
+      throw new Error(`could not enable deterministic audio capture: ${audio.error}`);
+    }
+    if (
+      audio?.sampleRate !== CAPTURE_AUDIO_SAMPLE_RATE
+      || audio?.channels !== CAPTURE_AUDIO_CHANNELS
+      || audio?.format !== "s16le"
+    ) {
+      throw new Error(
+        `unexpected deterministic audio format: ${JSON.stringify(audio)}`,
+      );
+    }
+    const encoders = options.videoWindows.map((window) => {
+      const partialPath = `${window.outputPath}.partial-${process.pid}.mp4`;
+      const videoPartialPath = `${window.outputPath}.video-${process.pid}.mp4`;
+      const audioPartialPath = `${window.outputPath}.audio-${process.pid}.s16le`;
+      const output = [];
+      const ffmpeg = spawn(
+        options.ffmpeg,
+        [
+          "-hide_banner",
+          "-loglevel", "warning",
+          "-f", "image2pipe",
+          "-framerate", SHOWCASE_VIDEO_FRAME_RATE_ARGUMENT,
+          "-vcodec", "mjpeg",
+          "-i", "pipe:0",
+          "-an",
+          "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+          "-c:v", "libx264",
+          "-preset", "veryfast",
+          "-crf", "24",
+          "-pix_fmt", "yuv420p",
+          videoPartialPath,
+        ],
+        { stdio: ["pipe", "ignore", "pipe"] },
+      );
+      ffmpeg.stderr.setEncoding("utf8");
+      ffmpeg.stderr.on("data", (chunk) => output.push(chunk));
+      ffmpeg.stdin.on("error", (error) => output.push(`video pipe: ${error.message}\n`));
+      const audioStream = createWriteStream(audioPartialPath, { flags: "wx" });
+      audioStream.on("error", (error) => output.push(`audio file: ${error.message}\n`));
+      return {
+        ...window,
+        expectedFrames: window.endFrame - window.startFrame,
+        partialPath,
+        videoPartialPath,
+        audioPartialPath,
+        ffmpeg,
+        ffmpegExit: waitForChild(
+          ffmpeg,
+          `ffmpeg encoder for ${window.name}`,
+          output,
+        ),
+        audioStream,
+        muxFfmpeg: undefined,
+        frames: 0,
+        audioBytes: 0,
+        audioPeak: 0,
+      };
+    });
+    return new SourceFrameWindowRecorder({
+      cdp,
+      sessionId,
+      chaptersPath: options.chapters,
+      presentation,
+      encoders,
+      ffmpegPath: options.ffmpeg,
+    });
+  }
+
+  constructor(values) {
+    Object.assign(this, values);
+    this.totalCapturedFrames = 0;
+    this.chapters = [];
+    this.currentChapter = undefined;
+    this.finished = false;
+    this.aborted = false;
+  }
+
+  captureWindows(sourceFrame) {
+    return this.encoders.filter(
+      (window) => sourceFrame >= window.startFrame && sourceFrame < window.endFrame,
+    );
+  }
+
+  needsCapture(sourceFrame) {
+    return this.captureWindows(sourceFrame).length > 0;
+  }
+
+  batchFrameCount(sourceFrame, maximumFrames) {
+    return showcaseWindowBatchFrameCount(
+      sourceFrame,
+      maximumFrames,
+      this.encoders.map((window) => window.startFrame),
+      { needsCapture: this.needsCapture(sourceFrame) },
+    );
+  }
+
+  startChapter(id, segment, sourceFrame) {
+    if (this.currentChapter) this.currentChapter.endFrame = sourceFrame;
+    this.currentChapter = {
+      id,
+      segment,
+      startFrame: sourceFrame,
+      endFrame: null,
+    };
+    this.chapters.push(this.currentChapter);
+  }
+
+  async capture(sourceFrame, sourceFrameJpeg, sourceFrameAudio) {
+    if (this.finished || this.aborted) {
+      throw new Error("video-window recorder is not accepting source frames");
+    }
+    const windows = this.captureWindows(sourceFrame);
+    if (windows.length === 0) {
+      throw new Error(`source frame ${sourceFrame} is outside every video window`);
+    }
+    if (this.totalCapturedFrames % VIDEO_DISK_CHECK_INTERVAL === 0) {
+      for (const directory of new Set(windows.map((window) => dirname(window.outputPath)))) {
+        const filesystem = await statfs(directory);
+        const freeBytes = filesystem.bavail * filesystem.bsize;
+        if (freeBytes < VIDEO_MINIMUM_FREE_BYTES) {
+          throw new Error(
+            `showcase capture aborted with ${freeBytes} free bytes; the 3 GiB safety floor was crossed`,
+          );
+        }
+      }
+    }
+    const jpegPrefix = "data:image/jpeg;base64,";
+    if (
+      typeof sourceFrameJpeg !== "string"
+      || !sourceFrameJpeg.startsWith(jpegPrefix)
+    ) {
+      throw new Error(`source frame ${sourceFrame} has no JPEG canvas readback`);
+    }
+    const jpeg = Buffer.from(sourceFrameJpeg.slice(jpegPrefix.length), "base64");
+    if (jpeg.length < 4 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
+      throw new Error(`source frame ${sourceFrame} is not a JPEG image`);
+    }
+    if (typeof sourceFrameAudio !== "string" || sourceFrameAudio.length === 0) {
+      throw new Error(`source frame ${sourceFrame} has no deterministic PCM payload`);
+    }
+    const pcm = Buffer.from(sourceFrameAudio, "base64");
+    if (pcm.length === 0 || pcm.length % 4 !== 0) {
+      throw new Error(`source frame ${sourceFrame} has malformed stereo s16le PCM`);
+    }
+    const peak = pcmS16lePeak(pcm);
+    for (const window of windows) {
+      await Promise.all([
+        writeEncoderPipe(window.ffmpeg.stdin, jpeg, `${window.name} video pipe`),
+        writeEncoderPipe(window.audioStream, pcm, `${window.name} audio file`),
+      ]);
+      window.frames += 1;
+      window.audioBytes += pcm.length;
+      window.audioPeak = Math.max(window.audioPeak, peak);
+    }
+    this.totalCapturedFrames += 1;
+    if (this.totalCapturedFrames % 1_000 === 0) {
+      process.stderr.write(
+        `captured ${this.totalCapturedFrames} showcase source frames across all windows\n`,
+      );
+    }
+  }
+
+  async muxWindow(window) {
+    const output = [];
+    const ffmpeg = spawn(
+      this.ffmpegPath,
+      [
+        "-hide_banner",
+        "-loglevel", "warning",
+        "-i", window.videoPartialPath,
+        "-f", "s16le",
+        "-ar", String(CAPTURE_AUDIO_SAMPLE_RATE),
+        "-ac", String(CAPTURE_AUDIO_CHANNELS),
+        "-i", window.audioPartialPath,
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-movflags", "+faststart",
+        window.partialPath,
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    window.muxFfmpeg = ffmpeg;
+    ffmpeg.stderr.setEncoding("utf8");
+    ffmpeg.stderr.on("data", (chunk) => output.push(chunk));
+    await waitForChild(ffmpeg, `ffmpeg muxer for ${window.name}`, output);
+    window.muxFfmpeg = undefined;
+  }
+
+  async finish(finalSourceFrame) {
+    if (this.finished) throw new Error("video-window recorder was already finalized");
+    if (this.aborted) throw new Error("video-window recorder was aborted");
+    if (this.currentChapter) this.currentChapter.endFrame = finalSourceFrame;
+    for (const window of this.encoders) {
+      if (window.frames !== window.expectedFrames) {
+        throw new Error(
+          `${window.name} captured ${window.frames} frames; expected ${window.expectedFrames}`,
+        );
+      }
+      if (window.audioPeak === 0) {
+        throw new Error(`${window.name} deterministic audio is silent`);
+      }
+      if (window.audioStream.destroyed && !window.audioStream.writableFinished) {
+        throw new Error(`${window.name} audio file closed before capture finished`);
+      }
+      window.ffmpeg.stdin.end();
+      window.audioFinished = once(window.audioStream, "finish");
+      window.audioStream.end();
+    }
+    await Promise.all(
+      this.encoders.flatMap((window) => [
+        window.ffmpegExit,
+        window.audioFinished,
+      ]),
+    );
+    await Promise.all(this.encoders.map((window) => this.muxWindow(window)));
+    for (const window of this.encoders) {
+      await rm(window.videoPartialPath, { force: true });
+      await rm(window.audioPartialPath, { force: true });
+      await rename(window.partialPath, window.outputPath);
+    }
+    await evaluate(
+      this.cdp,
+      this.sessionId,
+      `window.__crustTest?.setAudioCaptureEnabled?.(false)`,
+    );
+    const chapterMetadata = this.chapters.map((chapter) => ({
+      ...chapter,
+      startSeconds: chapter.startFrame * SOURCE_FRAME_DURATION_MS / 1_000,
+      endSeconds: chapter.endFrame * SOURCE_FRAME_DURATION_MS / 1_000,
+      timestamp: new Date(chapter.startFrame * SOURCE_FRAME_DURATION_MS)
+        .toISOString()
+        .slice(11, 23),
+    }));
+    const windows = [];
+    for (const window of this.encoders) {
+      const metadata = await stat(window.outputPath);
+      const audioSampleFrames = window.audioBytes / (2 * CAPTURE_AUDIO_CHANNELS);
+      windows.push({
+        name: window.name,
+        startFrame: window.startFrame,
+        endFrame: window.endFrame,
+        path: window.outputPath,
+        sha256: await sha256File(window.outputPath),
+        bytes: metadata.size,
+        frameCount: window.frames,
+        frameRate: SHOWCASE_VIDEO_FRAME_RATE,
+        durationSeconds: window.frames / SHOWCASE_VIDEO_FRAME_RATE,
+        width: this.presentation.canvasWidth - (this.presentation.canvasWidth % 2),
+        height: this.presentation.canvasHeight - (this.presentation.canvasHeight % 2),
+        audio: {
+          codec: "aac",
+          sourceFormat: "s16le",
+          sampleRate: CAPTURE_AUDIO_SAMPLE_RATE,
+          channels: CAPTURE_AUDIO_CHANNELS,
+          sampleFrames: audioSampleFrames,
+          sourceDurationSeconds: audioSampleFrames / CAPTURE_AUDIO_SAMPLE_RATE,
+          peak: window.audioPeak,
+          nonSilent: window.audioPeak > 0,
+        },
+      });
+    }
+    const document = {
+      schema: 2,
+      sourceFrameDurationMs: SOURCE_FRAME_DURATION_MS,
+      frameRate: {
+        numerator: 1_000,
+        denominator: SOURCE_FRAME_DURATION_MS,
+        value: SHOWCASE_VIDEO_FRAME_RATE,
+      },
+      sourceFramesSimulated: finalSourceFrame,
+      audio: {
+        captured: true,
+        systemAudio: false,
+        source: "deterministic final software mix per completed browser-test source frame",
+        sampleRate: CAPTURE_AUDIO_SAMPLE_RATE,
+        channels: CAPTURE_AUDIO_CHANNELS,
+        sourceFormat: "s16le",
+      },
+      presentation: {
+        aspect: this.presentation.outputAspect,
+        resolution: this.presentation.renderResolution,
+        cameraZoom: this.presentation.cameraZoom,
+        smoothMotion: this.presentation.smoothMotion,
+        extendedWorld: this.presentation.extendedWorld,
+        canvasWidth: this.presentation.canvasWidth,
+        canvasHeight: this.presentation.canvasHeight,
+      },
+      windows,
+      chapters: chapterMetadata,
+    };
+    await writeFile(
+      this.chaptersPath,
+      `${JSON.stringify(document, null, 2)}\n`,
+      { flag: "wx" },
+    );
+    this.finished = true;
+    return {
+      chapters: this.chaptersPath,
+      frameRate: SHOWCASE_VIDEO_FRAME_RATE,
+      sourceFrameDurationMs: SOURCE_FRAME_DURATION_MS,
+      totalCapturedFrames: this.totalCapturedFrames,
+      windows,
+    };
+  }
+
+  async abort() {
+    if (this.finished || this.aborted) return;
+    this.aborted = true;
+    await evaluate(
+      this.cdp,
+      this.sessionId,
+      `window.__crustTest?.setAudioCaptureEnabled?.(false)`,
+    ).catch(() => {});
+    for (const window of this.encoders) {
+      window.ffmpeg.stdin.destroy();
+      window.audioStream.destroy();
+      await terminate(window.ffmpeg);
+      await window.ffmpegExit.catch(() => {});
+      await terminate(window.muxFfmpeg);
+      await rm(window.partialPath, { force: true });
+      await rm(window.videoPartialPath, { force: true });
+      await rm(window.audioPartialPath, { force: true });
+    }
   }
 }
 
@@ -2750,8 +3386,11 @@ async function reloadPage(cdp, sessionId) {
 }
 
 async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
+  const showcaseCapture = options.videoWindows.length > 0;
   const chrome = await launchChrome(chromeExecutable, {
-    headed: options.video !== undefined,
+    headed: options.video !== undefined || showcaseCapture,
+    windowWidth: showcaseCapture ? 2560 : 1440,
+    windowHeight: showcaseCapture ? 1200 : 1100,
   });
   const expectedRetailPbakEids = retailPbakAuditExpectedEids(options);
   let cdp;
@@ -2819,8 +3458,8 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
         // shell's responsive layout, where the viewport itself is the exact
         // selected 4:3 retail surface, instead of recording that stretched
         // decorative aperture.
-        width: options.video === undefined ? 1440 : 332,
-        height: 1100,
+        width: showcaseCapture ? 2560 : options.video === undefined ? 1440 : 332,
+        height: showcaseCapture ? 1200 : 1100,
         deviceScaleFactor: 1,
         mobile: false,
       },
@@ -3015,6 +3654,17 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
       `(() => {
         document.querySelector("#unlockAll").checked = ${replay.unlockAll};
         document.querySelector("#bootLevel").value = "${replay.bootLid}";
+        document.querySelector("#outputAspect").value = ${JSON.stringify(options.outputAspect)};
+        document.querySelector("#renderResolution").value = ${JSON.stringify(options.renderResolution)};
+        document.querySelector("#cameraZoom").value = ${JSON.stringify(options.cameraZoom)};
+        document.querySelector("#smoothMotion").checked = ${options.smoothMotion};
+        document.querySelector("#extendedWorld").checked = ${options.extendedWorld};
+        const harness = window.__crustTest;
+        if (typeof harness?.syncPresentationFromControls !== "function") {
+          throw new Error("browser presentation sync hook is unavailable");
+        }
+        harness.syncPresentationFromControls();
+        if (harness.lastError != null) throw new Error(harness.lastError);
         document.querySelector("#launch").click();
       })()`,
     );
@@ -3026,17 +3676,15 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
       failures,
       120_000,
     );
-    if (options.video !== undefined) {
+    if (options.video !== undefined || showcaseCapture) {
       if (!replay.composition?.phases) {
         throw new Error(
           "video capture requires composed replay phase metadata for its chapter list",
         );
       }
-      videoRecorder = await SourceFrameVideoRecorder.create(
-        options,
-        cdp,
-        sessionId,
-      );
+      videoRecorder = showcaseCapture
+        ? await SourceFrameWindowRecorder.create(options, cdp, sessionId)
+        : await SourceFrameVideoRecorder.create(options, cdp, sessionId);
     }
     if (options.auditIsolatedRetailPbakLid !== undefined) {
       const queueResult = await evaluate(
@@ -3070,7 +3718,14 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
     let observedRetailExecution = retailExecutionObserved(false, finalSnapshot);
     let replayCurrentLid = finalSnapshot.debug?.currentLid;
     let replayMountedLid = finalSnapshot.debug?.mountedLid;
+    const replayFrameLimit = options.replay !== undefined && options.framesExplicit
+      ? options.frames
+      : undefined;
     const stepReplayBatch = async (inputKind, input, frameCount, label) => {
+      const sourceFrame = stepped;
+      const captureSourceFrame = videoRecorder instanceof SourceFrameWindowRecorder
+        ? videoRecorder.needsCapture(sourceFrame)
+        : videoRecorder !== undefined;
       const batchStart = stepped + 1;
       const stepMethod = replayStepMethod(inputKind);
       const stepArguments = replayStepArguments(inputKind, input);
@@ -3107,8 +3762,19 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
               return {
                 simulationStepped,
                 snapshot: ${snapshotExpression},
-                sourceFrameJpeg: simulationStepped && ${videoRecorder !== undefined}
+                sourceFrameJpeg: simulationStepped && ${captureSourceFrame}
                   ? document.querySelector("#canvas").toDataURL("image/jpeg", 0.82)
+                  : null,
+                sourceFrameAudio: simulationStepped && ${captureSourceFrame && showcaseCapture}
+                  ? (() => {
+                      const bytes = window.__crustTest.takeAudioFramePcm16();
+                      if (!(bytes instanceof Uint8Array)) return null;
+                      let binary = "";
+                      for (let offset = 0; offset < bytes.length; offset += 0x4000) {
+                        binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x4000));
+                      }
+                      return btoa(binary);
+                    })()
                   : null
               };
             })()`,
@@ -3168,8 +3834,19 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
             return {
               callbackSteps,
               snapshot: ${snapshotExpression},
-              sourceFrameJpeg: executed > 0 && ${videoRecorder !== undefined}
+              sourceFrameJpeg: executed > 0 && ${captureSourceFrame}
                 ? document.querySelector("#canvas").toDataURL("image/jpeg", 0.82)
+                : null,
+              sourceFrameAudio: executed > 0 && ${captureSourceFrame && showcaseCapture}
+                ? (() => {
+                    const bytes = window.__crustTest.takeAudioFramePcm16();
+                    if (!(bytes instanceof Uint8Array)) return null;
+                    let binary = "";
+                    for (let offset = 0; offset < bytes.length; offset += 0x4000) {
+                      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x4000));
+                    }
+                    return btoa(binary);
+                  })()
                 : null
             };
           })()`,
@@ -3252,13 +3929,21 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
           `${label} failed after frames ${batchStart}-${stepped}:\n${problems.join("\n")}`,
         );
       }
-      if (videoRecorder && executed > 0) {
+      if (captureSourceFrame && executed > 0) {
         if (executed !== 1) {
           throw new Error(
             `${label} executed ${executed} frames while per-source-frame capture requires one`,
           );
         }
-        await videoRecorder.capture(result.sourceFrameJpeg);
+        if (videoRecorder instanceof SourceFrameWindowRecorder) {
+          await videoRecorder.capture(
+            sourceFrame,
+            result.sourceFrameJpeg,
+            result.sourceFrameAudio,
+          );
+        } else {
+          await videoRecorder.capture(result.sourceFrameJpeg);
+        }
       }
       if (finalSnapshot.harness.lastRequestedLid != null) {
         const requestedLid = Number(finalSnapshot.harness.lastRequestedLid);
@@ -3315,6 +4000,7 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
       let used = 0;
       while (
         used < maximumFrames
+        && (replayFrameLimit === undefined || stepped < replayFrameLimit)
         && expectationFailures(expectation, finalSnapshot).length > 0
       ) {
         used += await stepReplayFrame(inputKind, held, label);
@@ -3775,14 +4461,23 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
         phase,
       ]),
     );
+    let replayStoppedAtFrameLimit = false;
     replaySegments:
     for (const [segmentIndex, segment] of replay.segments.entries()) {
+      if (replayFrameLimit !== undefined && stepped >= replayFrameLimit) {
+        replayStoppedAtFrameLimit = true;
+        break;
+      }
       const videoPhase = videoPhaseByFirstSegment.get(segmentIndex + 1);
       if (videoPhase) {
-        videoRecorder?.startChapter(videoPhase.id, segmentIndex + 1);
+        videoRecorder?.startChapter(videoPhase.id, segmentIndex + 1, stepped);
       }
       let remainingFrames = segment.frames;
       while (remainingFrames > 0) {
+        if (replayFrameLimit !== undefined && stepped >= replayFrameLimit) {
+          replayStoppedAtFrameLimit = true;
+          break;
+        }
         if (
           replayLidConditionKnown(
             segment.while,
@@ -3799,11 +4494,17 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
           remainingFrames = 0;
           break;
         }
-        const batchFrames = videoRecorder
-          ? 1
-          : nextReplayBatchFrameCount(remainingFrames, {
-              isolateFirstFrame: !allLevelsLaunchChecked,
-            });
+        let batchFrames = nextReplayBatchFrameCount(remainingFrames, {
+          isolateFirstFrame: !allLevelsLaunchChecked,
+        });
+        if (replayFrameLimit !== undefined) {
+          batchFrames = Math.min(batchFrames, replayFrameLimit - stepped);
+        }
+        if (videoRecorder instanceof SourceFrameVideoRecorder) {
+          batchFrames = 1;
+        } else if (videoRecorder instanceof SourceFrameWindowRecorder) {
+          batchFrames = videoRecorder.batchFrameCount(stepped, batchFrames);
+        }
         const executed = await stepReplayBatch(
           segment.inputKind,
           segment.inputKind === SNAPSHOT_INPUT_KIND ? segment : segment.held,
@@ -3837,6 +4538,13 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
           }
         }
       }
+      if (
+        replayStoppedAtFrameLimit
+        || (replayFrameLimit !== undefined && stepped >= replayFrameLimit)
+      ) {
+        replayStoppedAtFrameLimit = true;
+        break;
+      }
       const settleFramesUsed = await settleExpectation(
         segment.expect,
         segment.settleFrames,
@@ -3845,6 +4553,14 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
         `browser replay segment ${segmentIndex + 1} settle`,
       );
       segmentSettleFramesUsed += settleFramesUsed;
+      if (
+        replayFrameLimit !== undefined
+        && stepped >= replayFrameLimit
+        && expectationFailures(segment.expect, finalSnapshot).length > 0
+      ) {
+        replayStoppedAtFrameLimit = true;
+        break;
+      }
       assertExpected(
         segment.expect,
         finalSnapshot,
@@ -3903,13 +4619,15 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
       observedRetailExecution,
       finalSnapshot,
     );
-    const settleFramesUsed = await settleExpectation(
-      replay.expect,
-      replay.settleFrames,
-      PHYSICAL_INPUT_KIND,
-      0,
-      "browser replay final settle",
-    );
+    const settleFramesUsed = replayStoppedAtFrameLimit
+      ? 0
+      : await settleExpectation(
+          replay.expect,
+          replay.settleFrames,
+          PHYSICAL_INPUT_KIND,
+          0,
+          "browser replay final settle",
+        );
     let directBonusReturnSettleFrames = 0;
     if (options.auditDirectBonusReturn) {
       while (
@@ -4025,10 +4743,9 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
     const screenshotBytes = Buffer.from(screenshot.data, "base64");
     await mkdir(dirname(options.screenshot), { recursive: true });
     await writeFile(options.screenshot, screenshotBytes);
-    const finalExpectationFailures = expectationFailures(
-      replay.expect,
-      finalSnapshot,
-    );
+    const finalExpectationFailures = replayStoppedAtFrameLimit
+      ? []
+      : expectationFailures(replay.expect, finalSnapshot);
     if (finalExpectationFailures.length > 0) {
       throw new Error(
         [
@@ -4040,7 +4757,12 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
         ].join("\n"),
       );
     }
-    const video = videoRecorder ? await videoRecorder.finish() : null;
+    const video = videoRecorder instanceof SourceFrameVideoRecorder
+      ? await videoRecorder.finish()
+      : null;
+    const videoWindows = videoRecorder instanceof SourceFrameWindowRecorder
+      ? await videoRecorder.finish(stepped)
+      : null;
     return {
       assets: options.assets.length,
       pairs: imported.pairCount,
@@ -4049,6 +4771,8 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
       zeroStepHostCallbacks,
       maximumConsecutiveZeroStepCallbacks,
       replayFrames: replay.totalFrames,
+      replayComplete: !replayStoppedAtFrameLimit,
+      replayFrameLimit: replayFrameLimit ?? null,
       skippedReplayFrames,
       settleFramesUsed,
       segmentSettleFramesUsed,
@@ -4130,6 +4854,7 @@ async function runBrowser(options, replay, chromeExecutable, storageSeeds) {
         .update(screenshotBytes)
         .digest("hex"),
       video,
+      videoWindows,
     };
   } finally {
     await videoRecorder?.abort();

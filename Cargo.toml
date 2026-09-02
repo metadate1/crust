@@ -16,6 +16,7 @@ rust-version = "1.97"
 authors = ["crust contributors"]
 repository = "https://github.com/metadate1/crust"
 publish = false
+license-file = "LICENSE.md"
 
 [workspace.dependencies]
 base64 = "=0.22.1"

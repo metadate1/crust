@@ -1,5 +1,9 @@
 # Migration evidence
 
+This document records what the Rust rewrite preserved and what it changed deliberately. It is a
+historical engineering record, not a current feature list. See [COMPATIBILITY.md](COMPATIBILITY.md)
+for current behavior and [VERIFICATION.md](VERIFICATION.md) for dated test results.
+
 ## Read-only baseline
 
 The reference tree was characterized at

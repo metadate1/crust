@@ -3,7 +3,8 @@
 The interface artwork in this directory and `web/assets/` was generated specifically for
 Crust. No Crash Bandicoot game data, extracted texture, screenshot, logo file, character art,
 or other proprietary visual input was supplied to the generator. These files do not change the
-project's private, restricted-distribution status described in `NOTICE.md`.
+project's all-rights-reserved, source-available status described in `LICENSE.md` and
+`RIGHTS_AND_LICENSES.md`.
 
 ## `crust-wordmark`
 

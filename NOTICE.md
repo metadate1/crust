@@ -1,11 +1,12 @@
-# Copyright, provenance, and distribution notice
+# Copyright, provenance, and technical references
 
 `crust` is an independent Rust interoperability rewrite informed by observable behavior and the
 public C1 lineage. It includes no Crash Bandicoot disc sectors, executables, artwork, audio,
 textures, level streams, ROM images, or other proprietary game content. Runtime data is supplied
 by the user, read locally by the browser, and is never uploaded by this project.
 
-Behavioral and format references were taken from these unlicensed upstream snapshots:
+Behavioral and format references were taken from these upstream snapshots, which have no express
+root license:
 
 - `wurlyfox/c1` at `256fdcef59f15a190290cc19db3fa9a707843b69`
 - `mateusfavarin/c1` (`windows` branch) at `408d6409afadc1202230ac1183d4d7f40292b87c`
@@ -52,13 +53,15 @@ and independently cross-checked against `ps2dev/ps2sdk` at
 Academic Free License 2.0. No source from either reference is included in this repository.
 
 Those C1 repositories do not provide an express root license. No C source is included or linked
-into this runtime. This repository must remain private and must not be redistributed, hosted, or
-published as a playable build until contributor permissions and the original-game rights have
-been reviewed by qualified counsel. Default copyright remains with the respective authors and
-rights holders.
+into this runtime, but absence of copied C files does not by itself resolve the copyright status of
+an implementation informed by those sources. CRUST is therefore published, if made public, only
+under the all-rights-reserved source-available boundary in [LICENSE.md](LICENSE.md) and
+[RIGHTS_AND_LICENSES.md](RIGHTS_AND_LICENSES.md). That boundary does not relicense upstream work or
+clear a playable build, hosted runtime, package, or commercial distribution. Default copyright
+remains with the respective authors and rights holders.
 
 The rewrite's CSS/browser shell is original to this repository and contains no copied game imagery.
-The two committed decorative shell images were generated specifically for this private project on
+The two committed decorative shell images were generated specifically for this project on
 2026-07-16 with OpenAI's image-generation service from text-only prompts: an original
 jungle/wood/stone game-window surround (`web/assets/crust-game-frame.png`, SHA-256
 `f065de37fe957794b7f477b1e339adeefa5e41851f32dfe39f7971091a594261`) and an original

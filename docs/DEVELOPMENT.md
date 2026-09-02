@@ -1,5 +1,9 @@
 # Development and verification
 
+This document contains the full maintainer workflow. For a short setup, start with the project
+[README](../README.md). Commands that use retail data require files from your own disc and remain
+ignored by default.
+
 ## Tool versions
 
 - Rust `1.97.0` (pinned by `rust-toolchain.toml`)
@@ -12,7 +16,7 @@ committed. Release builds use fat LTO, one codegen unit, stripped symbols and ab
 ## Checks
 
 Run formatting, native and Wasm Clippy, native tests, native release, and both production and
-browser-harness Wasm builds before committing or pushing a private release candidate:
+browser-harness Wasm builds before committing or pushing a release candidate:
 
 ```bash
 npm run fmt

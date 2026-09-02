@@ -1,11 +1,11 @@
 # Verification record
 
-This file records observed checks for the initial private rewrite delivery on 2026-07-12, the
-stream, title, GOOL, entity, SLST, camera, cached-scene and hosted-runtime slices on 2026-07-13,
-the title-overlay, PBAK, object-shader and current-zone collision slices on 2026-07-14, and the
-later ADSR, world-ripple/dynamic-world, shared-RNG, process-animation and initial-return lifecycle
-slices on 2026-07-15. It
-does not turn subsystem tests into a claim of retail gameplay parity.
+This is a dated evidence log, not a quick-start guide. Each result belongs to the source and build
+described beside it. A newer result can supersede an older one.
+
+The log begins with the private rewrite checks from 2026-07-12 through 2026-07-15 and continues
+with later native, browser, campaign, rendering, audio, and release checks. A passing subsystem
+test proves only the behavior it names. It does not prove complete retail or hardware parity.
 
 ## Reference characterization
 
@@ -2103,4 +2103,5 @@ node scripts/browser-harness-smoke.mjs \
 ```
 
 After every final gate passes, the delivery summary must identify the exact commit pushed to the
-private remote. Until that push is verified, no working-tree fingerprint is a published artifact.
+configured remote. Until that push is verified, no working-tree fingerprint is a published
+artifact.

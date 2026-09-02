@@ -1,8 +1,8 @@
 # Local browser campaign replay discovery and composition
 
-The browser campaign discovery and composition tools join legally local replay fragments into the
-schema consumed by `scripts/browser-harness-smoke.mjs`. They are deliberately ordering,
-composition, and validation tools, not a second game controller:
+These tools join locally generated replay fragments into the format used by
+`scripts/browser-harness-smoke.mjs`. They order, copy, and validate captured input. They do not
+play the game, invent input, or change game state:
 
 - discovery orders an unordered directory of opt-in local fragment JSON files by exact state;
 - composition reads only the resulting ordered local manifest and its fragment JSON files;

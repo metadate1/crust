@@ -1,5 +1,9 @@
 # Architecture
 
+This document explains how CRUST turns user-selected retail data into a checked browser runtime.
+Start with the safety boundary and dependency direction. Later sections describe the exact render,
+simulation, audio, and storage contracts.
+
 ## Safety boundary
 
 All crates use `#![forbid(unsafe_code)]`. Parsing begins with immutable byte slices and checked

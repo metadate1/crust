@@ -1,690 +1,56 @@
-# crust
+# CRUST
 
-`crust` is a browser-only Rust/Wasm interoperability rewrite of the C1 game-engine lineage. It
-loads data from a legally owned Crash Bandicoot NTSC-U disc locally, recognizes the S0–S3 stream
-set, and runs without uploading or bundling game data.
+CRUST is a Rust and WebAssembly compatibility runtime for the original U.S. release of
+*Crash Bandicoot*. It runs in a web browser and reads game data from a disc image that the user
+selects on their own device.
 
-> **Private repository.** No public distribution license is granted. C1's upstream licensing is
-> unresolved and the original game rights require separate review. Keep source and builds private;
-> see [NOTICE.md](NOTICE.md).
+CRUST does not include the game, a BIOS, extracted game files, or a download link for them. The
+browser does not upload or keep the selected game file. See [Privacy](PRIVACY.md) for the exact
+data boundary.
 
-## Implementation status
+CRUST is an independent research project. It is not affiliated with or endorsed by Sony,
+Naughty Dog, or the owners of *Crash Bandicoot*.
 
-This repository is a working, tested Rust/Wasm compatibility foundation, but it is **not yet a
-retail-equivalent game runtime**. Disc extraction, all 44 stream pairs, checked NSD/NSF parsing,
-the cooperative 30 Hz scheduler, mounted retail title/menu/options/password/load/map object flows,
-direct boot, local persistence, input, WebGL2, WebAudio, and substantial native engine subsystems
-are implemented. The browser does not advance synthetic title or gameplay flow when authored
-retail objects are unavailable. The live browser host retains and remounts each validated
-destination stream pair, decodes retail LDAT loading
-images, composes image-backed retail title states from MDAT/IPAL/IMAG entries, and drives the
-renderer command backend. Title presentation preserves the source type-zero MDAT category mask,
-latches display/animate through the source `GOOL → TitleUpdate → TitleLoadState → GLUpdate`
-transaction and draws the native 16-level nonlinear black overlay. `RetailRuntime` owns that
-transition; `RetailFlowMirror` is a passive screen mirror and cannot advance a second fade clock. The default 4:3
-output is authored-scene only: until mounted retail objects produce a scene, it
-shows a loading/error diagnostic with no synthetic menu, password/options UI, or gameplay geometry.
-For the 40 world-bearing playable starts, gameplay presents bounds-checked
-ZDAT/SLST/WGEO path snapshots with decoded TPAG textures and retail camera/depth math. The
-loading-image path follows the observed two-tick presentation gate and uses the first presented
-path point and texture-animation count; N. Sanity Beach resolves to 679 visible polygons at that
-boundary. After that gate, `RetailCameraRuntime` owns the exact zone, path and signed-8.8 progress
-used to rebuild SLST visibility, camera projection and animated texture selection. Source-derived
-automatic modes 0/1/3, tapped transition skipping and path/zone crossings are live. Modes 5/6 feed
-the hosted main object's typed transform, camera zoom, held pad and frame stamp into the checked
-`CamFollow` projection/neighbor/smoothing path whenever that object is available. Its gem-path
-neighbor gate reads the live authored `gem_stamp` global and retains the source
-`frames_elapsed - gem_stamp <= 15` window.
-On the island-map title state, WGEO item three is parsed with its unusual serialized
-`len + type-as-record-zero` layout. The renderer carries the active path group across worlds and
-applies globals 73/75 as non-mutating per-frame animation-mask overrides, matching
-`GfxAnimMapPaths` without writing into user-supplied stream bytes. The last effective masks persist
-through the map's fade-out, matching the native resident-WGEO write lifetime. Camera modes
-seven/eight consume the authored island globals with their distinct source ordering: mode seven
-publishes its next state before `LevelUpdate`, while mode eight publishes after the synchronous
-`LevelUpdate`/TERM boundary. Both complete before the following GOOL traversal, so the normal Main
-Menu → Map → N. Sanity Cross route emits and mounts retail level `0x09` rather than stopping at a
-host boundary.
+> **License status:** This is source-available research code, not open-source software. Public
+> access does not grant permission to reuse or redistribute the project. Read
+> [LICENSE.md](LICENSE.md) and [RIGHTS_AND_LICENSES.md](RIGHTS_AND_LICENSES.md) before using the
+> source.
 
-The strongest current legally local native campaign proof is
-`authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry`. It starts at the
-retail publisher/title opening, preserves process state and physical pad history across authored
-mounts, follows the ordinary main-map campaign through every gameplay, boss, Level Complete and
-island-map phase, including its Great Gate/Bonus 2 round trip, defeats Dr. Neo Cortex, executes
-Ending, and remounts Title without a process reset. The reconciled exact run passes through the
-formerly phase-sensitive Sunset Vista, Castle Machinery, The Lab and
-Great Hall mounts. Its exact carried Lost City leg reaches the authored exit on frame 6,643 with
-zero restarts, LoadState effects, death-camera frames, terminal falls, VM faults, or checked runtime
-issues. This is the native integration proof over user-supplied streams; the independent current
-browser proof is recorded immediately below.
+## What works
 
-The strongest completed Chrome-compatible browser campaign now runs against the current tree and
-owned raw BIN. It recognized all 88 streams and 44/44 pairs, consumed the unique exact 89-phase
-Title-to-Title route's 146,501 replay frames plus two declared transition-settle frames, and
-finished with current/mounted Title LID `0x19`, draw/process count 134,970, and RNG-A
-`0xec6e8edc`. It skipped no replay frame and reported no checkpoint, runtime, GOOL, zone, spawn,
-console, network, or WebGL failure. Its three hard-restart calls and two LoadState effects are all
-source-authored: one Jungle Rollers terminal fall contributes a same-level load/restart, while The
-Great Gate's Tawna-bonus return contributes the different-stream load/restart and protected parent
-restart. The same proof produced a per-source-frame, silent 30 fps H.264 recording at the default
-4:3/native/100% presentation, an 89-entry chapter list, and short clips for every boss and Ending;
-all generated media remains ignored. The earlier 141,776-frame campaign remains historical
-comparison evidence. Stormy Ascent separately completes from direct boot in Chrome: all 9,334
-captured frames match through its Level Complete mount with no recovery or failed checkpoint.
-Retail's natural key routes unlock Whole Hog and Fumbling in the Dark, not Stormy. Each key and its
-authored map branch has an earlier documented fresh-storage browser proof; joining both branches
-into one uninterrupted empty-card campaign remains an explicit parity gate.
+The current browser runtime can:
 
-The browser now owns a checked retail object runtime for title, gameplay, bonus, boss, level-
-complete, intro and ending states.
-At the cooperative 30 Hz boundary it scans displayed current-zone neighbors, spawns group-three
-ZDAT entities into the bounded arena, binds their GOOL programs from the mounted NSF, applies hosted
-child-spawn effects, and preserves typed arena/VM links. Entity objects now receive their
-zone-relative path position, rotation/mode flags, scale, process defaults, player/object color
-matrix and typed parent/player links; runtime children inherit their parent's transform.
-Every gameplay, boss, bonus, and map mount also creates the native executable-four life, fruit,
-and pickup HUD roots before the first zone scan and publishes their checked tagged references to
-the exact GOOL globals used by pickups, saves, and bonus routing. Title, level-complete, intro, and
-ending mounts retain the source's no-HUD branch. Before those roots run, initial and destination
-mounts perform the source `CoreObjectsCreate` pad-history shift; an armed attract recording forces
-the new held/tapped words to zero while retaining prior history. The mount then runs the
-object-creating half of
-`LevelInitMisc(1)`: its six applicable levels receive the native root-four controller, including
-Ripper Roo's executable-39/subtype-four controller and checked `ambiance_obj` global-eight link.
-Every authored `CoreFrame` stream change also arms the native two-draw presentation skip. A decoded
-loading image remains visible during the first hidden destination tick; an image-less destination
-such as Level Complete remains blank for that tick instead of presenting its gameplay scene early.
-State changes rebind at the synchronous host boundary: a captured once block runs before the state
-stamp, then the target transition block runs after it, including nested calls and hosted spawns;
-normal updates continue into newly bound state code in that same native update. Initial/call frames
-share the bounded
-process word array at `init_sp`, state links apply target-state guards, and checked failures
-quarantine only the affected object. GOOL `0x8b` open cases one/six, close case two, and probe case
-three cross a typed synchronous pager boundary; cases four/five remain VM-local. An unavailable
-physical open rolls back its optimistic VM reference. A flag-zero open that cannot acquire ordinary
-RAM instead retains a referenced state-two virtual request; the 30 Hz `NSUpdate` boundary promotes
-the lowest queued page when a slot becomes replaceable, and a final close cancels an unpromoted
-request. A successful promotion remains translated at reference count zero, and a texture transfer
-reports both its ordinary-RAM and texture-slot evictions when both occur. Resolved copied
-texture/audio PTEs retain their counts and return zero for `NSClose(ref, 1)`, while count-zero probes
-still return one. The VM re-arms every displaced page and rejects mismatched EID/page
-acknowledgements. The heap-derived ordinary-page capacity remains authoritative after mount—20
-slots for Title, 21 for Intro, and 22 elsewhere—so later object/state metadata cannot silently
-raise it. Count-zero program materialization atomically resolves the requested PTE, clears any
-queued marker without changing its reference count, and invalidates every zero-reference victim.
-Checked aligned code/storage/entry/entity tags,
-five-word pad history, camera-relative movement, gravity, rotation, every source selector in the
-`0x85` transform-vector and `0x8e` solid/color families, and `SZON`'s reverse current-header
-neighbor search are implemented without native pointers or C undefined behavior. Misc 12/7 also
-performs the distinct forward current-header neighbor TERM sweep through the typed object host.
-Entity tags resolve through a machine-owned validated path table and survive ordinary GOOL copies;
-Ripper Roo's runtime-created Big TNTs therefore retain each authored waterfall controller's path
-after copying register 44 from their parent. RooOC's state-two transition also writes the live
-post-fetch program counter into `process.tp`, so each controller creates one child and resumes after
-the spawn prefix on later draws instead of filling the object pool with duplicate TNTs.
-GOOL `0x14` (LEA) preserves input-before-output address translation and represents process-local
-animations as checked storage identities. Descriptors in internal or register storage are
-revalidated from the live aliased words: type one supplies its model to both bounds and vertex
-rendering, types two/four/five use the sprite, text, and fragment paths, and type three remains a
-resource-only no-draw selection. Type zero and unknown type bytes follow the native switch default
-with no draw and the standard non-vertex collision bound, including Toxic Waste's observed `BaraC`
-case. Immediate aliases follow the source's shared two-word rotating constant buffer, including
-later input/output-cursor overwrites. Linked aliases carry a physical object-pool slot, remain
-readable through retained free-slot words, and retarget only when that exact native slot is reused.
-External-state-table aliases and unbound logical foreign-object aliases remain checked failures
-because accepting either would silently retarget a native pointer. The retail direct-LEA census
-contains 30 internal sources and one frame-relative source; no authored animation LEA currently
-selects external, immediate, or linked storage. Opcode `0x81` retains the native interpreter's
-intentional one-cycle no-op behavior.
-`GoolObjectColors` now delivers Crash's category-`0x300` invincibility-hit event `0x0a00`
-synchronously before the same object's physics, so authored enemy handlers can change that frame's
-motion or state. The source's `argc=1`/null-argument quirk is represented by one checked zero word
-instead of dereferencing null; sender/recipient generations are validated, the hosted path emits no
-duplicate queued event, and ignored native handler failures remain available as typed diagnostics.
-The WebGL stage transactionally replaces the camera/path scene while reusing shared
-immutable texture allocations. Parsed item-five animation descriptors now resolve pair-scoped
-TGEO plus 3D SVTX/CVTX frames, type-two sprites, type-five fragments and type-four text through its
-header-length-bounded type-three font resources, including the extended controller-icon records
-that retail pointer-indexes beyond its 63-slot C declaration. Each object's post-update,
-pre-child display boundary appends an owned ordered record, so later teardown or reparenting cannot
-retract already displayed state. A frame-start pager snapshot supplies world/filter membership,
-while each record replays its live `(EID, generation, page)` texture map before fixed-point
-projection, lighting/color modulation, and ordering through the shared resident TPAG cache;
-the status-B 2D CVTX path uses the shared retail sprite matrix. Sprite and fragment half-size math
-uses the MIPS variable-shift low five bits and explicit signed 32-bit wrapping before the checked
-GTE validity gate; focused arithmetic goldens cover raw counts beyond 31 without turning a
-saturating/cullable sprite into a runtime failure. The legal `pb0cB` trace separately pins two
-successive `FruiC` physical generations that reuse one compact VM slot, their exact authored scale
-sequence, and reclamation after the second child. Eligible
-animation bounds follow the native Crash-stamp schedule. Same-stamp objects register their
-transformed frame bound before GOOL and physics and execute the same-stamp Crash
-collision-link/hotspot tail; objects visited before Crash register after physics when they remain
-inside the exact `±0x7d000/±0xaf000/±0x7d000` box. Opcodes `0x83` and `0x84` synchronously refresh
-only the persistent local bound at their source call site.
-The mover's current collider is retained as a validated snapshot of the live link-six object's
-translation, status, state flags, object type, and hotspot size, independent of whether that object
-is present in the current bounded frame-candidate slice. Synchronous collision handlers can replace
-the link, after which the remaining native solid phases re-resolve the new live object. Hotspot
-insets also preserve their raw source endpoint order: a large inset may invert an axis, and the
-following direct face comparisons do not normalize it. This exact case previously stopped Rolling
-Stones; its legally local active-input regression now completes 1,800 clean simulation frames.
-WGEO zones with graphics flag `0x100` now apply the source ripple transform to effect-marked world
-vertices before the ordinary world matrix. The independent 16-cell signed wave uses the native
-seed, advance, wrap, absolute-value conversion, and level-specific speed/period table. Pair-scoped
-wave state advances only for an unpaused submission containing visible ripple-world polygons.
-Pause or a world-hidden/empty submission freezes it independently of texture animation; a later
-draw-skip presentation gate still performs the source transform and advances the wave.
-World graphics now also execute the complete source-priority `Dark2 > Dark > Fog > Ripple >
-Lightning > Plain` dispatch. The process-lifetime `ShaderParamsUpdate` state covers every fixed,
-random, ruins, boss and thunder sequence; combined Dark applies lightning before its non-backdrop-
-exempt fog pass, and Dark2 follows the live doctor/Crash illumination point plus torch distance and
-ambient ramps. Native `far_color1` scratch persists across stream mounts, including Dark2's
-intentional reuse, and hidden draw-skip frames still transform worlds before presentation. The
-doctor global and pointer-shaped process words retain physical pool-slot identity beside their raw
-32-bit tags. Before a retail object is reclaimed, the VM captures provenance for existing process
-links, registers, stack words, and internal/external MOV storage instead of nulling inbound links.
-Linked register reads and writes address the live occupant when the slot is allocated and its
-retained process storage while the slot is free; reusing that same physical slot retargets the old
-pointer, while compact-handle reuse elsewhere does not. The 96 ordinary slots follow the native
-free-list parent/sibling mutations and LIFO reuse. The dedicated main slot stays outside that list,
-and pool binding is preflighted before it is committed so a failed association cannot leave a
-partially installed object.
+- read a user-selected NTSC-U disc image or extracted NSD/NSF stream pairs;
+- parse all 44 retail stream pairs;
+- run the title screen, menus, map, ordinary levels, bosses, bonuses, and ending flow;
+- render retail worlds, objects, sprites, text, textures, loading images, and visual effects;
+- execute the retail GOOL object programs in a checked Rust runtime;
+- simulate input, collision, cameras, checkpoints, saves, music, and sound effects; and
+- preserve card and options data in the browser's local storage.
 
-Reallocation seeds the replacement from the slot's retained process words, then applies native's
-selective in-place initialization. Raw `sp`, `pc`, `fp`, `tp`, and `ep` words are reset along with
-the other source-initialized fields; untouched process words keep their previous values. This
-covers Jaws of Darkness's reclaimed `fruit_hud` copy/read and the legal Dr. N. Brio boundary where
-eight live `BoxsC` children retain creator link four after `BriOC` is reclaimed. Event argv,
-mapped-state rebinds, and child-spawn creation arguments carry the same physical-slot provenance;
-copying a pointer through EARG or an owned host request therefore cannot retarget it through compact
-handle reuse. Linked address-taking now uses a separate validated 32-bit physical-pool storage tag:
-it remains readable and writable while a slot is free and retargets only when that exact slot is
-reused. The separately allocated player/main address is non-null from machine initialization,
-persists through Title teardown, and remains outside the ordinary free list. Once initialized, an
-object's six local-bound words now remain in the same physical allocation across kill and reuse;
-never-used `malloc` storage stays explicitly uninitialized instead of inventing bytes. The
-dedicated allocation now carries the source's exact extra 0x100-byte stack tail, preserves only
-tail words actually initialized by execution, and restores those words across Title teardown and
-reuse. Ordinary objects remain bounded by `regs[0x1fc]`, and linked physical-pool storage tags keep
-that source register bound. On the dedicated allocation only, native's existing nine-bit direct
-object GOPs can address the first four tail words (508 through 511); the encoding itself is not
-expanded. The 44-pair legal corpus does not consume the tail: its largest dedicated-main `init_sp`
-is 89 words and the VM's complete 256-word checked stack reach ends at word 345, below the ordinary
-508-word boundary.
-Writes that would corrupt the three allocator-owned link words of an ordinary free slot are
-deliberately rejected instead of reproducing the native C allocator's unsafe malformed-list state.
-The separate zero-initialized RNG-B word is shared in source order by lighting, PBAK choice and
-audio voice stealing. Accepted lightning cues decode one of the local `lt1rA`–`lt3rA` ADIO entries
-and create an ownerless delayed-key voice without copying sample bytes into the repository.
-Static solid geometry follows native `cur_zone` as the camera crosses zones instead of remaining
-bound to Crash's spawn zone; a detached object zone remains typed and supplies only its source
-rectangle/graphics/water fallback, never extra geometry candidates. A previously recorded strict
-18,000-frame state-aware input trace carried the camera and Crash from `e0_9Z` through the complete
-`a0_9Z`–`b7_9Z` authored chain and requested Level Complete `0x2d` at frame 1,995 with no VM error,
-faulted object, death restart, below-zero position, or terminal fall. The current native-schedule
-fresh-boot completion golden also reaches the normal authored end: a legally local 2,100-frame
-invocation follows
-`b5_9Z:p4 → b5_9Z:p1 → b6_9Z:p0`, reaches `b7_9Z`'s `WarpC`, and emits
-`Transition(0x2d)` at frame 1,996. Checkpoint 19 saves at frame 860, the counted-box total reaches
-`0xa00`, and `WarpC` executes states zero through four before the checked `LEVEL_END` resolves the
-Level Complete stream. It records 22 zone transitions with zero restarts, falls, VM errors or
-faulted objects. The former b5/b6 stop came from missing route actions in the test controller at
-authored static cells;
-the later b7 stop came from steering `LEFT` around the live portal lane. Correcting those route
-actions required no camera or collision runtime change. The current interaction order includes
-`PlotObjWalls(flag=1)`'s restored ordered `GoolCollide` calls for overlapping frame bounds.
-`docs/VERIFICATION.md` records the exact invocation and boundaries.
-An opt-in legally local vertical-flow test now keeps the native process session intact across five
-normal-level completions and the next Map choice into Papu Papu. It starts from the ordinary
-publisher/title opening, selects N. Sanity Beach `0x09` on title frame 668, and preserves physical
-pad history at every mount. N. Sanity emits Level Complete `0x2d` on frame 1,996; its 601-frame
-completion and the following 254-frame Title/Map handoff mount Jungle Rollers at draw 3,519. Jungle
-performs its authored terminal fall and exact `LoadState` restart on frame 199, then reaches
-checkpoint entity 46 on frame 1,902 with saved pre-increment box count `0x400` and live count
-`0x500`. It continues through the remaining main-path route and emits `Transition(0x2d)` on frame
-3,384 with live count `0xd00` across 31 zone transitions. That asserted recovery has no death-camera
-frame, VM error, faulted object, or checked issue. Jungle raises the unlocked count to three before
-its checked `LEVEL_END`; its Level Complete screen emits Title on frame 345, and the remounted Map
-takes Up/Cross to select The Great Gate `0x12` on frame 253 at
-`1c_pZ` path zero
-and progress `0x0200`. Current map level three, level count one, three unlocked levels, RNG and draw
-state survive the final checked Map handoff. All seven outgoing `LEVEL_END` broadcasts in this chain
-complete without a checked handler failure. The Great Gate then runs an exact carried retail-pad
-route to completion: it clears the horizontal `a1_iZ`-through-`a9_iZ` opening, crosses the wide pit,
-cycles the `WalOC` logs through their safe phases, and chains the first three arrow-crate bounces.
-Checkpoint crate 76 emits its exact `SaveState` at frame 1,152 with pre-increment box count `0x900`,
-checkpoint translation `[20991488, -8397312, 127744]`, and live count `0xa00`. The route continues
-through `b3_iZ`-`c7_iZ`, clears the snake and later hazards, enters the normal end `WarpC`, and emits
-`Transition(0x2d)` at frame 2,471 with 14 counted boxes (`0xe00`). The terminal boundary retains RNG
-`0x6a219f2c` and draw count 8,396 after 111 successful spawns, 47,371 clean executions, and 38
-lifecycle zone transitions, with no restart, death camera, terminal fall, VM error, faulted object,
-or checked issue. The card-backed Yellow Gem alternate branch passes independently as described
-below; physical box-complete gem evaluation and a browser playthrough remain outside this native
-integration claim. The ordinary completion carry continues
-through Level Complete to Title at frame 225 (RNG `0x2875d290`, draw 8,621), then takes the same Map
-Up/Cross schedule to Boulders `0x0e` at frame 253 on `1c_pZ` path zero/progress `0x0f00` (RNG
-`0x419695fd`, draw 8,874).
+The strongest current browser test follows one exact 89-phase route from Title back to Title. It
+runs 146,501 source frames, reaches Title LID `0x19`, skips no replay frame, and reports no checked
+browser, WebGL, runtime, execution, object, zone, spawn, or post-selection network failure.
 
-Boulders imports that exact carry and reads all 990 34-tick pad frames from the user's legally local
-`pb0eB` PBAK without installing its recording snapshot or committing recording bytes or a derived
-pad trace. The exact prefix moves from `0Q_eZ:0@0` to `0I_eZ:1@3840` across 16 camera paths, 21 path
-changes and 10 lifecycle zone transitions, breaks eight counted boxes, performs 37 successful
-spawns and 20,692 clean executions, and ends at Crash translation
-`[2377472, 7550502, -12157440]`, RNG `0xb4e70e26`, and draw count 9,864. A separate deterministic
-completion route from the same carry uses that local PBAK opening before continuing under
-path/state-relative input. Checkpoint ID `0x3b00` emits `SaveState` at frame 1,277 with translation
-`[2303232, 6860544, -5172480]` and saved pre-increment box count `0xc00`; the live route reaches 15
-counted boxes (`0xf00`) and the normal end `WarpC`, which emits `Transition(0x2d)` at frame 2,210.
-That completion golden records 97 successful spawns, 53,886 clean executions, 26 lifecycle zone
-transitions, 48 observed camera paths and 53 path changes, ending at RNG `0x5def7434` and draw count
-11,084 with no restart, death camera, terminal fall, VM error, faulted object, or checked issue.
-Boulders' checked `LEVEL_END` exports that RNG/draw phase and globals
-`game=0x500, title=15, saved-title=15, map=4, count=1, unlocked=5, island=0` to Level Complete. Its
-screen requests Title `0x19` at frame 105 after two successful spawns, 210 attempts, 208
-source-expected rejections, and 435 clean executions, with no restart, VM fault, or execution error.
-The post-screen runtime has `game=0x300` with the other six globals unchanged, RNG `0x031aa015`, and
-draw count 11,189. After the checked Title handoff, the Map waits 10 frames, follows
-120-idle/Up/120-idle/Cross, and requests Upstream `0x0f` at frame 253 on `1c_pZ` path one/progress
-2,304. Its carry has `game=0, title=15, saved-title=15, map=5, count=1, unlocked=5, island=1`, RNG
-`0xae2dd893`, and draw count 11,442.
+This proves that the tested campaign route works on the current browser build. It does **not**
+prove perfect PlayStation emulation or complete parity for every secret route, demo, damaged save,
+input device, SPU edge case, or CD-drive behavior.
 
-Upstream first feeds all 934 34-tick pad frames from the user's legally local `pb0fB` into the exact
-post-Boulders normal-spawn session, without installing the recording's mid-level snapshot or
-committing recording bytes or a derived pad trace. This prefix is deliberately a carried-session
-stress run, not authentic demo playback; separate browser PBAK coverage installs the recording
-snapshot. Its phase-mismatched input produces deterministic same-level `LoadState` restarts at
-frames 154, 288, and 816. A state-driven controller then releases every Cross interval, boards the
-live entity-23 orbital leaf, crosses the entity-47/46/54 platform chain, and uses fresh Square edges
-every 18 frames to suppress the lethal entity-55 fish contact. It activates authentic BoxsC
-subtype-four entity 57 on frame 1,945: checkpoint `0x3900`, saved pre-increment box count zero,
-saved player translation `[2252800, 2350080, 15564288]`, then live box count `0x100` and native
-spawn flags nine. The controller then crosses the live RivOC leaf/platform sequence through `0q`
-to `0A`, including entities 76/77/82/36/35/34, 96/108/109, and the final 113/112 pair. It breaks
-two more counted boxes and reaches the authored normal-end `Transition(0x2d)` on frame 3,810.
-That complete Upstream leg performs 152 successful spawns from 52,669 attempts with 52,517
-source-expected rejections, 111,418 clean executions, 24 lifecycle zone transitions, 35 camera
-ranges and 40 path changes. It ends on `0A_fZ` path one/progress 8,364 with Crash at
-`[2228980, 6590796, -472772]`, box count `0x400`, RNG `0xc22ac3b6`, and draw count 2,994, with no
-post-prefix restart, death camera, terminal fall, VM fault, execution error, or checked issue.
+For precise coverage and known limits, read:
 
-Upstream's checked `LEVEL_END` exports globals
-`game=0x500, title=15, saved-title=15, map=5, count=1, unlocked=6, island=0`. Its Level Complete
-screen requests Title `0x19` on frame 273 after two successful spawns, 546 attempts, 544 expected
-rejections, and 1,425 clean executions; the resulting RNG is `0x1a612e69` at draw count 3,267.
-After the checked Title handoff, the Map follows 120-idle/Up/120-idle/Cross and selects Papu Papu
-`0x0a` on frame 253 at `1d_pZ` path zero/progress 1,024. Its carry has
-`game=0, title=15, saved-title=15, map=6, count=1, unlocked=6, island=1`, RNG `0x318c2fc6`, and draw
-count 3,520. A state-gated ordinary-pad route completes the carried Papu Papu fight without a
-restart or host-injected event. Crash and ChefC exchange the three authored damage collisions on
-frames 302, 484, and 666; ChefC enters hurt state two on frames 303, 485, and 667, recovers on
-frames 382 and 564, and enters win state three on frame 668. The boss requests Title `0x19` on
-frame 812 after 6 successful spawns, 5,684 attempts, 5,678 expected rejections, and 16,391 clean
-executions. The carry unlocks level seven with RNG `0x3823ffd7` and draw 4,332.
-
-The post-boss Map becomes ready on frame 10, waits for its authored current-node camera gate,
-taps Up on frame 53, waits for the next-node gate, and presses Cross on frame 66 to select Rolling
-Stones `0x15`. Its checked carry has `map=7, unlocked=7, island=1` at draw 4,398. A session-gated
-ordinary-pad continuation now completes carried Rolling Stones and requests Level Complete `0x2d`
-on frame 2,465. It follows the normal `0M_lZ -> 0O_lZ` leg, bypassing alternate `0N_lZ`, enters
-the end `WarpC`, and ends at camera `0O_lZ:0@9424` with Crash in warp state 32 at
-`[2237184, 9256237, -1792768]`. It activates checkpoint `0x0800` on frame 1,159, retains saved box
-count `0x0900`, and advances the live count to `0x0b00`. The route records 117 successful spawns
-from 29,372 attempts with 29,255 source-expected rejections, 55,526 clean executions, 32 lifecycle
-zone transitions, 45 camera ranges and 46 path changes. It has no restart, state-31 squash, death
-camera, terminal fall, VM fault, execution error, or LoadState; RNG is `0xb40bac74` at draw 6,863.
-These are deterministic native integration goldens over user-supplied local data, not browser
-measurements or a full-game parity claim. The completed owned-BIN browser campaign independently
-carries this same segment as part of its Title-to-Title ordinary route.
-
-The exact current and session-carried Rolling Stones normal routes reach the authored end and are
-the active coverage for that level. All three FreshBoot-family characterizations also pass against
-the current scheduler/controller phase: the standalone direct-completion fixture, its short
-Brio-token snapshot, and the longer Rolling Stones → Brio Bonus round trip. These focused proofs
-do not replace the canonical carried route or claim that every parent-specific bonus layout has
-been joined into one uninterrupted browser campaign.
-The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
-CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
-checkpoint snapshot, a TurtC death, the 174-frame death camera, and the same-level checkpoint
-restart. The checkpoint snapshot contains `0x900` before the handler's later live increment to
-`0xa00`. Restart, including `LevelInitMisc(0)`'s reset, completes at frame 1,207; the next trace
-sample observes zero at frame 1,208, and the respawned checkpoint recounts to `0x100` at frame
-1,209. A fixed-34-tick reference-C oracle confirms the early Box7, CrabC and Box12 contact order;
-the Crab gate does not emit the previously observed premature direct event `0x300`. This is a
-focused deterministic route, not broad checkpoint/death certification.
-Hog Wild now also has a complete direct-boot ordinary-pad route. It traverses 67 camera paths,
-activates checkpoints 13 and 30, advances live boxes to `0x700`, observes WarpC states zero through
-four, and requests Level Complete `0x2d` on frame 1,950. The route performs 39 successful spawns
-from 5,857 attempts with 5,818 expected rejections and 24,311 clean executions, with no restart,
-LoadState, fatal-surface state, death camera, terminal fall, VM fault, execution error, or checked
-issue. Its RNG is `0xc3448148` at draw 1,950. A separate strict idle characterization pins the
-authored fall/load-state cadence at frames 178 and 355.
-Whole Hog now has a complete direct-boot ordinary-pad route as well. It traverses 62 camera paths,
-advances live boxes to `0xa00`, observes WarpC states zero through four, and requests Level
-Complete `0x2d` on frame 1,785. The route performs 43 successful spawns from 6,199 attempts with
-6,156 expected rejections and 23,436 clean executions, with no restart, LoadState, fatal-surface
-state, death camera, terminal fall, VM fault, execution error, or checked issue. Its final camera
-is `1M_uZ:0@10239`, Crash reaches `1O_uZ` in warp state 32 at
-`[5310032, 13171424, -31824488]`, and RNG is `0xa49cade2` at draw 1,785.
-Boulder Dash now has a complete fresh-boot ordinary-pad route. It activates both authored
-checkpoints, advances the live box count through `0x700`, survives the complete boulder chase and
-the final `0M` platform chain, then enters `0a_jZ`'s normal WarpC. WarpC executes states zero
-through four and requests Level Complete `0x2d` on frame 3,085. The route covers 71 camera paths,
-70 path changes, and 38 lifecycle/zone transitions with no death, restart, terminal fall,
-LoadState, VM fault, faulted object, or execution error. Its final camera is
-`0a_jZ:0@20479`, and Crash remains live in warp state 32 at
-`[2242624, 4753692, 32124160]`.
-Jungle Rollers now has a complete fresh-boot ordinary-pad route that includes the reported failure
-case. Holding Up produces the authored opening terminal fall on frame 190 and its sole LoadState
-restart on frame 200. The respawned Crash breaks the first Aku crate on frames 269–270, observes
-the surviving DoctC mask in collected/following state one, then rejoins the normal path. Checkpoint
-46 saves on frame 1,904, the live box count reaches `0xc00`, and `0O_cZ`'s WarpC executes states
-zero through four before requesting Level Complete `0x2d` on frame 3,391. The final camera is
-`0O_cZ:0@17836`, Crash remains live in state 32 at `[2193152, 7732275, -2147072]`, and RNG is
-`0x085c5705` at draw 3,191. The run has no unexpected spawn error, execution error, faulted object,
-or checked issue, and `LEVEL_END` resolves cleanly to Level Complete.
-Native Fortress now has one authoritative ordinary-pad route from the opening grease platforms
-through `a7_qZ`/`a8_qZ`, the rotating-log banks, both plant hazards, and the `c0`–`c5` launcher
-sequence. Its clean `c6_qZ` checkpoint is frame 2,548; the same uninterrupted controller crosses
-the `c7`/`c8` wall sequence, activates checkpoint entity 148 on frame 3,421, clears `d4`/`d5`,
-waits for and jumps the moving `d6` wall, crosses the paired `d7` launchers, breaks the obstructing
-`d8` crate, activates the next checkpoint on frame 4,482, clears the `d9` monk, waits for and jumps
-the second moving wall, and reaches `e0_qZ` on frame 4,620. It then crosses every remaining
-launcher and flame cycle, climbs `e7_qZ`'s five alternating stationary ledges and rotating logs,
-and brakes through the `e9`/`f0` three-arrow chain into `f1_qZ`'s normal WarpC. WarpC requests
-Level Complete `0x2d` on frame 6,165. The complete route performs 317 successful spawns, 64
-lifecycle/zone transitions, 153,251 executions, and 680 solid effects across 60 camera ranges and
-75 path changes. Crash finishes live in state 32 at `[1579260, 6596940, 167936]`, with final
-camera `f1_qZ:0@17919` and RNG `0x48320b2c`. It has no restart, death camera, terminal fall,
-LoadState, VM fault, faulted object, execution error, or checked issue. A browser-driven completion
-remains unproved.
-
-The Great Gate also has a complete card-backed Yellow Gem route from the owned raw BIN. It restores
-the exact retail payload and entitlement bit, crosses the phase-sensitive `c4`/`c5` logs, rides
-both `GemsC` platforms, activates and boards both `c8_iZ` wall logs, and traverses `c9_iZ`. The
-authored WarpC requests Level Complete `0x2d` on frame 3,209 with Crash in state 32 at
-`[3483392, -4780690, 132864]`. The route has no death, restart, terminal fall, VM fault, faulted
-object, execution error, or checked issue.
-
-The exact publisher-derived normal-route phase also passes. Its first frame is pinned at draw 6,693,
-RNG-A `0x39d97bb8`, RNG-B `0x9010ea53`, and 30 executions. The route activates checkpoint 76 and
-reaches Level Complete without a restart, death-camera frame, terminal fall, or checked runtime issue.
-
-Temple Ruins now has complete fresh and uninterrupted carried ordinary-pad routes. The fresh route
-requests Level Complete `0x2d` on frame 4,473 after 150,683 executions. The current carried route
-reaches the same authored handoff on frame 4,531 after 190 successful spawns, 156,484 executions,
-33 lifecycle transitions, 60 camera ranges, and 59 path changes. Neither route records a death,
-restart, terminal fall, VM fault,
-faulted object, execution error, or checked runtime issue. Road to Nowhere has matching fresh and
-uninterrupted carried no-death routes: both follow the authored outside rope lanes across every
-collapsing span and request Level Complete `0x2d` from WarpC on frame 2,449 without a restart or
-load-state effect. The High Road has its own clean ordinary-pad route: it follows the authored right
-rope, centers across the `b2_mZ` seam and again on the `d0_mZ` end island, then drives WarpC states
-zero through four and requests Level Complete `0x2d` on frame 2,274 without consuming a life.
-
-Cortex Power now has a complete fresh direct-boot ordinary-pad golden. It crosses 21 zone
-transitions, emits one authored save-state, drives WarpC through states zero to four, and requests
-Level Complete `0x2d` on frame 2,199. The route has no death, restart, terminal fall, VM-faulted
-object, unexpected spawn error, execution error, or checked issue. Bonus-path coverage and a
-browser-driven completion remain unproved.
-
-Generator Room's direct, exact post-Cortex, and actual post-Cortex completion routes pass. Its
-three-Tawna-token route also traverses Bonus `0x24`, preserves the exact parent snapshot through the
-authored `LoadState`/`-2` return, performs the protected frame-zero parent restart, and then reaches
-the normal Level Complete warp without a death-camera frame or terminal fall.
-
-Up the Creek now has a complete normal-route direct-boot ordinary-pad golden. It activates
-checkpoint entity 76 on frame 1,245, preserving saved box count `0x400` before the live count
-advances, then traverses the complete authored `RivOC` chain through `0F_oZ` platforms 12 and 11.
-The final running jump enters `0G_oZ`'s authored `WarpC`; states zero through four execute and
-request Level Complete `0x2d` on frame 4,183. The route performs 196 successful spawns from 64,662
-attempts and 123,277 clean executions across 38 lifecycle transitions, 53 camera ranges and 60 path
-changes, with no restart, LoadState, death camera, terminal fall, VM fault, faulted object,
-execution error, or checked issue. Bonus-path coverage and a browser-driven completion remain
-separate gaps.
-A separate carried-session golden starts from the authored island-two map, selects Up the Creek,
-completes it on gameplay frame 4,319, crosses the 185-frame Level Complete graph, and uses ordinary
-Up/Cross input to select and complete Ripper Roo (`0x17`) before selecting The Lost City (`0x20`).
-The exact primary/secondary RNG state, draw count, 128-byte card data, and tracked map globals remain
-preserved across every `LEVEL_END` handoff.
-
-A distinct current-tree, owned-BIN-derived native carry starts Native Fortress at draw 22,829 and
-reaches its authored Level Complete request on frame 6,737 after 323 spawns, 166,471 executions,
-66 zone transitions, and no recovery. The current native Level Complete graph takes 432 frames;
-the following Map, Up the Creek, its completion graph, Ripper Roo, and another Map handoff mount
-The Lost City at draw 37,314. That exact inherited route reaches Level Complete on frame 6,912
-after 192 spawns, 177,333 executions, and 53 zone transitions, with no restart, LoadState, death
-camera, terminal fall, fault, or impossible pad sample. Its 288-frame completion and 253-frame Map
-handoff then mount Temple Ruins cleanly at draw 44,768. This focused current native chain is
-separate from the canonical campaign's frame-6,643 Lost City leg and the dated browser checkpoint
-whose Native completion graph took 384 frames; it proves the Temple mount, not Temple completion.
-
-At an earlier historical checkpoint, a longer uninterrupted campaign-carry regression was a third,
-distinct fixture. Papu Papu returns
-to Title on frame 812 (draw 4,332); Map selects Rolling Stones on frame 66 (draw 4,398); Rolling
-Stones reaches Level Complete on frame 2,465 (draw 6,863); and its 425-frame completion plus
-253-frame Map handoffs lead to Hog Wild. Hog Wild reaches Level Complete on frame 1,949 (draw
-9,490), followed by its 273-frame completion and another 253-frame Map handoff. Native Fortress
-then reaches Level Complete on frame 6,949 (draw 16,965), its completion takes 425 frames, and Map
-selects Up the Creek on frame 253 (draw 17,643). Up the Creek reaches Level Complete on frame 4,346
-(draw 21,989), its completion takes 225 frames, and Map selects Ripper Roo on frame 253 (draw
-22,467). Ripper Roo returns to Title on frame 2,064 (draw 24,531); the final 253-frame Map handoff
-mounts The Lost City at draw 24,785. Its carried route then requests the authored direct Title
-transition `0x19` on frame 7,445 after 397 successful spawns, 222,312 executions, and 58 zone
-transitions. Six deterministic recovery restarts occur on frames
-296/580/925/1,238/1,518/5,835; checkpoint `0x8000` activates on frame 5,681, and Crash reaches
-`h5_wZ` alive in state 32 at `[1220336, 650576, 200064]`. The terminal carry has globals
-`[0x300,15,15,12,1,13,0]`, primary/secondary RNG `0xba042128`/`0xc889af19`, and draw 1,610.
-Title Map becomes ready on frame 10 at `2a_pZ:1@0x0700`; the usual
-120-idle/Up/120-idle/Cross sequence selects Temple Ruins on frame 253 at
-`2d_pZ:0@0x0900`, RNG `0xa5a69d6c`, and draw 1,863. Temple Ruins imports that exact session and
-completes its authored route on frame 5,041, requesting Level Complete `0x2d` with 190 successful
-spawns, 168,087 executions, 33 lifecycle transitions, 60 camera ranges, and 59 path changes. Crash
-finishes alive in state 32 at `[15683008, 4742989, 5396480]`; globals are
-`[0x500,15,15,13,1,14,0]`, primary/secondary RNG is
-`0x0cfc7096`/`0x654cb6a6`, and draw is 6,904. Temple has no death, restart, below-zero or terminal
-fall, VM fault, faulted object, execution error, or checked runtime issue. Every earlier completed
-gameplay leg through Ripper Roo records zero restarts; Lost City's six recoveries are asserted
-separately. Temple's carried Level Complete graph requests Title on frame 633 at draw 7,537. The
-next authored Map reaches Road to Nowhere on frame 253 at draw 7,790, and Road completes on frame
-2,449 after 193 successful spawns, 71,778 executions, 26 lifecycle transitions, 50 camera ranges,
-and 49 path changes. It activates both checkpoints and reaches `c7_kZ`'s WarpC with zero deaths,
-restarts, load-state effects, faults, or checked issues. Terminal globals are
-`[0x500,15,15,14,1,15,0]`, RNG is `0xa2cc489a`/`0x654cb6a6`, and draw is 10,239. This is
-deterministic native-engine characterization, not a browser playthrough.
-
-The canonical fixture now passes from the publisher/title opening through every main-map level and
-boss, Great Hall, Cortex, Ending, and the final Title remount. The verified run crosses the former
-Sunset Vista late-c3/c4 failure, retains the actual current Castle Machinery and Lab phases, and
-observes Heavy Machinery's mandatory shaft speed cap on frame 1,599 followed by its grounded landing
-two cooperative ticks later. The historical PBAK-assisted Boulders chain, including its Upstream
-and Lost City sections, and Lost City's six-restart route remain characterization rather than the
-current canonical leg.
-The current canonical Lost City controller reaches its authored exit on frame 6,643 with zero
-restarts; a zero-recovery browser playthrough remains a separate parity gate.
-
-Several GOOL host operations, pixel-level rendering edge cases, later same-level restart cases,
-and uncharacterized
-mechanical-CD seek, error and retry edges remain incomplete. Stream-backed paging now validates each
-page's one-to-thirty-two-sector NSD span, reserves a source-contiguous physical run transactionally,
-shares the characterized ten-frame setup, advances five sectors per 30 Hz frame, and publishes or
-cancels each member progressively. The legally local PCSX-Redux oracle publishes Native Fortress
-pages 23 and 24 on ticks 15 and 21, matching the Rust pager. Source-ordered zone lifetime,
-save/restart, event and audio calls, display-mask latching and local ADIO SFX are now connected.
-Zone graphics now select local
-retail MIDI/INST data; checked VAB/SEP decoding feeds the Rust software synth with 30-tick zone
-fades, the native all-bus master fade and GOOL-controlled alternate tracks. Sampled VAB voices
-apply the two retail ADSR register words through an exact fixed-point 44.1 kHz attack, decay,
-sustain, and release generator before mixing. Sony SEQ NRPN 20/data-entry/NRPN 30 regions repeat
-from their checked event boundary without resetting live voices or channel controls; repeat counts
-zero through 126 and the source's indefinite value 127 are modeled. Every stream mount also applies
-retail's level- and volume-specific MIDI/SFX slot boundary and resets the all-bus fade to full
-scale. Authored
-`next_lid`
-writes now run the eight-root postorder `LEVEL_END` phase, carry process-lifetime state into a
-fresh destination runtime, and restore bonus returns from the saved zone/path/progress.
-Normal bonus entry retains that parent snapshot. Fresh direct bonus boot alone seeds a one-shot
-same-level restart snapshot because all five bonus spawn zones are save-restricted. When WillC's
-authored state-32 WARP loads that exact synthetic same-level snapshot, the host consumes it and
-returns to Title's Main Menu instead of remounting the completed bonus; real parent-carried returns
-remain unchanged. An owned-BIN Chrome audit joins at the separately proven parsed state-32 boundary
-and exercises the production state binder, CardC ceremony, `LoadState`, classifier, `LEVEL_END`,
-and asynchronous Title mount. It is downstream browser-path evidence, not a claim that automation
-physically traversed the portal. A legally local controlled regression drives all three authentic
-Jungle Rollers Tawna
-crate descriptors from their authored player `HIT 0x0300` boundary through `BoxsC` → `FruiC` →
-`DispC`. Only token three performs `SaveState`, before its counter increment; the HUD then sends
-completion `0x2700`, resets the master fade, sends status `0x0f00 [0x500]`, emits destination
-`0x24`, and `finish_level_transition` carries the saved `0x0c` snapshot into Tawna Bonus. A
-retail-executable oracle also fixes a historical C transcription error at this boundary: a
-screen-space `DispC` caller keeps Crash's live translation instead of replacing it with HUD
-coordinates, while a world-space caller may override it and a checkpoint remains final. A
-separate parsed WarpC/WillC regression covers the transition's exact proximity/status gate and its
-direct `0x1600 [0]` handoff into WillC state 32. The downstream cross-stream characterization runs the
-real WarpC/CardC confirmation path, observes `LoadState` on frame 301, resolves `-2` back to Jungle
-Rollers, and reproduces the protected parent remount while checking Crash's transform, camera
-path/progress, box count, and all 304 spawn words. These deterministic boundaries do not
-substitute for a browser full-playthrough. Current legally local ordinary-pad routes physically
-join the parent, token, bonus, portal, `LoadState`, and return boundaries for representative Tawna,
-second-Tawna, and Cortex layouts. The Rolling Stones/Brio FreshBoot round trip now passes against
-the current scheduler/controller phase; other parent-specific layouts remain to be certified.
-Follow and automatic camera movement now calls `LevelUpdate` after every successful same-path or
-crossing movement, in source order after the applicable shared game-state write. Every
-`LevelUpdate` also republishes the destination zone's graphics flags in GOOL
-global 30 before spawning or execution. This restores the authored `0x2000` bonus WARP branch
-instead of falling through to the ordinary Title transition. WebAudio
-receives mounted ADIO SFX and retail music synthesis only; the former procedural sine-wave SFX
-fallback has been removed. The native 3,592-halfword encountered-object registry is retained
-separately from each mount's fresh 304-word
-active spawn table. Exact `LevelResetGlobals(1)` and `CardRestorePayload` ordering preserves the
-active table and savestate while resetting the documented scalar globals and encounter registry.
-Retail object shader modes two and three, including their source depth rejection/ramp behavior,
-are live; zone-graphics flag `0x1000` substitutes the fixed Q24.8 bobbing camera and pitch for GOOL
-objects only. Simulation and rendering share its exact matrix and carry its `frames_elapsed` clock
-separately from texture `draw_count` across hidden frames. Mode four is also live: the simulation
-advances the Lights Out/Fumbling
-`dark_dist` ramp before camera work, retains its renderer-BSS words across stream remounts, and
-captures the checked player reference at each object's source-order display boundary. A checked
-pause-object reference is preferred when one exists. For all three modes, the native display gate
-runs after that object's update and before child traversal, writes the derived colors into the live
-GOOL object, and preserves the same effective colors in its render snapshot. Status-B `0x100000`
-then restores the live VM colors from the object/player zone while leaving that snapshot intact;
-root objects without an attached zone fall back to the current ZDAT exactly like native.
-The gate also honors the main-object, display-mask `0x10000`, status-B `0x400`, near-plane/
-`0x40000`, and CVTX-only `0x200` conditions. A legally local all-pair regression exercised 1,800
-mode-four vertex displays and 2,880 primitives, including 540 changed color results verified in
-both the render snapshots and live VM. START now runs the native gate against the
-prior Crash pad snapshot, creates executable-four/subtype-four beneath root seven, publishes the
-tagged pause reference, and resumes through event `0xC00` with the saved GOOL clock restored.
-Paused frames continue spawn, object traversal, display latching, scene presentation and audio;
-ordinary GOOL, camera/shader motion and draw-count advancement remain frozen while the exact
-subtype-four/seven menu override executes. The authored pause panel is a type-five `WillT`
-fragment animation, not font text: its five pieces render as `PAUSED / PUSH SELECT FOR MAP` and
-follow the retail 15-frame visible/15-frame hidden blink cycle. A legally local renderer regression
-and an on-cycle WebGL browser capture cover that path.
-Bounds-checked type-19 PBAK parsing and browser playback restore the recorded camera/player
-snapshot, spawn table, RNG, timing, bounds and full 32-bit pad words. All nine local recordings
-(10,966 Crash pad boundaries) pass complete live runtime/render traces, including same-level death
-restart handling, display-mask camera suppression, zone TERM/lifecycle commits, and camera save
-handshakes. `PbakChoose` counts NSD type-19 names, consumes the shared RNG-B stream even for one
-recording, generates the retail `pb0?B` EID, and suppresses drawing while armed; its nine legal
-choices end at the characterized seed `0xaf5aad71`. Recorded absolute ticks are published from the
-new current frame after Crash's pad boundary, while the start and terminal frames retain their
-source wall-clock/state gates. The checked caption controller now survives
-the demo restart beneath logical root one; a live caption reference dispatches its checked event
-`0xE00`, while a null caption releases physical input without inventing a title transition. This
-matches the shipped `PadUpdatePbak` load from global 76; the historical C reconstruction's
-island-camera label for that condition is contradicted by the retail instruction stream.
-Playback advances at Crash's actual root-six traversal boundary: root-one caption work runs first,
-the completion event and input-lock rebind are synchronous, and Crash plus later roots observe the
-new pad/controller state in that same frame. Caption objects retain their intentional null lifecycle
-zone; spawned caption children consult the current camera ZDAT only for the environment/colors that
-native `GoolObjectCreate` obtains through `cur_zone`.
-Parsed retail objects that execute `RETURN` through their initial frame now produce the native
-invalid-return lifecycle signal. Preorder traversal reclaims that subtree immediately, without a
-TERM event and before display or child traversal, while retaining the source protection for the
-dedicated main object outside Title. This fixes the Ending credits-object leak that previously
-filled all 97 arena slots at frame 1,437. The legally local completion regression now runs the
-authored credits sequence through 113 credits-child spawns, peaks at 82 live objects while reusing
-returned slots through generation three, and requests Title `0x19` on frame 3,396 without a VM
-fault. Its checked `LEVEL_END` exports a clean session carry that a fresh Title runtime imports
-with the exact draw phase. `GAME_STATE` remains `0x600` both immediately before Ending's
-`LEVEL_END` and on the freshly mounted frame-zero Title carry; Title clears it on its first
-authored tick. Ending's authored ID-one main entity also takes the dedicated native
-`crash` slot and now writes its initial restart snapshot exactly like executable-zero Crash, rather
-than retaining a stale snapshot from the preceding stream. The subsequent browser graph remount is
-not part of that native golden.
-A separate completed-card vertical flow now starts from the authored Title map, selects The Great
-Hall, completes its WarpC route with ordinary Up/Cross input, returns through Title, selects and
-defeats Dr. Neo Cortex, mounts the complete Ending credits, and returns to Title again. Timed page
-25 publication moves Great Hall's two Cross windows forward by fourteen frames; it now requests
-Title on frame 216 with no restart or fault. Cortex's ordinary-pad controller now survives the
-complete authored barrage, reflects all five damaging cores on frames 266, 618, 2,786, 3,229, and
-3,378, receives the victory event on frame 3,567, and requests Ending on frame 3,612. Ending then
-requests Title on frame 3,396. The regression pins the card payload at load, selected globals and
-restart snapshots around the Title/Cortex boundary, and the Ending-to-Title draw phase.
-
-A distinct all-gems Great Hall regression restores exactly 26 gems and two keys, selects Great Hall
-from Title on frame 131, executes the authored `WinGC` epilogue and dynamic text, and requests Title
-on frame 6,950. Crash remains live in state 33 at `[8280332, 1031159, 24864256]`; the route has no
-restart, LoadState, death camera, terminal fall, fault, or execution error.
-
-The current strict direction/button survey runs all 43 bootable pairs for 5,400
-browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
-Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
-The `crust-sim` library enumerates 662 tests; the locked all-target workspace inventory has 1,099
-default-active tests plus 260 ignored-by-default legally local tests (1,359 total).
-The current-fixture split sweep passes all 250 selected legally-local entries serially, and its
-isolated replay exporter passes separately. Nine explicitly historical fixtures remain opt-in and
-are not part of that green result, so this is not a claim that every one of the 260 ignored entries
-passes when all legacy flags are enabled. Native warnings-denied Clippy, optimized native release,
-warnings-denied Wasm Clippy, and optimized Wasm build gates pass.
-
-A 2026-08-13 VPS browser-harness smoke mounted the owned 632 MB raw BIN in Chrome 151, recognized
-all 44 pairs, and executed 360/360 cooperative N. Sanity frames. It mounted 80 pages/231 entries,
-recorded 7,454 retail executions, and reported zero skipped callbacks, console, WebGL, runtime,
-execution, object, zone, network, restart, LoadState, or death-camera failures. The current-source
-production and browser-harness manifests both verify against source fingerprint `925cf4d63f99...`.
-This is a bounded browser-artifact smoke, not a full campaign replay, physical-input certification,
-or reference-console comparison.
-
-Separate legally local native-emulator oracles now cover the complete normally accessible U.S.
-retail campaign. PCSX-RR replayed a published 163,770-frame any% PXM through all 31 ordinary/boss
-nodes, Cortex, the authored ending, and the return to Title. PSXjin 2.0.2 replayed a published
-264,988-frame 100% PJM through Whole Hog, Fumbling in the Dark, all 26 gems/two keys, The Great Hall,
-and the alternate ending. Both used the owned U.S. disc and the user-supplied SCPH-5501 firmware on
-this VPS; captures, movies, firmware, and hashes remain ignored. This covers all 33 normally
-accessible retail level/boss nodes, but not removed-from-progression Stormy Ascent or every possible
-bonus/death/alternate-input variant. A local importer validates PXM/PJM pad streams and can splice
-an aligned movie window after a verified Crust replay prefix. The current N. Sanity comparison
-proves the Crust Title-to-level checkpoint before accepting movie input, stays clean for 302 level
-ticks, then records its first restart/LoadState on tick 303 while the native movie continues. This
-is a localized differential, not yet a retail-engine verdict: the prefix proves Crust's carried
-state, not that every hidden PS1 process value matches, and PCSX-RR's lag/input-poll map has not yet
-been exported successfully under Wine.
-
-An earlier bounded Chrome-compatible browser pass mounted the user's legally local 632 MB raw BIN
-through a loopback-only test bridge, recognized all 88 streams and 44/44 pairs (219 MiB retained
-in the tab), and directly booted N. Sanity Beach. The level rendered with zero WebGL errors at the
-30.00 Hz and produced nonzero synthesized-audio output. Keyboard-code, touch-pointer, and standard
-Gamepad API input reached the live retail pad; pause/resume, mute/unmute, and fullscreen were also
-exercised. At 390x844 the touch surface was visible with no horizontal overflow. A page-hide/reload
-cycle persisted and reopened the version-one 15-slot virtual-card envelope. Earlier foreground
-coverage exercised the publisher screen, main menu, island map, and direct level boot. These remain
-bounded checks, not a full playthrough, physical-controller certification, or retail-parity claim.
-The current completed owned-raw-BIN Chrome campaign joins the real publisher/title sequence, every
-ordinary main-map campaign phase, Dr. Neo Cortex, Ending, and the authored return to Title in one
-Wasm session. It consumes 146,501 replay frames without a skip or synthetic handoff and finishes at
-current/mounted Title LID `0x19`; the older 141,776-frame Chromium result remains historical
-comparison evidence. Neither the current browser campaign nor the native/emulator results certify
-every secret, alternate completion, damaged save, demo, hardware input, SPU, or mechanical-CD edge
-case.
-See [compatibility](docs/COMPATIBILITY.md) for the exact gaps and
-[verification](docs/VERIFICATION.md) for checks actually performed.
+- [Compatibility](docs/COMPATIBILITY.md) — what works and what remains;
+- [Verification record](docs/VERIFICATION.md) — dated test evidence; and
+- [Architecture](docs/ARCHITECTURE.md) — how the runtime is built.
 
 ## Run locally
 
-Requirements are Node.js 22.16.0 (also pinned by `package.json` and CI), Rust 1.97.0 through
-`rustup`, and the matching `wasm-bindgen` CLI:
+You need:
+
+- Node.js `22.16.0`;
+- Rust `1.97.0` with `rustfmt`, `clippy`, and the `wasm32-unknown-unknown` target; and
+- `wasm-bindgen-cli 0.2.126`.
+
+Install the pinned tools, build the browser application, and start the local server:
 
 ```bash
 rustup toolchain install 1.97.0 --profile minimal --component clippy,rustfmt \
@@ -693,137 +59,114 @@ cargo install wasm-bindgen-cli --version 0.2.126 --locked
 npm run dev
 ```
 
-Native tests using `C1_STREAM_DIR` require extracted streams. The extractor validates and stages all
-88 known streams before atomically claiming a new output directory. It never replaces an existing
-output path and publishes every canonical lowercase file with create-new semantics. The claimed
-directory can be visible while publication finishes, so consume it only after the command succeeds.
-If publication fails or the process is interrupted, the extractor deliberately preserves the exact
-claimed output path rather than risk deleting a path another process replaced; inspect it and remove
-it manually before retrying. Ordinary failures remove the private sibling staging directory or
-report that cleanup failure. Any termination that bypasses Rust cleanup—including `SIGKILL`—or a
-power loss can instead leave a sibling named
-`.OUTPUT-NAME.crust-extract-PID-N`; after confirming that PID is no longer running and inspecting
-the path, remove that stale staging directory manually:
+Open <http://127.0.0.1:4174>. Select your own supported `.bin` or `.iso` disc image. You can also
+select matching `.NSD` and `.NSF` files that you extracted from your own disc.
+
+The selected file stays on your device. Your browser gives CRUST local access to it for the current
+session; the file is not sent to a server.
+
+### Extract streams for native tests
+
+Native tests use an extracted stream directory. The output path must not exist before extraction:
 
 ```bash
 cargo run --locked -p crust-formats --bin extract-streams -- \
-  /path/to/disc.bin "$(pwd)/local-data/streams"
+  /path/to/your-disc.bin "$(pwd)/local-data/streams"
 ```
 
-Open <http://127.0.0.1:4174>. Choose either the raw `.bin`/`.iso`, or the `.NSD` and `.NSF`
-files from the disc's S0–S3 directories. The browser reads Blob ranges locally. The content
-security policy blocks cross-origin connections, and no runtime API uploads asset bytes.
-`npm run dev` performs a release Wasm rebuild before serving. `npm run serve` serves an existing
-`dist/` only after its source and artifact fingerprints pass; it refuses stale or modified output.
-The exact identity is available as `window.__crustBuild` and is used to version both generated
-JavaScript and Wasm requests, so an already-cached prototype bundle cannot silently reappear. Web
-builds are staged under ignored `target/` storage and replace `dist/` only after compilation,
-binding generation, and source-stability checks succeed.
-
-The collapsed **Advanced & display** panel keeps retail presentation as the default and
-offers presentation interpolation at the browser's actual refresh cadence, 4:3, 16:9, and 21:9
-presets, a Screen / Auto mode which follows arbitrary browser shapes such as 32:9 or 3:2,
-15/30/45% camera zoom-out presets, native, fixed 720p–2160p, or custom internal drawing buffers,
-and an extended-world mode. Simulation, GOOL, collision, input, audio, and object activation remain
-authoritative at 30 Hz. Extended mode preloads every unique non-backdrop WGEO reachable through the
-level's validated ZDAT graph, then draws ordinary geometry from the current authored zone which can
-affect the selected viewport. This extends visibility and avoids native SLST pop-in inside that
-zone; it does not render an entire mutually exclusive course at once. Backdrop alternatives remain
-selected by the active authored SLST, and a separate bounded presentation texture cache leaves
-native's eight-slot pager untouched. Retail zones can reuse the same world coordinate space, so
-mutually exclusive zones are never drawn simultaneously. Wider modes horizontally overscan only
-the authored 4:3 backdrop so sky continues to cover the new viewport; terrain and objects are not
-stretched. The option does not wake off-screen objects or alter gameplay timing.
-
-The 44 retail pairs are recognized. Cave (`0x04`) is mounted as a shared index/archive but is not
-a boot target; the other 43 pairs are selectable. Partial stream sets containing at least one
-complete pair are accepted. Each cross-level transition now validates and mounts its destination
-pair on demand; a missing destination pauses the simulation with an actionable error instead of
-continuing against stale data. Image-backed title entries are materialized, and retail GOOL
-entry/state graphs can be validated and bound natively. Zone entities and their 304-slot spawn
-flags are instantiated into a checked 96-object arena and run by the live browser at 30 Hz. This
-execution slice supplies the live follow camera and camera-selected WebGL scene and is observable
-through the engineering log/debug counters. Its 3D vertex-object slice is now rendered with the
-camera-selected world; Crash accepts retail pad input and has a clean characterized route from
-`e0_9Z` through `a0_9Z`–`b7_9Z` to the authored Level Complete transition. Save/checkpoint behavior
-now includes the focused N. Sanity enemy/crate/checkpoint/death/restart regression described above,
-but is not yet broadly playthrough-certified, and a
-same-level load nested inside `LEVEL_END` remains a checked resumable-host boundary. A legally
-local scan of all 44 retail pairs found zero authored occurrences of that nested case.
+The extractor validates and stages all 88 known streams before it claims the output directory. Do
+not use the directory until the command succeeds. If the process is interrupted after publication
+starts, inspect and remove the incomplete output before trying again. See
+[Development](docs/DEVELOPMENT.md) for the full recovery procedure.
 
 ## Controls
 
-| PlayStation input | Keyboard | Standard gamepad |
-|---|---:|---:|
-| D-pad | Arrow keys / `W` `A` `S` `D` | D-pad / left stick |
-| Cross / jump | `Z` / `Space` | A / Cross |
-| Square / spin | `X` / main or auxiliary mouse click | X / Square |
-| Circle | `C` | B / Circle |
-| Triangle | `V` | Y / Triangle |
-| L1 / R1 | `[` / `]` | LB / RB |
-| L2 / R2 | `Q` / `E` | LT / RT |
-| L3 / R3 | `K` / `L` | Stick clicks |
-| Start / Select | `Enter` / either `Shift` | Start / Back |
+| PlayStation control | Keyboard |
+| --- | --- |
+| D-pad | Arrow keys or W/A/S/D |
+| Cross | Z or Space |
+| Square | X or mouse button |
+| Circle | C |
+| Triangle | V |
+| L1 / R1 | `[` / `]` |
+| L2 / R2 | Q / E |
+| L3 / R3 | K / L |
+| Start | Enter |
+| Select | Shift |
 
-The complete pad is also available through multi-touch controls on coarse-pointer devices.
-The WASD and Space aliases emit only movement and jump, so they cannot accidentally trigger
-shoulder or Select actions.
-Fullscreen, pause, and mute are in the stage toolbar.
+The default display is the retail-style 4:3 view at native resolution. Wider aspect ratios,
+higher internal resolutions, smooth presentation, and extended-world rendering are optional
+display settings. They do not change the 30 Hz simulation.
 
-## Development
+## Develop and test
+
+Run the default checks:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo clippy -p crust-web --target wasm32-unknown-unknown --locked -- -D warnings
-cargo clippy -p crust-web --features browser-test-harness \
-  --target wasm32-unknown-unknown --locked -- -D warnings
-cargo test --workspace --all-targets --locked
-cargo build --workspace --release --locked
-cargo build --release --locked --target wasm32-unknown-unknown -p crust-web
-cargo build --release --locked --target wasm32-unknown-unknown -p crust-web \
-  --features browser-test-harness
+npm run fmt
+npm run lint
+npm run lint:wasm
+npm run lint:wasm:browser-harness
+npm test
+npm run build
+npm run verify:dist
+npm run build:browser-harness
+npm run verify:browser-harness
 ```
 
-`npm run build` additionally generates the unavoidable JavaScript/Wasm loader into ignored
-`dist/pkg/`. All authored engine, parsing, simulation, rendering, audio, input, and persistence
-logic is Rust. Static HTML/CSS and the small Wasm bootstrap are the only hand-authored web glue.
-The explicit harness feature is compiled and warnings-denied separately so its local-only browser
-verification API cannot escape the same release gates as the production Wasm artifact.
+Tests that use retail data are ignored by default. They require files from your own disc and must
+run locally. The repository and CI contain no retail game data.
+
+Before a public source release, also run:
+
+```bash
+bash scripts/check-public-release.sh --remote origin
+```
+
+This command checks the working tree and reachable Git history for prohibited game files, large
+blobs, unexpected binary media, and common credential patterns. It is a safety check, not a legal
+opinion.
+
+See [Development](docs/DEVELOPMENT.md) for all build, browser-harness, campaign-replay, emulator,
+and legally local test commands.
 
 ## Workspace
 
-- `crust-formats` — endian-explicit ISO9660, raw-sector, NSD/NSF, page, entry, EID, GOOL program and
-  animation descriptors, PBAK recordings, TGEO/SVTX/CVTX object models, ZDAT entity/path, stateful
-  SLST visibility, scene metadata and tagged-reference validation.
-- `crust-sim` — deterministic 30 Hz clock/presentation contract, checked GOOL program
-  binding/word machine, hosted retail entity runtime with state rebinding, bounded object arena,
-  source-ordered movement/solid physics, level/title flow, collision, camera, paging, demos, and
-  exact level-global reset, encountered-object registry and retail card payload/state handshakes.
-- `crust-renderer` — PSX texture/TPAG/UV decoding and cache, world and object fixed-point
-  projection/lighting/culling, safe GOOL sprite/fragment/text layout and projection, ordering,
-  zone shader modes, object-only fixed-camera substitution, clipping, blend passes, title
-  composition and WebGL2-ready commands.
-- `crust-audio` — SPU ADPCM with per-key-on predictor recurrence, retail 24-voice SFX
-  control/cache/mixer, sequence events, exact fixed-point four-point Gaussian interpolation and
-  sampled-voice ADSR, and a 44.1 kHz software synth.
-- `crust-platform` — keyboard/gamepad/touch mapping and versioned browser persistence envelopes.
-- `crust-web` — Blob-backed local imports, WebGL2/WebAudio presentation, browser storage and the
-  cooperative application loop.
+- `crust-formats` parses disc, stream, scene, model, animation, replay, and executable data.
+- `crust-sim` runs the deterministic 30 Hz game simulation and checked GOOL object runtime.
+- `crust-renderer` converts retail graphics data into safe rendering commands.
+- `crust-audio` decodes and mixes retail music and sound effects.
+- `crust-platform` maps input and stores versioned browser records.
+- `crust-web` connects local browser files, WebGL2, WebAudio, storage, and the application loop.
 
-Every crate forbids unsafe Rust. On-disk 32-bit offsets and tags remain typed values or validated
-handles; they are never reinterpreted as host pointers. See [Architecture](docs/ARCHITECTURE.md),
-[migration evidence](docs/MIGRATION.md), and [compatibility](docs/COMPATIBILITY.md).
+Every crate forbids unsafe Rust. Disc offsets and object references are checked before use; they
+are not treated as native pointers.
 
-## Data and legal boundary
+## Documentation
 
-The repository intentionally contains no proprietary or game-derived asset, disc sector,
-executable, art, audio, texture, or stream. Its original generated interface artwork is documented
-in [`artwork/PROVENANCE.md`](artwork/PROVENANCE.md). `*.bin`, `*.iso`, `*.nsd`, `*.nsf`, local data
-directories, build output, fuzz corpora, storage exports, caches, and captures are ignored. The two
-supported persistent records contain only the retail 128-byte progression/options payload:
+Start with the [documentation guide](docs/README.md). Important files include:
 
-- `c1.virtual-memory-card.v1` — 15 slots containing checksummed retail-format payloads.
-- `c1.browser-resume.v1` — one checksummed automatic resume record.
+- [Architecture](docs/ARCHITECTURE.md)
+- [Compatibility](docs/COMPATIBILITY.md)
+- [Development and verification commands](docs/DEVELOPMENT.md)
+- [Verification record](docs/VERIFICATION.md)
+- [Browser campaign replay contract](docs/BROWSER_CAMPAIGN_REPLAY.md)
+- [Migration evidence](docs/MIGRATION.md)
 
-Selected game files are not persisted and must be selected again after reload.
+## Project and data rights
+
+Tracked files contain code, tests, documentation, and four original CRUST interface images. They
+do not contain a retail disc image, BIOS, game executable, extracted stream, retail screenshot,
+recording, music, texture, model, save state, or other game-derived asset.
+
+Users are responsible for obtaining and using their own game data lawfully. Do not open an issue
+or pull request that contains game data or copyrighted game media.
+
+Read these files before publishing, redistributing, or contributing:
+
+- [License notice](LICENSE.md)
+- [Rights and licenses](RIGHTS_AND_LICENSES.md)
+- [Copyright and provenance notice](NOTICE.md)
+- [Third-party dependency notices](THIRD_PARTY_NOTICES.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security](SECURITY.md)

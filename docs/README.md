@@ -31,3 +31,5 @@ quick-start guides.
 - [Contributing](../CONTRIBUTING.md) explains what reports are welcome.
 - [Public release checklist](PUBLIC_RELEASE_CHECKLIST.md) is for maintainers preparing the
   repository for public visibility.
+- [Source-publication decision](PUBLICATION_DECISION.md) records the owner's chosen publication
+  boundary and the unresolved questions they accepted.

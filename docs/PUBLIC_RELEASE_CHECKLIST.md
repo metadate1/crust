@@ -19,7 +19,8 @@ game, compiled release, app package, or commercial product.
 
 - [ ] Read [RIGHTS_AND_LICENSES.md](../RIGHTS_AND_LICENSES.md).
 - [ ] Confirm that [NOTICE.md](../NOTICE.md) identifies every known source and technical reference.
-- [ ] Record who made the decision to publish despite any unresolved upstream or game-rights risk.
+- [x] The owner's decision and accepted boundary are recorded in
+  [PUBLICATION_DECISION.md](PUBLICATION_DECISION.md).
 - [ ] Get advice from a qualified lawyer if the project owner wants a legal opinion. Repository
   checks cannot provide one.
 

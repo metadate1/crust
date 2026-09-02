@@ -2341,7 +2341,7 @@ async function launchChrome(
         .match(/DevTools listening on (ws:\/\/\S+)/)?.[1];
     });
   }
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + 30_000;
   while (!webSocketUrl && Date.now() < deadline) {
     if (spawnError) {
       await removeTemporaryTree(profile);
@@ -2351,6 +2351,7 @@ async function launchChrome(
       await removeTemporaryTree(profile);
       throw new Error(`Chrome exited before DevTools was ready:\n${output.join("")}`);
     }
+    webSocketUrl = await readChromeDevToolsEndpoint(profile);
     await delay(25);
   }
   if (!webSocketUrl) {
@@ -2359,6 +2360,24 @@ async function launchChrome(
     throw new Error(`Chrome did not publish a DevTools endpoint:\n${output.join("")}`);
   }
   return { child, profile, webSocketUrl };
+}
+
+async function readChromeDevToolsEndpoint(profile) {
+  const activePort = await readFile(resolve(profile, "DevToolsActivePort"), "utf8").catch(
+    () => undefined,
+  );
+  if (activePort === undefined) return undefined;
+  const [rawPort, endpointPath] = activePort.trim().split(/\r?\n/, 2);
+  const port = Number(rawPort);
+  if (
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65_535 ||
+    !endpointPath?.startsWith("/devtools/browser/")
+  ) {
+    return undefined;
+  }
+  return `ws://127.0.0.1:${port}${endpointPath}`;
 }
 
 async function removeTemporaryTree(path) {

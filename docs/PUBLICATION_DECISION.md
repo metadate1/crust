@@ -28,5 +28,8 @@ The owner acknowledges the unresolved upstream and game-rights questions describ
 reduce the risk of publishing game data or secrets. They do not settle those rights questions or
 provide a legal opinion.
 
-Changing repository visibility remains a separate action. This record does not authorize a
-visibility change by itself.
+## 2026-09-05 authorization
+
+The owner explicitly directed the GitHub repository to be made public under the boundary above.
+This authorization covers repository visibility only. It does not add an open-source license,
+publish generated binaries or game data, or grant rights in third-party material.

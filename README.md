@@ -1,8 +1,8 @@
-# CRUST
+# CRUST — a Rust/WebAssembly runtime for Crash Bandicoot
 
-CRUST is a Rust and WebAssembly compatibility runtime for the original U.S. release of
-*Crash Bandicoot*. It runs in a web browser and reads game data from a disc image that the user
-selects on their own device.
+CRUST is an independent, source-available Rust and WebAssembly compatibility runtime for the
+original 1996 PlayStation release of *Crash Bandicoot*. It runs in a web browser and reads game
+data from a disc image that the user selects on their own device.
 
 CRUST does not include the game, a BIOS, extracted game files, or a download link for them. The
 browser does not upload or keep the selected game file. See [Privacy](PRIVACY.md) for the exact
